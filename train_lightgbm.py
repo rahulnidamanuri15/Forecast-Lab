@@ -33,7 +33,7 @@ def train_lightgbm_walkforward():
                 rows = cur.fetchall()
 
                 if not rows:
-                    print("❌ No data available for training")
+                    print("ERROR: No data available for training")
                     return None
 
                 print(f"Retrieved {len(rows)} samples for LightGBM training")
@@ -107,7 +107,7 @@ def train_lightgbm_walkforward():
                 mae = np.mean([abs(a - p) for a, p in zip(actuals, predictions)])
                 rmse = np.sqrt(np.mean([(a - p) ** 2 for a, p in zip(actuals, predictions)]))
 
-                print(f"\n📊 LightGBM Walk-Forward Backtest Results:")
+                print(f"\nLightGBM Walk-Forward Backtest Results:")
                 print(f"   Mean Absolute Error (MAE): {mae:.4f}")
                 print(f"   Root Mean Squared Error (RMSE): {rmse:.4f}")
                 print(f"   Number of predictions: {len(errors)}")
@@ -115,12 +115,12 @@ def train_lightgbm_walkforward():
                 print(f"   Improvement: {((7.3724 - mae) / 7.3724 * 100):.2f}%")
 
                 # Show first few predictions
-                print(f"\n🔍 First 5 predictions:")
+                print(f"\nFirst 5 predictions:")
                 for i in range(min(5, len(predictions))):
                     print(f"   Date: {dates[min_train_size + i]}, Actual: {actuals[i]:.2f}, Predicted: {predictions[i]:.2f}, Error: {errors[i]:.2f}")
 
                 # Show last few predictions
-                print(f"\n🔍 Last 5 predictions:")
+                print(f"\nLast 5 predictions:")
                 for i in range(max(0, len(predictions)-5), len(predictions)):
                     print(f"   Date: {dates[min_train_size + i]}, Actual: {actuals[i]:.2f}, Predicted: {predictions[i]:.2f}, Error: {errors[i]:.2f}")
 
@@ -134,10 +134,10 @@ def train_lightgbm_walkforward():
                 }
 
     except Exception as e:
-        print(f"❌ Error in LightGBM training: {e}")
+        print(f"Error in LightGBM training: {e}")
         raise
 
 if __name__ == "__main__":
     results = train_lightgbm_walkforward()
     if results:
-        print(f"\n✅ LightGBM MAE: {results['mae']:.4f}")
+        print(f"\nLightGBM MAE: {results['mae']:.4f}")

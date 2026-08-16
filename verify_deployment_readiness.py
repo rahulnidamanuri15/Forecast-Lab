@@ -35,33 +35,33 @@ def check_unique_constraints():
                 """)
                 feat_constraints = cur.fetchall()
 
-                print("🔒 Checking unique constraints:")
+                print("[INFO] Checking unique constraints:")
                 obs_city_as_of = [c for c in obs_constraints if set(c) == {'UNIQUE', 'city'} or set(c) == {'UNIQUE', 'as_of'}]
                 feat_city_as_of = [c for c in feat_constraints if set(c) == {'UNIQUE', 'city'} or set(c) == {'UNIQUE', 'as_of'}]
 
                 if len(obs_city_as_of) >= 2:
-                    print("   ✅ observations table has UNIQUE(city, as_of)")
+                    print("   [PASS] observations table has UNIQUE(city, as_of)")
                 else:
-                    print("   ❌ observations table missing UNIQUE(city, as_of)")
+                    print("   [FAIL] observations table missing UNIQUE(city, as_of)")
 
                 if len(feat_city_as_of) >= 2:
-                    print("   ✅ features table has UNIQUE(city, as_of)")
+                    print("   [PASS] features table has UNIQUE(city, as_of)")
                 else:
-                    print("   ❌ features table missing UNIQUE(city, as_of)")
+                    print("   [FAIL] features table missing UNIQUE(city, as_of)")
 
                 return len(obs_city_as_of) >= 2 and len(feat_city_as_of) >= 2
 
     except Exception as e:
-        print(f"❌ Error checking constraints: {e}")
+        print(f"[ERROR] Error checking constraints: {e}")
         return False
 
 def check_baseline_on_leaderboard():
     """Verify that naive baseline is in our leaderboard with known MAE"""
     # This is more of a logical check - we know from our backtest that baseline MAE is 7.3724
     # and our leaderboard endpoint returns this
-    print("\n🏆 Checking baseline on leaderboard:")
-    print("   ✅ From backtest: naive_baseline MAE = 7.3724")
-    print("   ✅ Leaderboard endpoint returns this value")
+    print("\n[INFO] Checking baseline on leaderboard:")
+    print("   [PASS] From backtest: naive_baseline MAE = 7.3724")
+    print("   [PASS] Leaderboard endpoint returns this value")
     return True  # We trust our backtest results
 
 def check_leakage_test():
@@ -69,65 +69,65 @@ def check_leakage_test():
     import subprocess
     import sys
 
-    print("\n🧪 Running leakage test:")
+    print("\n[INFO] Running leakage test:")
     try:
         result = subprocess.run([
             sys.executable, 'leakage_test.py'
         ], capture_output=True, text=True, cwd=os.getcwd())
 
         if result.returncode == 0:
-            print("   ✅ Leakage test PASSED")
+            print("   [PASS] Leakage test PASSED")
             return True
         else:
-            print("   ❌ Leakage test FAILED:")
+            print("   [FAIL] Leakage test FAILED:")
             print(result.stdout)
             print(result.stderr)
             return False
     except Exception as e:
-        print(f"❌ Error running leakage test: {e}")
+        print(f"[ERROR] Error running leakage test: {e}")
         return False
 
 def check_api_endpoints():
     """Check that our API endpoints are working"""
     import httpx
 
-    print("\n🌐 Checking API endpoints:")
+    print("\n[INFO] Checking API endpoints:")
     try:
         # Check forecast endpoint
         response = httpx.get('http://localhost:8000/forecast', timeout=5.0)
         if response.status_code == 200:
             data = response.json()
-            print(f"   ✅ /forecast: {data['forecast_date']} - {data['forecast_pm2_5']:.2f} PM2.5")
+            print(f"   [PASS] /forecast: {data['forecast_date']} - {data['forecast_pm2_5']:.2f} PM2.5")
         else:
-            print(f"   ❌ /forecast: status {response.status_code}")
+            print(f"   [FAIL] /forecast: status {response.status_code}")
             return False
 
         # Check leaderboard endpoint
         response = httpx.get('http://localhost:8000/leaderboard', timeout=5.0)
         if response.status_code == 200:
             data = response.json()
-            print(f"   ✅ /leaderboard: {len(data['leaderboard'])} models")
+            print(f"   [PASS] /leaderboard: {len(data['leaderboard'])} models")
         else:
-            print(f"   ❌ /leaderboard: status {response.status_code}")
+            print(f"   [FAIL] /leaderboard: status {response.status_code}")
             return False
 
         # Check history endpoint
         response = httpx.get('http://localhost:8000/history?days=7', timeout=5.0)
         if response.status_code == 200:
             data = response.json()
-            print(f"   ✅ /history: {len(data['historical_data'])} days")
+            print(f"   [PASS] /history: {len(data['historical_data'])} days")
         else:
-            print(f"   ❌ /history: status {response.status_code}")
+            print(f"   [FAIL] /history: status {response.status_code}")
             return False
 
         return True
     except Exception as e:
-        print(f"❌ Error checking API endpoints: {e}")
+        print(f"[ERROR] Error checking API endpoints: {e}")
         return False
 
 def main():
     """Run all deployment readiness checks"""
-    print("🚀 Checking deployment readiness for ML Forecasting")
+    print("Checking deployment readiness for ML Forecasting")
     print("=" * 50)
 
     checks = [
@@ -143,26 +143,26 @@ def main():
             result = check_func()
             results.append((name, result))
         except Exception as e:
-            print(f"❌ Error in {name}: {e}")
+            print(f"Error in {name}: {e}")
             results.append((name, False))
 
     print("\n" + "=" * 50)
-    print("📋 SUMMARY:")
+    print("SUMMARY:")
     all_passed = True
     for name, passed in results:
-        status = "✅ PASS" if passed else "❌ FAIL"
-        print(f"   {status} {name}")
+        status = "PASS" if passed else "FAIL"
+        print(f"   [{status}] {name}")
         if not passed:
             all_passed = False
 
-    print("\n🎯 GO-LIVE GATE STATUS:")
+    print("\nGO-LIVE GATE STATUS:")
     if all_passed:
-        print("   ✅ All automated checks PASSED")
-        print("   📝 Manual checks still needed:")
+        print("   All automated checks PASSED")
+        print("   Manual checks still needed:")
         print("      - Verify GitHub Actions crons have run unattended twice")
         print("      - Deploy to public URL (Render/Fly) and test on phone")
     else:
-        print("   ❌ Some checks FAILED - fix before proceeding")
+        print("   Some checks FAILED - fix before proceeding")
 
     return all_passed
 

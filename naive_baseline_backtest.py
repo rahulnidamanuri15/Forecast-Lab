@@ -28,7 +28,7 @@ def naive_baseline_backtest():
                 rows = cur.fetchall()
 
                 if not rows:
-                    print("❌ No data available for backtest")
+                    print("ERROR: No data available for backtest")
                     return None
 
                 print(f"Retrieved {len(rows)} days for backtest (excluding first day)")
@@ -51,19 +51,19 @@ def naive_baseline_backtest():
                 mae = sum(errors) / len(errors)
                 rmse = (sum(squared_errors) / len(squared_errors)) ** 0.5
 
-                print(f"\n📊 Naive Baseline Backtest Results:")
+                print(f"\nNaive Baseline Backtest Results:")
                 print(f"   Mean Absolute Error (MAE): {mae:.4f}")
                 print(f"   Root Mean Squared Error (RMSE): {rmse:.4f}")
                 print(f"   Number of predictions: {len(errors)}")
 
                 # Show first few predictions for sanity check
-                print(f"\n🔍 First 5 predictions:")
+                print(f"\nFirst 5 predictions:")
                 for i in range(min(5, len(rows))):
                     as_of, actual, predicted = rows[i]
                     print(f"   Date: {as_of}, Actual: {actual:.2f}, Predicted: {predicted:.2f}, Error: {abs(actual-predicted):.2f}")
 
                 # Show last few predictions
-                print(f"\n🔍 Last 5 predictions:")
+                print(f"\nLast 5 predictions:")
                 for i in range(max(0, len(rows)-5), len(rows)):
                     as_of, actual, predicted = rows[i]
                     print(f"   Date: {as_of}, Actual: {actual:.2f}, Predicted: {predicted:.2f}, Error: {abs(actual-predicted):.2f}")
@@ -78,10 +78,10 @@ def naive_baseline_backtest():
                 }
 
     except Exception as e:
-        print(f"❌ Error running backtest: {e}")
+        print(f"Error running backtest: {e}")
         raise
 
 if __name__ == "__main__":
     results = naive_baseline_backtest()
     if results:
-        print(f"\n✅ Baseline MAE: {results['mae']:.4f} - This is the benchmark to beat.")
+        print(f"\nBaseline MAE: {results['mae']:.4f} - This is the benchmark to beat.")

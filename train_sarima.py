@@ -28,7 +28,7 @@ def train_sarima_walkforward():
                 rows = cur.fetchall()
 
                 if not rows:
-                    print("❌ No data available for training")
+                    print("ERROR: No data available for training")
                     return None
 
                 print(f"Retrieved {len(rows)} samples for SARIMA training")
@@ -53,31 +53,28 @@ def train_sarima_walkforward():
                     y_true = y[i:i+1][0]  # Current actual value
 
                     try:
-                        # Fit SARIMA model
-                        # Using SARIMA(1,1,1)x(1,1,1,7) for weekly seasonality
+                        # Try a simpler SARIMA model first
                         model = SARIMAX(
                             y_train,
-                            order=(1, 1, 1),
-                            seasonal_order=(1, 1, 1, 7),
+                            order=(1, 1, 0),  # ARIMA(1,1,0)
                             enforce_stationarity=False,
                             enforce_invertibility=False
                         )
-                        fitted_model = model.fit(disp=False)
+                        fitted_model = model.fit(disp=False, maxiter=200)
 
                         # Forecast one step ahead
                         y_pred = fitted_model.forecast(steps=1)[0]
 
                     except Exception as model_error:
-                        # Fallback to simple model if SARIMA fails
+                        # Fallback to even simpler model
                         try:
-                            model = sm.tsa.statespace.SARIMAX(
+                            model = SARIMAX(
                                 y_train,
                                 order=(0, 1, 1),  # Simple exponential smoothing
-                                seasonal_order=(0, 0, 0, 0),
                                 enforce_stationarity=False,
                                 enforce_invertibility=False
                             )
-                            fitted_model = model.fit(disp=False)
+                            fitted_model = model.fit(disp=False, maxiter=200)
                             y_pred = fitted_model.forecast(steps=1)[0]
                         except:
                             # Final fallback to naive prediction
@@ -96,7 +93,7 @@ def train_sarima_walkforward():
                 mae = np.mean(errors)
                 rmse = np.sqrt(np.mean([e ** 2 for e in errors]))
 
-                print(f"\n📊 SARIMA Walk-Forward Backtest Results:")
+                print(f"\nSARIMA Walk-Forward Backtest Results:")
                 print(f"   Mean Absolute Error (MAE): {mae:.4f}")
                 print(f"   Root Mean Squared Error (RMSE): {rmse:.4f}")
                 print(f"   Number of predictions: {len(errors)}")
@@ -104,12 +101,12 @@ def train_sarima_walkforward():
                 print(f"   Improvement: {((7.3724 - mae) / 7.3724 * 100):.2f}%")
 
                 # Show first few predictions
-                print(f"\n🔍 First 5 predictions:")
+                print(f"\nFirst 5 predictions:")
                 for i in range(min(5, len(predictions))):
                     print(f"   Date: {dates[min_train_size + i]}, Actual: {actuals[i]:.2f}, Predicted: {predictions[i]:.2f}, Error: {errors[i]:.2f}")
 
                 # Show last few predictions
-                print(f"\n🔍 Last 5 predictions:")
+                print(f"\nLast 5 predictions:")
                 for i in range(max(0, len(predictions)-5), len(predictions)):
                     print(f"   Date: {dates[min_train_size + i]}, Actual: {actuals[i]:.2f}, Predicted: {predictions[i]:.2f}, Error: {errors[i]:.2f}")
 
@@ -123,10 +120,10 @@ def train_sarima_walkforward():
                 }
 
     except Exception as e:
-        print(f"❌ Error in SARIMA training: {e}")
+        print(f"Error in SARIMA training: {e}")
         raise
 
 if __name__ == "__main__":
     results = train_sarima_walkforward()
     if results:
-        print(f"\n✅ SARIMA MAE: {results['mae']:.4f}")
+        print(f"\nSARIMA MAE: {results['mae']:.4f}")

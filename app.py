@@ -104,9 +104,9 @@ async def get_leaderboard():
         },
         {
             "model": "sarima",
-            "mae": 7.6990,
-            "rmse": 10.2045,
-            "description": "SARIMA(1,1,1)x(1,1,1,7)"
+            "mae": 7.5602,
+            "rmse": 10.0756,
+            "description": "SARIMA(1,1,0) with fallback to SES"
         }
     ]
 
