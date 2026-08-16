@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ML Forecasting Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .chart-container {
+            position: relative;
+            height: 400px;
+            margin: 30px 0;
+        }
+        .leaderboard {
+            margin-top: 30px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        .forecast-badge {
+            background-color: #4CAF50;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        .model-naive { border-left: 4px solid #4CAF50; }
+        .model-lightgbm { border-left: 4px solid #2196F3; }
+        .model-sarima { border-left: 4px solid #FF9800; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Air Quality Forecasting Dashboard</h1>
+        <p>Nagpur, India • PM2.5 Levels (μg/m³)</p>
+
+        <!-- Forecast Section -->
+        <div id="forecast-section">
+            <h2>Tomorrow's Forecast</h2>
+            <div id="forecast">Loading forecast...</div>
+        </div>
+
+        <!-- Chart Section -->
+        <div class="chart-container">
+            <canvas id="pm25Chart"></canvas>
+        </div>
+
+        <!-- Leaderboard Section -->
+        <div class="leaderboard">
+            <h2>Model Performance Leaderboard</h2>
+            <p>Lower MAE (Mean Absolute Error) is better</p>
+            <table id="leaderboard">
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>MAE</th>
+                        <th>RMSE</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Leaderboard rows will be inserted here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // Chart.js instance
+        let pm25Chart;
+
+        // Fetch data from API endpoints
+        Promise.all([
+            fetch('http://localhost:8000/history?days=30')
+                .then(response => response.json()),
+            fetch('http://localhost:8000/forecast')
+                .then(response => response.json()),
+            fetch('http://localhost:8000/leaderboard')
+                .then(response => response.json())
+        ])
+        .then(([historyData, forecastData, leaderboardData]) => {
+            // Update forecast section
+            const forecastDiv = document.getElementById('forecast');
+            forecastDiv.innerHTML = `
+                <p><strong>Date:</strong> ${new Date(forecastData.forecast_date).toLocaleDateString()}</p>
+                <p><strong>Forecasted PM2.5:</strong> ${forecastData.forecast_pm2_5.toFixed(2)} μg/m³
+                   <span class="forecast-badge">${forecastData.model.replace('_', ' ').toUpperCase()}</span></p>
+                <p><em>Based on observation from ${new Date(forecastData.based_on_observation_date).toLocaleDateString()}
+                   (PM2.5: ${forecastData.observation_pm2_5.toFixed(2)} μg/m³)</em></p>
+            `;
+
+            // Prepare data for chart
+            const history = historyData.historical_data;
+            const dates = history.map(item => new Date(item.date));
+            const pm25Values = history.map(item => item.pm2_5);
+
+            // Add forecast point to the end
+            const forecastDate = new Date(forecastData.forecast_date);
+            const forecastValue = forecastData.forecast_pm2_5;
+
+            // Update chart
+            const ctx = document.getElementById('pm25Chart').getContext('2d');
+            if (pm25Chart) {
+                pm25Chart.destroy(); // Destroy previous chart if exists
+            }
+            pm25Chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: dates,
+                    datasets: [{
+                        label: 'Historical PM2.5',
+                        data: pm25Values,
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.3
+                    }, {
+                        label: 'Forecast',
+                        data: [null, ...pm25Values.slice(-1), forecastValue], // Show forecast as a continuation
+                        borderColor: '#e74c3c',
+                        backgroundColor: 'rgba(231, 76, 60, 0.1)',
+                        borderWidth: 3,
+                        borderDash: [5, 5],
+                        pointRadius: 5,
+                        pointBackgroundColor: '#e74c3c'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            ticks: {
+                                callback: value => value + ' μg/m³'
+                            }
+                        },
+                        x: {
+                            ticks: {
+                                // Format dates on x-axis
+                                callback: value => {
+                                    const date = new Date(value);
+                                    return date.toLocaleDateString();
+                                }
+                            }
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false
+                        },
+                        legend: {
+                            position: 'top'
+                        }
+                    }
+                }
+            });
+
+            // Populate leaderboard table
+            const leaderboardTbody = document.querySelector('#leaderboard tbody');
+            leaderboardData.leaderboard.forEach(model => {
+                const tr = document.createElement('tr');
+                tr.className = `model-${model.model}`;
+                tr.innerHTML = `
+                    <td>${model.model.replace('_', ' ').toUpperCase()}</td>
+                    <td>${model.mae.toFixed(4)}</td>
+                    <td>${model.rmse.toFixed(4)}</td>
+                    <td>${model.description}</td>
+                `;
+                leaderboardTbody.appendChild(tr);
+            });
+        })
+        .catch(error => {
+            console.error('Error fetching data:', error);
+            document.getElementById('forecast').textContent = 'Failed to load data. Is the API running?';
+            document.querySelector('.chart-container').innerHTML = '<p style="color:red; text-align:center; margin-top:50px;">Error loading chart data</p>';
+        });
+    </script>
+</body>
+</html>

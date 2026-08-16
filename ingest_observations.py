@@ -1,7 +1,7 @@
 import os
 import httpx
 import psycopg
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -120,23 +120,23 @@ def insert_observations(records):
                 # Execute batch insert
                 cur.executemany(insert_sql, records)
                 conn.commit()
-                print(f"✅ Successfully inserted {cur.rowcount} records")
+                print(f"Successfully inserted {cur.rowcount} records")
 
                 # Verify insertion
                 cur.execute("SELECT COUNT(*) FROM observations WHERE city = 'Nagpur'")
                 count = cur.fetchone()[0]
-                print(f"📊 Total Nagpur records in database: {count}")
+                print(f"Total Nagpur records in database: {count}")
 
     except Exception as e:
-        print(f"❌ Error inserting observations: {e}")
+        print(f"Error inserting observations: {e}")
         raise
 
 def main():
     """Main ingestion process"""
-    print("🚀 Starting observations ingestion...")
+    print("Starting observations ingestion...")
     records = fetch_and_aggregate_data()
     insert_observations(records)
-    print("✅ Ingestion completed!")
+    print("Ingestion completed!")
 
 if __name__ == "__main__":
     main()
