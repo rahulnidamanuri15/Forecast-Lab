@@ -17,7 +17,7 @@ def create_predictions_table():
         actual_pm2_5 FLOAT,
         model VARCHAR(50) DEFAULT 'naive_baseline',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(city, forecast_date)
+        UNIQUE(city, forecast_date, model)
     );
     """
 

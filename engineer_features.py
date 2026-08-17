@@ -1,6 +1,6 @@
 import os
 import psycopg
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -69,14 +69,33 @@ def engineer_features():
                 for i, row in enumerate(rows):
                     as_of, pm2_5, pm10, temp, wind, precip = row
 
-                    # Calculate lagged features (previous day's values)
+                    # Calculate lagged features (previous day's values).
+                    # If there's a gap in the observations (e.g. a missing day
+                    # from an upstream API outage), the row immediately before
+                    # this one in `rows` is NOT actually yesterday, so lag
+                    # features would silently pull in stale/wrong data. Rather
+                    # than crash the whole run, we skip the lag for this one
+                    # row (leave it NULL) and keep going.
                     if i > 0:
                         prev_row = rows[i-1]
-                        pm2_5_lag_1 = prev_row[1]  # pm2_5 from previous day
-                        pm10_lag_1 = prev_row[2]   # pm10 from previous day
-                        temperature_lag_1 = prev_row[3]  # temperature from previous day
-                        wind_speed_lag_1 = prev_row[4]   # wind from previous day
-                        precipitation_lag_1 = prev_row[5]  # precip from previous day
+                        prev_date = prev_row[0]
+
+                        if as_of - prev_date != timedelta(days=1):
+                            print(
+                                f"  Warning: date gap detected ({prev_date} -> {as_of}); "
+                                f"lag features for {as_of} will be NULL"
+                            )
+                            pm2_5_lag_1 = None
+                            pm10_lag_1 = None
+                            temperature_lag_1 = None
+                            wind_speed_lag_1 = None
+                            precipitation_lag_1 = None
+                        else:
+                            pm2_5_lag_1 = prev_row[1]  # pm2_5 from previous day
+                            pm10_lag_1 = prev_row[2]   # pm10 from previous day
+                            temperature_lag_1 = prev_row[3]  # temperature from previous day
+                            wind_speed_lag_1 = prev_row[4]   # wind from previous day
+                            precipitation_lag_1 = prev_row[5]  # precip from previous day
                     else:
                         pm2_5_lag_1 = None
                         pm10_lag_1 = None

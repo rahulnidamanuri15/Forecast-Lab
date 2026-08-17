@@ -1,7 +1,8 @@
 import os
+import sys
 import httpx
 import psycopg
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,10 +11,52 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Configuration - same as check-data.py
 LAT, LON = 21.1463, 79.0849          # Nagpur, India
-START, END = "2023-08-01", "2025-08-01"
+CITY = "Nagpur"
 
-def fetch_and_aggregate_data():
+# Fallback start date used only when the observations table is empty
+# (i.e. the very first run / initial backfill).
+INITIAL_START = "2023-08-01"
+
+
+def get_last_observed_date():
+    """Return the most recent as_of date already stored for this city, or None."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MAX(as_of) FROM observations WHERE city = %s",
+                (CITY,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+
+def resolve_date_range():
+    """
+    Decide what date range to fetch.
+
+    - First run (no data yet): backfill from INITIAL_START.
+    - Subsequent runs: resume the day after the latest stored observation.
+    - End date is always "yesterday", since the weather/air-quality
+      archive APIs are historical and may not have a complete record
+      for the current day yet.
+    """
+    last_date = get_last_observed_date()
+    yesterday = date.today() - timedelta(days=1)
+
+    if last_date is None:
+        start = datetime.strptime(INITIAL_START, "%Y-%m-%d").date()
+    else:
+        start = last_date + timedelta(days=1)
+
+    end = yesterday
+
+    return start, end
+
+
+def fetch_and_aggregate_data(start_date, end_date):
     """Fetch hourly AQ and daily weather data, aggregate to daily level"""
+    START, END = start_date.isoformat(), end_date.isoformat()
+
     print("Fetching air quality data...")
     aq_response = httpx.get("https://air-quality-api.open-meteo.com/v1/air-quality", params={
         "latitude": LAT, "longitude": LON, "hourly": "pm2_5,pm10",
@@ -88,7 +131,7 @@ def fetch_and_aggregate_data():
         pm10_avg = data['pm10_sum'] / data['pm10_count'] if data['pm10_count'] > 0 else None
 
         records_to_insert.append((
-            "Nagpur",  # city
+            CITY,      # city
             date_str,  # as_of
             pm2_5_avg,
             pm10_avg,
@@ -123,9 +166,9 @@ def insert_observations(records):
                 print(f"Successfully inserted {cur.rowcount} records")
 
                 # Verify insertion
-                cur.execute("SELECT COUNT(*) FROM observations WHERE city = 'Nagpur'")
+                cur.execute("SELECT COUNT(*) FROM observations WHERE city = %s", (CITY,))
                 count = cur.fetchone()[0]
-                print(f"Total Nagpur records in database: {count}")
+                print(f"Total {CITY} records in database: {count}")
 
     except Exception as e:
         print(f"Error inserting observations: {e}")
@@ -134,7 +177,24 @@ def insert_observations(records):
 def main():
     """Main ingestion process"""
     print("Starting observations ingestion...")
-    records = fetch_and_aggregate_data()
+
+    start_date, end_date = resolve_date_range()
+
+    if start_date > end_date:
+        print(
+            f"Nothing new to fetch: latest data already covers through "
+            f"{start_date - timedelta(days=1)}, and end date is capped at "
+            f"{end_date} (yesterday). Skipping."
+        )
+        return
+
+    print(f"Fetching data for {start_date} -> {end_date}")
+    records = fetch_and_aggregate_data(start_date, end_date)
+
+    if not records:
+        print("No records returned from APIs; nothing to insert.")
+        return
+
     insert_observations(records)
     print("Ingestion completed!")
 

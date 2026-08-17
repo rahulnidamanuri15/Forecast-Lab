@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VeriCast · Nagpur PM2.5 Forecasting</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-base: #14181C;
+    --bg-panel: #1B2126;
+    --bg-panel-raised: #212830;
+    --line: #2C343B;
+    --ink: #E9E6DF;
+    --ink-dim: #8B9299;
+    --ink-faint: #565F67;
+    --good: #7FA65C;
+    --warn: #D98E4A;
+    --alert: #C2543D;
+    --font-display: 'Space Grotesk', sans-serif;
+    --font-body: 'IBM Plex Sans', sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg-base);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.5;
+  }
+
+  a { color: inherit; }
+
+  :focus-visible {
+    outline: 2px solid var(--warn);
+    outline-offset: 2px;
+  }
+
+  .shell {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 20px 24px 60px;
+  }
+
+  /* ---------- status bar ---------- */
+  .statusbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 14px 4px 22px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 28px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .brand h1 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 20px;
+    letter-spacing: 0.02em;
+    margin: 0;
+  }
+
+  .brand span {
+    color: var(--ink-dim);
+    font-size: 13px;
+    font-family: var(--font-mono);
+  }
+
+  .live {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--good);
+    box-shadow: 0 0 0 3px rgba(127, 166, 92, 0.18);
+  }
+  .dot.stale { background: var(--warn); box-shadow: 0 0 0 3px rgba(217, 142, 74, 0.18); }
+  .dot.dead { background: var(--alert); box-shadow: 0 0 0 3px rgba(194, 84, 61, 0.18); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .dot:not(.dead) { animation: pulse 2.4s ease-in-out infinite; }
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+  }
+
+  /* ---------- hero ---------- */
+  .hero {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 28px 32px;
+    display: grid;
+    grid-template-columns: 1fr 260px;
+    gap: 20px;
+    align-items: center;
+    margin-bottom: 24px;
+  }
+
+  .hero-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin: 0 0 10px;
+  }
+
+  .hero-value {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 56px;
+    line-height: 1;
+    margin: 0 0 6px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .hero-value .unit {
+    font-size: 18px;
+    color: var(--ink-dim);
+    font-weight: 500;
+    font-family: var(--font-body);
+  }
+
+  .band-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    border: 1px solid currentColor;
+    margin-top: 6px;
+  }
+
+  .hero-meta {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+    margin-top: 14px;
+  }
+
+  /* gauge */
+  .gauge-wrap { display: flex; flex-direction: column; align-items: center; }
+  .gauge-caption {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: -6px;
+  }
+  #needle {
+    transform-origin: 120px 120px;
+    transition: transform 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #needle { transition: none; }
+  }
+
+  /* ---------- sections ---------- */
+  .panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px 22px;
+  }
+
+  .panel h2 {
+    font-family: var(--font-display);
+    font-size: 14px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+    margin: 0 0 16px;
+  }
+
+  .chart-panel { margin-bottom: 24px; }
+  .chart-container { position: relative; height: 320px; }
+
+  .grid-3 {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr 1.3fr;
+    gap: 20px;
+  }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; }
+    .gauge-wrap { order: -1; }
+    .grid-3 { grid-template-columns: 1fr; }
+  }
+
+  /* leaderboard */
+  .rank-row {
+    display: grid;
+    grid-template-columns: 24px 1fr auto;
+    gap: 10px;
+    align-items: baseline;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .rank-row:last-child { border-bottom: none; }
+  .rank-num {
+    font-family: var(--font-mono);
+    color: var(--ink-faint);
+    font-size: 13px;
+  }
+  .rank-model {
+    font-family: var(--font-body);
+    font-weight: 500;
+    font-size: 14px;
+  }
+  .rank-model small {
+    display: block;
+    color: var(--ink-faint);
+    font-size: 11px;
+    font-weight: 400;
+    margin-top: 2px;
+  }
+  .rank-mae {
+    font-family: var(--font-mono);
+    font-size: 15px;
+  }
+
+  /* evaluation stat cards */
+  .stat-card {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .stat-card:last-child { border-bottom: none; }
+  .stat-model {
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+  .stat-figures {
+    display: flex;
+    gap: 18px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+  }
+  .stat-figures b { color: var(--ink); font-size: 14px; }
+  .pending-note {
+    font-size: 11px;
+    color: var(--ink-faint);
+    margin-top: 4px;
+    font-family: var(--font-mono);
+  }
+
+  /* prediction log */
+  table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 12.5px; }
+  thead th {
+    text-align: left;
+    color: var(--ink-faint);
+    font-weight: 500;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0 8px 8px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  tbody td {
+    padding: 7px 8px 7px 0;
+    border-bottom: 1px solid var(--line);
+    color: var(--ink);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  .model-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10.5px;
+    border: 1px solid var(--line);
+    color: var(--ink-dim);
+  }
+  .err-ok { color: var(--good); }
+  .err-warn { color: var(--warn); }
+  .err-bad { color: var(--alert); }
+  .pending-cell { color: var(--ink-faint); }
+
+  .empty-state {
+    color: var(--ink-faint);
+    font-size: 13px;
+    padding: 20px 0;
+    text-align: center;
+  }
+
+  footer {
+    margin-top: 30px;
+    text-align: center;
+    color: var(--ink-faint);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="statusbar">
+    <div class="brand">
+      <h1>VeriCast</h1>
+      <span>NAGPUR · PM2.5 FORECASTING</span>
+    </div>
+    <div class="live" id="live-status">
+      <span class="dot" id="live-dot"></span>
+      <span id="live-text">checking data freshness…</span>
+    </div>
+  </div>
+
+  <div class="hero">
+    <div>
+      <p class="hero-eyebrow">Tomorrow's forecast</p>
+      <p class="hero-value" id="hero-value">— <span class="unit">μg/m³</span></p>
+      <span class="band-tag" id="hero-band" style="color:var(--ink-dim)">—</span>
+      <p class="hero-meta" id="hero-meta">Loading…</p>
+    </div>
+    <div class="gauge-wrap">
+      <svg viewBox="0 0 240 140" width="230" height="135" role="img" aria-label="PM2.5 forecast gauge">
+        <path d="M 20,120 A 100,100 0 0 1 61.22,39.10" fill="none" stroke="var(--good)" stroke-width="14" stroke-linecap="round"/>
+        <path d="M 61.22,39.10 A 100,100 0 0 1 150.90,24.89" fill="none" stroke="var(--warn)" stroke-width="14" stroke-linecap="round"/>
+        <path d="M 150.90,24.89 A 100,100 0 0 1 220,120" fill="none" stroke="var(--alert)" stroke-width="14" stroke-linecap="round"/>
+        <g id="needle">
+          <line x1="120" y1="120" x2="28" y2="120" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"/>
+          <circle cx="120" cy="120" r="6" fill="var(--ink)"/>
+        </g>
+      </svg>
+      <p class="gauge-caption">0 — 60 — 120 — 200+ μg/m³</p>
+    </div>
+  </div>
+
+  <div class="panel chart-panel">
+    <h2>Observed &amp; forecast, last 30 days</h2>
+    <div class="chart-container">
+      <canvas id="pm25Chart"></canvas>
+    </div>
+  </div>
+
+  <div class="grid-3">
+    <div class="panel">
+      <h2>Model leaderboard</h2>
+      <div id="leaderboard-body"><p class="empty-state">Loading…</p></div>
+    </div>
+
+    <div class="panel">
+      <h2>Rolling evaluation (30d)</h2>
+      <div id="evaluation-body"><p class="empty-state">Loading…</p></div>
+    </div>
+
+    <div class="panel">
+      <h2>Prediction log</h2>
+      <div id="predictions-body"><p class="empty-state">Loading…</p></div>
+    </div>
+  </div>
+
+  <footer>VeriCast · honest forecasting, no smoothing over an uncomfortable baseline</footer>
+</div>
+
+<script>
+  // Update this once the API is deployed (see verify_deployment_readiness.py notes).
+  const API_BASE = 'http://localhost:8000';
+
+  const AQI_BANDS = [
+    { max: 30,  label: 'GOOD',        color: 'var(--good)' },
+    { max: 60,  label: 'SATISFACTORY', color: 'var(--good)' },
+    { max: 90,  label: 'MODERATE',    color: 'var(--warn)' },
+    { max: 120, label: 'POOR',        color: 'var(--warn)' },
+    { max: 250, label: 'VERY POOR',   color: 'var(--alert)' },
+    { max: Infinity, label: 'SEVERE', color: 'var(--alert)' },
+  ];
+
+  function bandFor(value) {
+    return AQI_BANDS.find(b => value <= b.max) || AQI_BANDS[AQI_BANDS.length - 1];
+  }
+
+  function setGauge(value) {
+    const clamped = Math.max(0, Math.min(200, value));
+    const fraction = clamped / 200;
+    const needle = document.getElementById('needle');
+    needle.style.transform = `rotate(${fraction * 180}deg)`;
+  }
+
+  function fmt(n, d = 2) {
+    return (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
+  }
+
+  function relativeDay(dateStr) {
+    const d = new Date(dateStr + 'T00:00:00Z');
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const diffDays = Math.round((d - today) / 86400000);
+    if (diffDays === 0) return 'today';
+    if (diffDays === 1) return 'tomorrow';
+    if (diffDays === -1) return 'yesterday';
+    return d.toLocaleDateString();
+  }
+
+  async function fetchJSON(path) {
+    const res = await fetch(`${API_BASE}${path}`);
+    if (!res.ok) throw new Error(`${path} → ${res.status}`);
+    return res.json();
+  }
+
+  // ---------- status bar ----------
+  function renderStatus(latestObsDate) {
+    const dot = document.getElementById('live-dot');
+    const text = document.getElementById('live-text');
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const obs = new Date(latestObsDate + 'T00:00:00Z');
+    const staleDays = Math.round((today - obs) / 86400000);
+
+    if (staleDays <= 1) {
+      dot.className = 'dot';
+      text.textContent = `data current as of ${latestObsDate}`;
+    } else if (staleDays <= 3) {
+      dot.className = 'dot stale';
+      text.textContent = `data ${staleDays}d stale — last observation ${latestObsDate}`;
+    } else {
+      dot.className = 'dot dead';
+      text.textContent = `ingestion likely stalled — last observation ${latestObsDate} (${staleDays}d ago)`;
+    }
+  }
+
+  // ---------- hero ----------
+  function renderHero(forecast) {
+    const value = forecast.forecast_pm2_5;
+    const band = bandFor(value);
+    document.getElementById('hero-value').innerHTML = `${fmt(value)} <span class="unit">μg/m³</span>`;
+    const tag = document.getElementById('hero-band');
+    tag.textContent = band.label;
+    tag.style.color = band.color;
+    document.getElementById('hero-meta').textContent =
+      `${forecast.model.replace('_', ' ')} · for ${relativeDay(forecast.forecast_date)} `
+      + `(${forecast.forecast_date}) · based on ${forecast.based_on_observation_date}'s reading`;
+    setGauge(value);
+  }
+
+  // ---------- chart ----------
+  let chart;
+  function renderChart(history, forecast) {
+    const labels = history.historical_data.map(d => d.date);
+    const values = history.historical_data.map(d => d.pm2_5);
+
+    labels.push(forecast.forecast_date);
+    const forecastSeries = new Array(values.length - 1).fill(null)
+      .concat([values[values.length - 1], forecast.forecast_pm2_5]);
+    values.push(null);
+
+    const ctx = document.getElementById('pm25Chart').getContext('2d');
+    if (chart) chart.destroy();
+    chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Observed PM2.5',
+            data: values,
+            borderColor: '#6FA8B5',
+            backgroundColor: 'rgba(111, 168, 181, 0.08)',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.25,
+          },
+          {
+            label: 'Forecast',
+            data: forecastSeries,
+            borderColor: '#D98E4A',
+            borderWidth: 2,
+            borderDash: [4, 4],
+            pointRadius: (ctx) => ctx.dataIndex === forecastSeries.length - 1 ? 5 : 0,
+            pointBackgroundColor: '#D98E4A',
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { ticks: { color: '#8B9299', maxTicksLimit: 8 }, grid: { color: '#2C343B' } },
+          y: { ticks: { color: '#8B9299' }, grid: { color: '#2C343B' } },
+        },
+        plugins: {
+          legend: { labels: { color: '#E9E6DF', font: { family: 'IBM Plex Sans' } } },
+        },
+      },
+    });
+  }
+
+  // ---------- leaderboard ----------
+  function renderLeaderboard(data) {
+    const el = document.getElementById('leaderboard-body');
+    if (!data.leaderboard || !data.leaderboard.length) {
+      el.innerHTML = '<p class="empty-state">No scored models yet.</p>';
+      return;
+    }
+    el.innerHTML = data.leaderboard.map((m, i) => `
+      <div class="rank-row">
+        <span class="rank-num">${i + 1}</span>
+        <span class="rank-model">${m.model.replace('_', ' ')}<small>${m.description || ''} · as of ${m.as_of}</small></span>
+        <span class="rank-mae">${fmt(m.mae)}</span>
+      </div>
+    `).join('');
+  }
+
+  // ---------- evaluation ----------
+  function renderEvaluation(data) {
+    const el = document.getElementById('evaluation-body');
+    if (!data.evaluation || !data.evaluation.length) {
+      el.innerHTML = '<p class="empty-state">Not enough scored predictions yet.</p>';
+      return;
+    }
+    el.innerHTML = data.evaluation.map(e => `
+      <div class="stat-card">
+        <div class="stat-model">${e.model.replace('_', ' ')}</div>
+        <div class="stat-figures">
+          <span>MAE <b>${fmt(e.mae)}</b></span>
+          <span>RMSE <b>${fmt(e.rmse)}</b></span>
+        </div>
+        <div class="pending-note">${e.scored_count} scored${e.pending_count ? ` · ${e.pending_count} pending` : ''}</div>
+      </div>
+    `).join('');
+  }
+
+  // ---------- prediction log ----------
+  function errorClass(error) {
+    if (error === null || error === undefined) return '';
+    if (error < 5) return 'err-ok';
+    if (error < 10) return 'err-warn';
+    return 'err-bad';
+  }
+
+  function renderPredictions(data) {
+    const el = document.getElementById('predictions-body');
+    if (!data.predictions || !data.predictions.length) {
+      el.innerHTML = '<p class="empty-state">No predictions logged yet.</p>';
+      return;
+    }
+    const rows = data.predictions.slice(0, 12).map(p => `
+      <tr>
+        <td>${p.forecast_date}</td>
+        <td><span class="model-badge">${p.model.replace('_', ' ')}</span></td>
+        <td>${fmt(p.predicted_pm2_5, 1)}</td>
+        <td>${p.actual_pm2_5 === null ? '<span class="pending-cell">pending</span>' : fmt(p.actual_pm2_5, 1)}</td>
+        <td class="${errorClass(p.error)}">${p.error === null ? '—' : fmt(p.error, 1)}</td>
+      </tr>
+    `).join('');
+    el.innerHTML = `
+      <table>
+        <thead><tr><th>Date</th><th>Model</th><th>Pred</th><th>Actual</th><th>Err</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  // ---------- boot ----------
+  async function init() {
+    try {
+      const [history, forecast, leaderboard, evaluation, predictions] = await Promise.all([
+        fetchJSON('/history?days=30'),
+        fetchJSON('/forecast'),
+        fetchJSON('/leaderboard'),
+        fetchJSON('/evaluation?days=30'),
+        fetchJSON('/predictions?limit=12'),
+      ]);
+
+      const latestObsDate = history.historical_data[history.historical_data.length - 1].date;
+      renderStatus(latestObsDate);
+      renderHero(forecast);
+      renderChart(history, forecast);
+      renderLeaderboard(leaderboard);
+      renderEvaluation(evaluation);
+      renderPredictions(predictions);
+    } catch (err) {
+      console.error('Dashboard load error:', err);
+      document.getElementById('live-text').textContent = 'Failed to reach API — is it running?';
+      document.getElementById('live-dot').className = 'dot dead';
+    }
+  }
+
+  init();
+</script>
+</body>
+</html>

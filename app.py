@@ -9,6 +9,7 @@ from typing import List, Optional
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+CITY = "Nagpur"
 
 app = FastAPI(
     title="ML Forecasting API",
@@ -38,85 +39,250 @@ async def root():
         "endpoints": {
             "forecast": "/forecast",
             "leaderboard": "/leaderboard",
-            "history": "/history"
+            "history": "/history",
+            "predictions": "/predictions?model=lightgbm&limit=50&scored_only=false",
+            "evaluation": "/evaluation?days=30"
         }
     }
 
 @app.get("/forecast")
-async def get_forecast():
+async def get_forecast(model: str = "lightgbm"):
+    """Return the latest stored forecast for the requested model."""
+
+    allowed_models = {"lightgbm", "naive_baseline"}
+
+    if model not in allowed_models:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported model: {model}",
+        )
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        forecast_date,
+                        predicted_pm2_5,
+                        actual_pm2_5,
+                        model,
+                        created_at
+                    FROM predictions
+                    WHERE city = %s
+                      AND model = %s
+                    ORDER BY forecast_date DESC
+                    LIMIT 1
+                    """,
+                    (CITY, model),
+                )
+
+                row = cur.fetchone()
+
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No {model} forecast found",
+            )
+
+        forecast_date, predicted, actual, model_name, created_at = row
+
+        return {
+            "city": CITY,
+            "forecast_date": forecast_date.isoformat(),
+            "forecast_pm2_5": float(predicted),
+            "model": model_name,
+            "actual_pm2_5": (
+                float(actual) if actual is not None else None
+            ),
+            "status": "verified" if actual is not None else "pending",
+            "created_at": created_at.isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        ) from exc
+
+MODEL_DESCRIPTIONS = {
+    "naive_baseline": "Predict tomorrow's PM2.5 as today's PM2.5",
+    "lightgbm": "LightGBM with lagged and rolling features",
+    "sarima": "SARIMA(1,1,0) with fallback to SES",
+}
+
+@app.get("/leaderboard")
+async def get_leaderboard():
     """
-    Get the forecast for the next day using the naive baseline (yesterday's PM2.5).
-    Returns the forecasted PM2.5 for tomorrow based on today's observation.
+    Get the leaderboard of model performance, read live from model_performance.
+    For each model, returns its most recent scored MAE/RMSE (i.e. the latest
+    score_date on record for that model), not a fixed backtest snapshot.
     """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Get the most recent observation
+        # For each model, grab the row with the most recent score_date.
+        # DISTINCT ON is Postgres-specific and exactly fits "latest per group".
         cur.execute("""
-            SELECT as_of, pm2_5
-            FROM observations
-            WHERE city = 'Nagpur'
-            ORDER BY as_of DESC
-            LIMIT 1
+            SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
+            FROM model_performance
+            ORDER BY model, score_date DESC
         """)
-
-        row = cur.fetchone()
+        rows = cur.fetchall()
         cur.close()
         conn.close()
 
-        if not row:
-            raise HTTPException(status_code=404, detail="No observations found")
+        if not rows:
+            raise HTTPException(status_code=404, detail="No model performance data found")
 
-        as_of, pm2_5 = row
-        # The forecast for tomorrow (as_of + 1 day) is today's PM2_5 (naive baseline)
-        forecast_date = as_of + timedelta(days=1)
+        leaderboard = []
+        for model, mae, rmse, sample_size, score_date in rows:
+            leaderboard.append({
+                "model": model,
+                "mae": mae,
+                "rmse": rmse,
+                "sample_size": sample_size,
+                "as_of": score_date.isoformat(),
+                "description": MODEL_DESCRIPTIONS.get(model, ""),
+            })
+
+        # Sort by MAE (ascending) - lower is better
+        leaderboard.sort(key=lambda x: x["mae"])
 
         return {
-            "forecast_date": forecast_date.isoformat(),
-            "forecast_pm2_5": pm2_5,
-            "model": "naive_baseline",
-            "based_on_observation_date": as_of.isoformat(),
-            "observation_pm2_5": pm2_5
+            "leaderboard": leaderboard,
+            "note": "Lower MAE and RMSE indicate better performance. Each model shows its most recently scored metrics."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/predictions")
+async def get_predictions(
+    model: Optional[str] = None,
+    limit: int = 50,
+    scored_only: bool = False,
+):
+    """
+    Get individual prediction rows from the predictions table.
+
+    - model: filter to a single model (e.g. 'lightgbm'). Omit for all models.
+    - limit: max rows returned, most recent forecast_date first.
+    - scored_only: if true, only return rows where actual_pm2_5 is known.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        clauses = ["city = %s"]
+        params = ["Nagpur"]
+
+        if model:
+            clauses.append("model = %s")
+            params.append(model)
+
+        if scored_only:
+            clauses.append("actual_pm2_5 IS NOT NULL")
+
+        where_clause = " AND ".join(clauses)
+        params.append(limit)
+
+        cur.execute(f"""
+            SELECT forecast_date, model, predicted_pm2_5, actual_pm2_5, created_at
+            FROM predictions
+            WHERE {where_clause}
+            ORDER BY forecast_date DESC, model
+            LIMIT %s
+        """, params)
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        predictions = []
+        for forecast_date, model_name, predicted, actual, created_at in rows:
+            error = abs(actual - predicted) if actual is not None and predicted is not None else None
+            predictions.append({
+                "forecast_date": forecast_date.isoformat(),
+                "model": model_name,
+                "predicted_pm2_5": predicted,
+                "actual_pm2_5": actual,
+                "error": error,
+                "created_at": created_at.isoformat() if created_at else None,
+            })
+
+        return {
+            "predictions": predictions,
+            "count": len(predictions),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/leaderboard")
-async def get_leaderboard():
-    """
-    Get the leaderboard of model performance from our backtests.
-    Returns MAE and RMSE for each model we tested.
-    """
-    # These values are from our backtest runs
-    leaderboard = [
-        {
-            "model": "naive_baseline",
-            "mae": 7.3724,
-            "rmse": 9.8950,
-            "description": "Predict tomorrow's PM2.5 as today's PM2.5"
-        },
-        {
-            "model": "lightgbm",
-            "mae": 7.5459,
-            "rmse": 10.0399,
-            "description": "LightGBM with lagged and rolling features"
-        },
-        {
-            "model": "sarima",
-            "mae": 7.5602,
-            "rmse": 10.0756,
-            "description": "SARIMA(1,1,0) with fallback to SES"
-        }
-    ]
 
-    # Sort by MAE (ascending) - lower is better
-    leaderboard.sort(key=lambda x: x["mae"])
+@app.get("/evaluation")
+async def get_evaluation(days: int = 30):
+    """
+    Rolling evaluation: for each model, MAE/RMSE computed over predictions
+    scored within the last `days` days (based on forecast_date), plus how
+    many of those predictions are still pending an actual.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
 
-    return {
-        "leaderboard": leaderboard,
- "note": "Lower MAE and RMSE indicate better performance"
-    }
+        cur.execute("""
+            SELECT model, predicted_pm2_5, actual_pm2_5
+            FROM predictions
+            WHERE city = %s
+              AND forecast_date >= CURRENT_DATE - %s * INTERVAL '1 day'
+        """, ("Nagpur", days))
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="No predictions found in that window")
+
+        by_model = {}
+        for model_name, predicted, actual in rows:
+            by_model.setdefault(model_name, {"scored": [], "pending": 0})
+            if actual is not None and predicted is not None:
+                by_model[model_name]["scored"].append((predicted, actual))
+            else:
+                by_model[model_name]["pending"] += 1
+
+        evaluation = []
+        for model_name, data in by_model.items():
+            scored = data["scored"]
+            entry = {
+                "model": model_name,
+                "window_days": days,
+                "scored_count": len(scored),
+                "pending_count": data["pending"],
+            }
+            if scored:
+                errors = [abs(a - p) for p, a in scored]
+                squared_errors = [(a - p) ** 2 for p, a in scored]
+                entry["mae"] = sum(errors) / len(errors)
+                entry["rmse"] = (sum(squared_errors) / len(squared_errors)) ** 0.5
+            else:
+                entry["mae"] = None
+                entry["rmse"] = None
+            evaluation.append(entry)
+
+        evaluation.sort(key=lambda x: (x["mae"] is None, x["mae"]))
+
+        return {"evaluation": evaluation}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/history")
 async def get_history(days: int = 30):

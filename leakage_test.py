@@ -1,5 +1,6 @@
 import os
 import psycopg
+from datetime import timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -52,6 +53,18 @@ def run_leakage_test():
                 tolerance = 1e-9  # for floating point comparison
                 errors = []
 
+                def values_mismatch(a, b, tol=tolerance):
+                    """
+                    None-safe comparison. Returns True if the values disagree.
+                    Both None -> match. One None, other not -> mismatch.
+                    Otherwise compare numerically within tolerance.
+                    """
+                    if a is None and b is None:
+                        return False
+                    if a is None or b is None:
+                        return True
+                    return abs(a - b) > tol
+
                 for i, feat in enumerate(feat_rows):
                     as_of = feat[0]
                     # Same-day weather features (indices 13,14,15 in feat tuple)
@@ -66,47 +79,63 @@ def run_leakage_test():
                         continue
 
                     # Check same-day weather
-                    if abs(feat_temp - obs['temperature']) > tolerance:
+                    if values_mismatch(feat_temp, obs['temperature']):
                         errors.append(f"Date {as_of}: temperature mismatch: feature={feat_temp}, obs={obs['temperature']}")
-                    if abs(feat_wind - obs['wind']) > tolerance:
+                    if values_mismatch(feat_wind, obs['wind']):
                         errors.append(f"Date {as_of}: wind mismatch: feature={feat_wind}, obs={obs['wind']}")
-                    if abs(feat_precip - obs['precip']) > tolerance:
+                    if values_mismatch(feat_precip, obs['precip']):
                         errors.append(f"Date {as_of}: precipitation mismatch: feature={feat_precip}, obs={obs['precip']}")
 
                     # Check lagged features (indices 1-5 in feat tuple)
                     if i > 0:
                         prev_date = obs_dates[i-1]
                         prev_obs = obs_dict[prev_date]
-                        # pm2_5_lag_1
-                        if feat[1] is not None:
-                            if abs(feat[1] - prev_obs['pm2_5']) > tolerance:
+                        # If there's a gap (prev_date is not literally the day
+                        # before as_of), engineer_features.py intentionally
+                        # leaves the lag features NULL for this row instead of
+                        # pulling in a stale value. Expect NULLs, not a match.
+                        is_gap = (as_of - prev_date) != timedelta(days=1)
+                        if is_gap:
+                            # A gap means the lag features SHOULD be NULL for
+                            # this row. Flag it only if they aren't.
+                            for label, val in [
+                                ("pm2_5_lag_1", feat[1]),
+                                ("pm10_lag_1", feat[2]),
+                                ("temperature_lag_1", feat[3]),
+                                ("wind_speed_lag_1", feat[4]),
+                                ("precipitation_lag_1", feat[5]),
+                            ]:
+                                if val is not None:
+                                    errors.append(
+                                        f"Date {as_of}: {label} should be None across a "
+                                        f"date gap ({prev_date} -> {as_of}), got {val}"
+                                    )
+                        else:
+                            # pm2_5_lag_1
+                            if values_mismatch(feat[1], prev_obs['pm2_5']):
                                 errors.append(f"Date {as_of}: pm2_5_lag_1 mismatch: feature={feat[1]}, obs_previous={prev_obs['pm2_5']}")
-                        else:
-                            errors.append(f"Date {as_of}: pm2_5_lag_1 is None but previous day exists")
-                        # pm10_lag_1
-                        if feat[2] is not None:
-                            if abs(feat[2] - prev_obs['pm10']) > tolerance:
+                            elif feat[1] is None and prev_obs['pm2_5'] is not None:
+                                errors.append(f"Date {as_of}: pm2_5_lag_1 is None but previous day exists")
+                            # pm10_lag_1
+                            if values_mismatch(feat[2], prev_obs['pm10']):
                                 errors.append(f"Date {as_of}: pm10_lag_1 mismatch: feature={feat[2]}, obs_previous={prev_obs['pm10']}")
-                        else:
-                            errors.append(f"Date {as_of}: pm10_lag_1 is None but previous day exists")
-                        # temperature_lag_1
-                        if feat[3] is not None:
-                            if abs(feat[3] - prev_obs['temperature']) > tolerance:
+                            elif feat[2] is None and prev_obs['pm10'] is not None:
+                                errors.append(f"Date {as_of}: pm10_lag_1 is None but previous day exists")
+                            # temperature_lag_1
+                            if values_mismatch(feat[3], prev_obs['temperature']):
                                 errors.append(f"Date {as_of}: temperature_lag_1 mismatch: feature={feat[3]}, obs_previous={prev_obs['temperature']}")
-                        else:
-                            errors.append(f"Date {as_of}: temperature_lag_1 is None but previous day exists")
-                        # wind_speed_lag_1
-                        if feat[4] is not None:
-                            if abs(feat[4] - prev_obs['wind']) > tolerance:
+                            elif feat[3] is None and prev_obs['temperature'] is not None:
+                                errors.append(f"Date {as_of}: temperature_lag_1 is None but previous day exists")
+                            # wind_speed_lag_1
+                            if values_mismatch(feat[4], prev_obs['wind']):
                                 errors.append(f"Date {as_of}: wind_speed_lag_1 mismatch: feature={feat[4]}, obs_previous={prev_obs['wind']}")
-                        else:
-                            errors.append(f"Date {as_of}: wind_speed_lag_1 is None but previous day exists")
-                        # precipitation_lag_1
-                        if feat[5] is not None:
-                            if abs(feat[5] - prev_obs['precip']) > tolerance:
+                            elif feat[4] is None and prev_obs['wind'] is not None:
+                                errors.append(f"Date {as_of}: wind_speed_lag_1 is None but previous day exists")
+                            # precipitation_lag_1
+                            if values_mismatch(feat[5], prev_obs['precip']):
                                 errors.append(f"Date {as_of}: precipitation_lag_1 mismatch: feature={feat[5]}, obs_previous={prev_obs['precip']}")
-                        else:
-                            errors.append(f"Date {as_of}: precipitation_lag_1 is None but previous day exists")
+                            elif feat[5] is None and prev_obs['precip'] is not None:
+                                errors.append(f"Date {as_of}: precipitation_lag_1 is None but previous day exists")
                     else:
                         # First row should have null lagged features
                         if feat[1] is not None or feat[2] is not None or feat[3] is not None or feat[4] is not None or feat[5] is not None:

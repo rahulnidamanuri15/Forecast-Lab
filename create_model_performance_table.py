@@ -16,7 +16,8 @@ def create_model_performance_table():
         mae FLOAT,
         rmse FLOAT,
         sample_size INTEGER,  -- Number of predictions used to compute the metrics
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(score_date, model)
     );
     """
 
