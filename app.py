@@ -3,13 +3,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Optional
+
+import local_time
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-CITY = "Nagpur"
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable is not set")
+
+CITY = os.getenv("CITY", "Nagpur")
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
 
 app = FastAPI(
     title="ML Forecasting API",
@@ -17,18 +22,31 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# Add CORS middleware to allow cross-origin requests (for the HTML page)
+# Configure CORS. Read-only public GET API: no cookies or auth headers, so
+# allow_credentials stays off and only GET is permitted. FRONTEND_ORIGIN must
+# name the real deployed origin in production - empty means no browser origin
+# is allowed at all, which is the safe default rather than "*".
+origins = []
+if FRONTEND_ORIGIN:
+    origins = [origin.strip() for origin in FRONTEND_ORIGIN.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=origins,
+    allow_credentials=False,
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
 def get_db_connection():
     """Create a new database connection"""
     return psycopg.connect(DATABASE_URL)
+
+
+def db_error(exc: Exception) -> HTTPException:
+    """500 without leaking the raw database exception to the client."""
+    print(f"[error] {type(exc).__name__}: {exc}")  # goes to server logs only
+    return HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/")
 async def root():
@@ -102,15 +120,11 @@ async def get_forecast(model: str = "lightgbm"):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        ) from exc
+        raise db_error(exc)
 
 MODEL_DESCRIPTIONS = {
     "naive_baseline": "Predict tomorrow's PM2.5 as today's PM2.5",
     "lightgbm": "LightGBM with lagged and rolling features",
-    "sarima": "SARIMA(1,1,0) with fallback to SES",
 }
 
 @app.get("/leaderboard")
@@ -159,7 +173,7 @@ async def get_leaderboard():
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise db_error(e)
 
 
 @app.get("/predictions")
@@ -176,52 +190,49 @@ async def get_predictions(
     - scored_only: if true, only return rows where actual_pm2_5 is known.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                clauses = ["city = %s"]
+                params = [CITY]
 
-        clauses = ["city = %s"]
-        params = ["Nagpur"]
+                if model:
+                    clauses.append("model = %s")
+                    params.append(model)
 
-        if model:
-            clauses.append("model = %s")
-            params.append(model)
+                if scored_only:
+                    clauses.append("actual_pm2_5 IS NOT NULL")
 
-        if scored_only:
-            clauses.append("actual_pm2_5 IS NOT NULL")
+                where_clause = " AND ".join(clauses)
+                params.append(limit)
 
-        where_clause = " AND ".join(clauses)
-        params.append(limit)
+                cur.execute(f"""
+                    SELECT forecast_date, model, predicted_pm2_5, actual_pm2_5, created_at
+                    FROM predictions
+                    WHERE {where_clause}
+                    ORDER BY forecast_date DESC, model
+                    LIMIT %s
+                """, params)
 
-        cur.execute(f"""
-            SELECT forecast_date, model, predicted_pm2_5, actual_pm2_5, created_at
-            FROM predictions
-            WHERE {where_clause}
-            ORDER BY forecast_date DESC, model
-            LIMIT %s
-        """, params)
+                rows = cur.fetchall()
 
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+                predictions = []
+                for forecast_date, model_name, predicted, actual, created_at in rows:
+                    error = abs(actual - predicted) if actual is not None and predicted is not None else None
+                    predictions.append({
+                        "forecast_date": forecast_date.isoformat(),
+                        "model": model_name,
+                        "predicted_pm2_5": predicted,
+                        "actual_pm2_5": actual,
+                        "error": error,
+                        "created_at": created_at.isoformat() if created_at else None,
+                    })
 
-        predictions = []
-        for forecast_date, model_name, predicted, actual, created_at in rows:
-            error = abs(actual - predicted) if actual is not None and predicted is not None else None
-            predictions.append({
-                "forecast_date": forecast_date.isoformat(),
-                "model": model_name,
-                "predicted_pm2_5": predicted,
-                "actual_pm2_5": actual,
-                "error": error,
-                "created_at": created_at.isoformat() if created_at else None,
-            })
-
-        return {
-            "predictions": predictions,
-            "count": len(predictions),
-        }
+                return {
+                    "predictions": predictions,
+                    "count": len(predictions),
+                }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise db_error(e)
 
 
 @app.get("/evaluation")
@@ -235,12 +246,14 @@ async def get_evaluation(days: int = 30):
         conn = get_db_connection()
         cur = conn.cursor()
 
+        # Window is anchored to the app timezone (see local_time.py), not
+        # Postgres's CURRENT_DATE, which is GMT on Neon.
         cur.execute("""
             SELECT model, predicted_pm2_5, actual_pm2_5
             FROM predictions
             WHERE city = %s
-              AND forecast_date >= CURRENT_DATE - %s * INTERVAL '1 day'
-        """, ("Nagpur", days))
+              AND forecast_date >= %s - %s * INTERVAL '1 day'
+        """, (CITY, local_time.today(), days))
 
         rows = cur.fetchall()
         cur.close()
@@ -282,7 +295,8 @@ async def get_evaluation(days: int = 30):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise db_error(e)
+
 
 @app.get("/history")
 async def get_history(days: int = 30):
@@ -299,10 +313,10 @@ async def get_history(days: int = 30):
         cur.execute("""
             SELECT as_of, pm2_5, pm10, temperature_2m_mean, wind_speed_10m_max, precipitation_sum
             FROM observations
-            WHERE city = 'Nagpur'
+            WHERE city = %s
             ORDER BY as_of DESC
             LIMIT %s
-        """, (days,))
+        """, (CITY, days))
 
         rows = cur.fetchall()
         cur.close()
@@ -329,10 +343,25 @@ async def get_history(days: int = 30):
         return {
             "historical_data": history,
             "days_returned": len(history),
-            "city": "Nagpur"
+            "city": CITY
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise db_error(e)
+
+
+@app.get("/health")
+async def health():
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", (CITY,))
+                latest = cur.fetchone()[0]
+        stale_days = (local_time.today() - latest).days
+        return {"status": "ok", "latest_observation": latest.isoformat(), "stale_days": stale_days}
+    except Exception as e:
+        print(f"[error] health check failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=503, detail="Service unavailable")
+
 
 if __name__ == "__main__":
     # This is for development - in production, use uvicorn app:app --host 0.0.0.0 --port 8000

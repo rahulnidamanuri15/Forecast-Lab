@@ -330,13 +330,13 @@
     </div>
     <div class="live" id="live-status">
       <span class="dot" id="live-dot"></span>
-      <span id="live-text">checking data freshness…</span>
+      <span id="live-text">initializing…</span>
     </div>
   </div>
 
   <div class="hero">
     <div>
-      <p class="hero-eyebrow">Tomorrow's forecast</p>
+      <p class="hero-eyebrow" id="hero-eyebrow">Next-day PM2.5 concentration</p>
       <p class="hero-value" id="hero-value">— <span class="unit">μg/m³</span></p>
       <span class="band-tag" id="hero-band" style="color:var(--ink-dim)">—</span>
       <p class="hero-meta" id="hero-meta">Loading…</p>
@@ -364,7 +364,7 @@
 
   <div class="grid-3">
     <div class="panel">
-      <h2>Model leaderboard</h2>
+      <h2>Latest scored day</h2>
       <div id="leaderboard-body"><p class="empty-state">Loading…</p></div>
     </div>
 
@@ -383,20 +383,38 @@
 </div>
 
 <script>
-  // Update this once the API is deployed (see verify_deployment_readiness.py notes).
-  const API_BASE = 'http://localhost:8000';
+  // API base URL. Change the fallback to the deployed Render URL when going
+  // live (no trailing slash). Overridable at runtime via window.API_BASE so the
+  // same file works locally without an edit.
+  const API_BASE = (window.API_BASE || 'http://localhost:8000').replace(/\/$/, '');
 
-  const AQI_BANDS = [
-    { max: 30,  label: 'GOOD',        color: 'var(--good)' },
-    { max: 60,  label: 'SATISFACTORY', color: 'var(--good)' },
-    { max: 90,  label: 'MODERATE',    color: 'var(--warn)' },
-    { max: 120, label: 'POOR',        color: 'var(--warn)' },
-    { max: 250, label: 'VERY POOR',   color: 'var(--alert)' },
-    { max: Infinity, label: 'SEVERE', color: 'var(--alert)' },
+  // Raw PM2.5 concentration bands (μg/m³). Deliberately NOT the CPCB AQI
+  // categories: AQI is a transformed index, and this dashboard publishes the
+  // concentration the model actually predicts. Naming them GOOD/POOR/SEVERE
+  // would claim an AQI computation we don't do.
+  const PM25_BANDS = [
+    { max: 30,  label: 'LOW',       color: 'var(--good)' },
+    { max: 60,  label: 'MODERATE',  color: 'var(--good)' },
+    { max: 90,  label: 'ELEVATED',  color: 'var(--warn)' },
+    { max: 120, label: 'HIGH',      color: 'var(--warn)' },
+    { max: 250, label: 'VERY HIGH', color: 'var(--alert)' },
+    { max: Infinity, label: 'EXTREME', color: 'var(--alert)' },
   ];
 
   function bandFor(value) {
-    return AQI_BANDS.find(b => value <= b.max) || AQI_BANDS[AQI_BANDS.length - 1];
+    return PM25_BANDS.find(b => value <= b.max) || PM25_BANDS[PM25_BANDS.length - 1];
+  }
+
+  // "Today" in the operating timezone, matching local_time.py on the backend.
+  // en-CA gives YYYY-MM-DD, which is what every API date already looks like.
+  function todayLocal() {
+    return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  }
+
+  function daysBetween(fromDateStr, toDateStr) {
+    const a = new Date(fromDateStr + 'T00:00:00Z');
+    const b = new Date(toDateStr + 'T00:00:00Z');
+    return Math.round((b - a) / 86400000);
   }
 
   function setGauge(value) {
@@ -411,41 +429,56 @@
   }
 
   function relativeDay(dateStr) {
-    const d = new Date(dateStr + 'T00:00:00Z');
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    const diffDays = Math.round((d - today) / 86400000);
+    const diffDays = daysBetween(todayLocal(), dateStr);
     if (diffDays === 0) return 'today';
     if (diffDays === 1) return 'tomorrow';
     if (diffDays === -1) return 'yesterday';
-    return d.toLocaleDateString();
+    return new Date(dateStr + 'T00:00:00Z').toLocaleDateString();
   }
 
   async function fetchJSON(path) {
-    const res = await fetch(`${API_BASE}${path}`);
-    if (!res.ok) throw new Error(`${path} → ${res.status}`);
+    let res;
+    try {
+      res = await fetch(`${API_BASE}${path}`);
+    } catch (networkErr) {
+      const err = new Error(`${path} → network error (API unreachable)`);
+      err.kind = 'network';
+      err.path = path;
+      throw err;
+    }
+    if (!res.ok) {
+      const err = new Error(`${path} → ${res.status}`);
+      err.kind = res.status === 404 ? 'not_found' : 'http';
+      err.status = res.status;
+      err.path = path;
+      throw err;
+    }
     return res.json();
   }
 
   // ---------- status bar ----------
+  // Three states, per the roadmap: LIVE (data current), STALE (data lagging),
+  // OFFLINE (API unreachable - set by init()'s catch, not here).
   function renderStatus(latestObsDate) {
     const dot = document.getElementById('live-dot');
     const text = document.getElementById('live-text');
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    const obs = new Date(latestObsDate + 'T00:00:00Z');
-    const staleDays = Math.round((today - obs) / 86400000);
+    const staleDays = daysBetween(latestObsDate, todayLocal());
 
     if (staleDays <= 1) {
       dot.className = 'dot';
-      text.textContent = `data current as of ${latestObsDate}`;
+      text.textContent = `LIVE · data current as of ${latestObsDate}`;
     } else if (staleDays <= 3) {
       dot.className = 'dot stale';
-      text.textContent = `data ${staleDays}d stale — last observation ${latestObsDate}`;
+      text.textContent = `STALE · data ${staleDays}d behind — last observation ${latestObsDate}`;
     } else {
       dot.className = 'dot dead';
-      text.textContent = `ingestion likely stalled — last observation ${latestObsDate} (${staleDays}d ago)`;
+      text.textContent = `STALE · ingestion likely stalled — last observation ${latestObsDate} (${staleDays}d ago)`;
     }
+  }
+
+  function setOffline(message) {
+    document.getElementById('live-dot').className = 'dot dead';
+    document.getElementById('live-text').textContent = `OFFLINE · ${message}`;
   }
 
   // ---------- hero ----------
@@ -456,9 +489,27 @@
     const tag = document.getElementById('hero-band');
     tag.textContent = band.label;
     tag.style.color = band.color;
-    document.getElementById('hero-meta').textContent =
-      `${forecast.model.replace('_', ' ')} · for ${relativeDay(forecast.forecast_date)} `
-      + `(${forecast.forecast_date}) · based on ${forecast.based_on_observation_date}'s reading`;
+
+    // The VeriCast story: a published forecast is either still awaiting its
+    // actual, or verified against it. Say which, and show the error once known.
+    const verified = forecast.status === 'verified' && forecast.actual_pm2_5 !== null;
+    const eyebrow = document.getElementById('hero-eyebrow');
+    eyebrow.textContent = verified
+      ? `Verified forecast for ${forecast.forecast_date}`
+      : `Published forecast for ${forecast.forecast_date} · awaiting verification`;
+
+    const obsDateStr = new Date(new Date(forecast.forecast_date + 'T00:00:00Z') - 86400000)
+      .toISOString().slice(0, 10);
+
+    let meta = `${forecast.model.replace('_', ' ')} · for ${relativeDay(forecast.forecast_date)} `
+      + `· based on ${obsDateStr}'s reading`;
+    if (verified) {
+      const err = Math.abs(forecast.actual_pm2_5 - value);
+      meta += ` · actual ${fmt(forecast.actual_pm2_5)} μg/m³ · error ${fmt(err)}`;
+    } else {
+      meta += ' · actual not yet observed';
+    }
+    document.getElementById('hero-meta').textContent = meta;
     setGauge(value);
   }
 
@@ -525,7 +576,7 @@
     el.innerHTML = data.leaderboard.map((m, i) => `
       <div class="rank-row">
         <span class="rank-num">${i + 1}</span>
-        <span class="rank-model">${m.model.replace('_', ' ')}<small>${m.description || ''} · as of ${m.as_of}</small></span>
+        <span class="rank-model">${m.model.replace('_', ' ')}<small>${m.description || ''} · ${m.sample_size} scored on ${m.as_of}</small></span>
         <span class="rank-mae">${fmt(m.mae)}</span>
       </div>
     `).join('');
@@ -582,27 +633,48 @@
   }
 
   // ---------- boot ----------
+  // Each panel loads independently: a 404 on /leaderboard must not blank the
+  // forecast. Only history+forecast are treated as core; if those fail the
+  // status bar goes OFFLINE, the rest just show their own empty state.
+  function panelError(id, err) {
+    const msg = err.kind === 'network'
+      ? 'API unreachable.'
+      : err.kind === 'not_found'
+        ? 'No data yet — pipeline may not have run.'
+        : `API error (${err.status || 'unknown'}).`;
+    document.getElementById(id).innerHTML = `<p class="empty-state">${msg}</p>`;
+  }
+
+  function load(path, id, render) {
+    return fetchJSON(path).then(render).catch(err => {
+      console.error(path, err);
+      panelError(id, err);
+    });
+  }
+
   async function init() {
+    load('/leaderboard', 'leaderboard-body', renderLeaderboard);
+    load('/evaluation?days=30', 'evaluation-body', renderEvaluation);
+    load('/predictions?model=lightgbm&limit=12', 'predictions-body', renderPredictions);
+
     try {
-      const [history, forecast, leaderboard, evaluation, predictions] = await Promise.all([
+      const [history, forecast] = await Promise.all([
         fetchJSON('/history?days=30'),
-        fetchJSON('/forecast'),
-        fetchJSON('/leaderboard'),
-        fetchJSON('/evaluation?days=30'),
-        fetchJSON('/predictions?limit=12'),
+        fetchJSON('/forecast?model=lightgbm'),
       ]);
 
       const latestObsDate = history.historical_data[history.historical_data.length - 1].date;
       renderStatus(latestObsDate);
       renderHero(forecast);
       renderChart(history, forecast);
-      renderLeaderboard(leaderboard);
-      renderEvaluation(evaluation);
-      renderPredictions(predictions);
     } catch (err) {
-      console.error('Dashboard load error:', err);
-      document.getElementById('live-text').textContent = 'Failed to reach API — is it running?';
-      document.getElementById('live-dot').className = 'dot dead';
+      console.error('Core dashboard load failed:', err);
+      setOffline(
+        err.kind === 'network' ? 'failed to reach API — is it running?'
+        : err.kind === 'not_found' ? `no data yet for ${err.path} — pipeline may not have run`
+        : `API error on ${err.path || 'load'} (${err.status || 'unknown'})`
+      );
+      document.getElementById('hero-meta').textContent = 'Forecast unavailable.';
     }
   }
 

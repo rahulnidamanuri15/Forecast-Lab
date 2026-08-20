@@ -1,12 +1,12 @@
 name: Weekly Model Retrain
 
 # Retrains the production LightGBM model on all data accumulated so far and
-# commits the updated artifact back to the repo. daily-prediction.yml checks
-# out the repo fresh on every run, so it will automatically pick up whatever
+# commits the updated artifact back to the repo. daily-pipeline.yml checks out
+# the repo fresh on every run, so it will automatically pick up whatever
 # lightgbm_model.txt is committed here - no changes needed there.
 on:
   schedule:
-    - cron: '0 4 * * 0'  # 4:00 AM UTC every Sunday, before the 5am ingest / 6am predict / 7am score chain
+    - cron: '0 4 * * 0'  # 04:00 UTC every Sunday, an hour before the daily pipeline
   workflow_dispatch: {}   # allow manual runs from the Actions tab
 
 permissions:

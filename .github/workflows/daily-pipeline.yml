@@ -1,0 +1,48 @@
+name: Daily Pipeline
+
+# One job, one order. The steps are dependent - actuals must be ingested
+# before yesterday's forecast can be scored - so they run sequentially in a
+# single job instead of as three separate crons that only *hoped* the
+# previous one had finished. Any step failing stops the job (Actions default),
+# which is what we want: a bad forecast is worse than no forecast.
+#
+# Replaces the old ingest.yml / daily-prediction.yml / daily-scoring.yml.
+on:
+  schedule:
+    - cron: "0 5 * * *"  # 05:00 UTC = 10:30 IST, by which the archive APIs have yesterday
+  workflow_dispatch: {}
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      CITY: Nagpur
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 1/6 Ingest observations
+        run: python ingest_observations.py
+
+      - name: 2/6 Engineer features
+        run: python engineer_features.py
+
+      - name: 3/6 Leakage test
+        run: python leakage_test.py
+
+      - name: 4/6 Score pending predictions
+        run: python score_predictions.py
+
+      - name: 5/6 Make new forecast
+        run: python make_prediction.py
+
+      - name: 6/6 Verify forecast is publishable
+        run: python diagnose_lightgbm_forecast.py

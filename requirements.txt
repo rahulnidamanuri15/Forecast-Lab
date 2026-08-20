@@ -1,9 +1,15 @@
+# Production runtime + test deps. Kept minimal so the Docker image stays small.
 httpx==0.28.1
 psycopg[binary]==3.2.3
-pandas==2.2.3
+numpy==2.4.6
 python-dotenv==1.0.1
 lightgbm==4.5.0
-statsmodels==0.14.4
 fastapi==0.115.6
 uvicorn==0.34.0
 pytest==8.3.4
+# python:*-slim ships without a tz database; Asia/Kolkata (see local_time.py)
+# fails without this.
+tzdata==2026.3
+
+# Dropped: pandas (nothing imports it), statsmodels (only experiments/train_sarima.py,
+# which is not on the production path - pip install statsmodels to run it).

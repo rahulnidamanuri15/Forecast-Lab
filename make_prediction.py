@@ -1,8 +1,10 @@
 import os
 import psycopg
 import lightgbm as lgb
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 from dotenv import load_dotenv
+
+import local_time
 
 load_dotenv()
 
@@ -23,7 +25,7 @@ def load_lightgbm_model():
     """Load the production model artifact. Returns None if it hasn't been
     trained yet, so the pipeline degrades to naive-only instead of crashing."""
     if not os.path.exists(MODEL_PATH):
-        print(f"⚠️ No LightGBM model artifact found at {MODEL_PATH}; "
+        print(f"[WARN] No LightGBM model artifact found at {MODEL_PATH}; "
               f"skipping LightGBM forecast. Run train_production_model.py first.")
         return None
     return lgb.Booster(model_file=MODEL_PATH)
@@ -51,9 +53,9 @@ def make_daily_prediction():
 
         lgbm_model = load_lightgbm_model()
 
-        # Real-world "today" (in UTC to match our data), used only to detect
-        # staleness and to drive yesterday's scoring step below.
-        today = datetime.now(timezone.utc).date()
+        # Real-world "today" in the operating timezone (see local_time.py),
+        # used only to detect staleness and to drive yesterday's scoring below.
+        today = local_time.today()
         yesterday = today - timedelta(days=1)
 
         # Get the most recent observation
@@ -81,7 +83,7 @@ def make_daily_prediction():
         if as_of != yesterday:
             staleness_days = (today - as_of).days
             print(
-                f"⚠️ Warning: most recent observation is from {as_of}, which is "
+                f"[WARN] Warning: most recent observation is from {as_of}, which is "
                 f"{staleness_days} day(s) old (expected data through {yesterday}). "
                 f"Ingestion may not be running. Forecasting for {forecast_date} "
                 f"based on stale data instead of for {today + timedelta(days=1)}."
@@ -104,7 +106,7 @@ def make_daily_prediction():
         cur.execute(upsert_sql, (CITY, forecast_date, pm2_5, "naive_baseline"))
         conn.commit()
 
-        print(f"✅ Stored naive_baseline prediction for {forecast_date}: {pm2_5:.2f} PM2.5")
+        print(f"[OK] Stored naive_baseline prediction for {forecast_date}: {pm2_5:.2f} PM2.5")
 
         # LightGBM prediction, if a trained artifact is available.
         # Uses the latest features row (as_of == as_of of latest observation),
@@ -112,19 +114,19 @@ def make_daily_prediction():
         if lgbm_model is not None:
             feature_row = get_latest_feature_row(cur)
             if feature_row is None:
-                print("⚠️ No features row found; skipping LightGBM forecast.")
+                print("[WARN] No features row found; skipping LightGBM forecast.")
             else:
                 feat_as_of = feature_row[0]
                 feature_values = feature_row[1:]
 
                 if feat_as_of != as_of:
                     print(
-                        f"⚠️ Latest features row ({feat_as_of}) doesn't match latest "
+                        f"[WARN] Latest features row ({feat_as_of}) doesn't match latest "
                         f"observation ({as_of}); has engineer_features.py been run for "
                         f"today's data yet? Skipping LightGBM forecast."
                     )
                 elif any(v is None for v in feature_values):
-                    print("⚠️ Latest features row has NULL values (likely a date gap); "
+                    print("[WARN] Latest features row has NULL values (likely a date gap); "
                           "skipping LightGBM forecast to avoid a garbage prediction.")
                 else:
                     import numpy as np
@@ -133,7 +135,7 @@ def make_daily_prediction():
 
                     cur.execute(upsert_sql, (CITY, forecast_date, lgbm_pred, "lightgbm"))
                     conn.commit()
-                    print(f"✅ Stored lightgbm prediction for {forecast_date}: {lgbm_pred:.2f} PM2.5")
+                    print(f"[OK] Stored lightgbm prediction for {forecast_date}: {lgbm_pred:.2f} PM2.5")
 
         # Now check if we have actuals for yesterday's forecast(s) and update those
         # records. There can be more than one row for `yesterday` now (one per
@@ -173,12 +175,12 @@ def make_daily_prediction():
                     cur.execute(update_sql, (actual_pm2_5, CITY, yesterday, model_name))
                     conn.commit()
                     error = abs(actual_pm2_5 - predicted_pm2_5)
-                    print(f"✅ Updated {model_name} forecast for {yesterday}: "
+                    print(f"[OK] Updated {model_name} forecast for {yesterday}: "
                           f"predicted={predicted_pm2_5:.2f}, actual={actual_pm2_5:.2f}, error={error:.2f}")
             else:
-                print(f"⚠️ No actual observation found for {yesterday} yet")
+                print(f"[WARN] No actual observation found for {yesterday} yet")
         else:
-            print(f"ℹ️ No pending forecast to update for {yesterday}")
+            print(f"[INFO] No pending forecast to update for {yesterday}")
 
         cur.close()
         conn.close()
@@ -186,7 +188,7 @@ def make_daily_prediction():
         return True
 
     except Exception as e:
-        print(f"❌ Error making prediction: {e}")
+        print(f"[FAIL] Error making prediction: {e}")
         raise
 
 if __name__ == "__main__":

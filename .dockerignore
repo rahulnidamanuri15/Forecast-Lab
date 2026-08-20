@@ -1,0 +1,11 @@
+myenv/
+.git/
+.github/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+.env
+tests/
+experiments/
+*.md
+index.html

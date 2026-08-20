@@ -101,7 +101,7 @@ def train_and_save():
     model = lgb.train(PARAMS, train_data, num_boost_round=100)
 
     model.save_model(MODEL_PATH)
-    print(f"✅ Saved production model to {MODEL_PATH}")
+    print(f"[OK] Saved production model to {MODEL_PATH}")
 
     # Sanity check: reload and confirm predictions are reproducible
     reloaded = lgb.Booster(model_file=MODEL_PATH)

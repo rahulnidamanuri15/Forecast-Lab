@@ -1,92 +1,106 @@
-# ML Forecasting - Air Quality Prediction
+# VeriCast — PM2.5 forecasting for Nagpur
 
-A simple, honest forecasting system for PM2.5 levels in Nagpur, India.
-
-## Overview
-
-This project implements a minimal viable forecasting system that:
-- Collects hourly air quality and daily weather data from Open-Meteo APIs
-- Stores data in PostgreSQL
-- Engineers features (lags, rolling averages, time-based)
-- Compares models: naive baseline, LightGBM, SARIMA
-- Provides a REST API and simple dashboard
-- Includes automated daily predictions and scoring via GitHub Actions
-
-## Go-Live Status
-
-✅ **All gates passed**:
-- Leakage test: PASSED
-- Unique constraints: Applied to observations and features tables
-- Baseline on leaderboard: naive_baseline MAE = 7.3724
-- Crons: Configured to run predictions at 6AM UTC, scoring at 7AM UTC
-- Public URL: Local server running at http://localhost:8000
+Next-day PM2.5 concentration forecasts that are **published first and verified later**.
+Every forecast is written to the database before its actual is knowable, then scored
+against the observation when it arrives. Nothing is retro-fitted.
 
 ## Architecture
 
 ```
-Data Collection → Observations Table → Features Engineering → Features Table
-                                    ↘
-                                     → Models (Baseline, LightGBM, SARIMA)
-                                    ↙
-                         API Endpoints ← Dashboard (HTML + Chart.js)
-                         ↑
-               GitHub Actions (Daily Prediction & Scoring)
+Open-Meteo  →  observations  →  engineer_features.py  →  features
+                                                            ↓
+                                    LightGBM / naive baseline
+                                                            ↓
+                        predictions  →  FastAPI  →  dashboard (Chart.js)
+                             ↑
+                    score_predictions.py (joins observations on forecast_date)
 ```
 
-## Key Files
+All application-level date decisions ("today", "yesterday", forecast date, scoring
+date) go through `local_time.py`, which is fixed to **Asia/Kolkata**. PostgreSQL
+timestamps stay timezone-aware.
 
-- `check_data.py` - Verifies sufficient data is available
-- `create_observations_table.py` / `ingest_observations.py` - Data pipeline
-- `create_features_table.py` / `engineer_features.py` - Feature engineering
-- `leakage_test.py` - Verifies no data leakage
-- `naive_baseline_backtest.py` - Establishes performance benchmark
-- `train_lightgbm.py` / `train_sarima.py` - Model implementations
-- `app.py` - FastAPI server with `/forecast`, `/leaderboard`, `/history`
-- `index.html` - Simple dashboard with Chart.js
-- `.github/workflows/` - Automated prediction (6AM) and scoring (7AM)
+## Model performance
 
-## API Endpoints
+Live full-record numbers, computed from every scored row in `predictions`
+(2023-09-02 → 2026-08-20):
 
-- `GET /` - API info
-- `GET /forecast` - Next day PM2.5 forecast (naive baseline)
-- `GET /leaderboard` - Model performance comparison
-- `GET /history?days=30` - Last N days of observations
+| Model | Scored | MAE (μg/m³) | RMSE (μg/m³) | Description |
+|-------|--------|------|------|-------------|
+| lightgbm | 704 | **9.54** | 12.48 | LightGBM on lagged + rolling + weather features |
+| naive_baseline | 705 | 11.06 | 14.44 | Predict tomorrow's PM2.5 as today's PM2.5 |
 
-## Deployment
+LightGBM beats the naive baseline by **~13.7% MAE**. That margin is the whole point:
+persistence is a genuinely hard baseline for daily air quality, and a model that
+can't beat it isn't worth deploying.
 
-For production deployment to Render, Fly.io, or similar:
+Reproduce the frozen walk-forward benchmark with `python experiments/compare_models.py`
+(n=700, MAE 9.5798 vs 11.0962 — consistent with the live record above).
 
-1. Set `DATABASE_URL` environment variable to your PostgreSQL connection string
-2. The GitHub Actions will automatically:
-   - Make predictions daily at 6AM UTC
-   - Score predictions daily at 7AM UTC (once actuals are available)
-3. Visit `/docs` for interactive API documentation
+## Files
 
-## Model Performance (from backtesting)
+Production path (root):
 
-| Model | MAE | RMSE | Description |
-|-------|-----|------|-------------|
-| naive_baseline | 7.3724 | 9.8950 | Predict tomorrow's PM2.5 as today's PM2.5 |
-| lightgbm | 7.5459 | 10.0399 | LightGBM with lagged/rolling features |
-| sarima | 7.6990 | 10.2045 | SARIMA(1,1,1)x(1,1,1,7) |
+- `ingest_observations.py` — pull new Open-Meteo data into `observations`
+- `engineer_features.py` — build lag/rolling/calendar features into `features`
+- `leakage_test.py` — assert no feature row sees data past its own `as_of`
+- `train_production_model.py` — retrain and write `lightgbm_model.txt`
+- `make_prediction.py` — write tomorrow's forecast for both models
+- `score_predictions.py` — fill in `actual_pm2_5` for every pending row, upsert `model_performance`
+- `diagnose_lightgbm_forecast.py` — refuse to publish an unfit forecast (non-zero exit)
+- `app.py` — FastAPI service
+- `index.html` — dashboard
+- `local_time.py` — the only source of "today"
+- `verify_deployment_readiness.py` — the single go-live gate
 
-*Note: The naive baseline is surprisingly hard to beat with this data and feature set - this is honest forecasting.*
+Not on the production path: `experiments/` (`compare_models.py`,
+`naive_baseline_backtest.py`, `train_lightgbm.py`, `train_sarima.py`,
+`save_backtest_results.py`) and `tests/`.
 
-## Next Steps (Post-Deploy)
+## API
 
-Following the plan:
-- **September**: Add `/health` endpoint showing hours since last scoring (detect cron failures)
-- **October**: Add second city OR multi-day horizon (not both)
-- **November**: Add prediction intervals + coverage check
-- **December**: README with live numbers + 60-second demo video
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /health` | Latest observation date + staleness in days |
+| `GET /forecast?model=lightgbm` | Latest stored forecast, with `status: pending\|verified` |
+| `GET /history?days=30` | Recent observations |
+| `GET /leaderboard` | Most recent scored day per model |
+| `GET /evaluation?days=30` | Rolling-window MAE/RMSE, scored vs pending counts |
+| `GET /predictions?model=lightgbm&limit=12` | Prediction log with errors |
 
-## Honesty Statement
+Interactive docs at `/docs`. All values are raw PM2.5 concentration in μg/m³ —
+**not** AQI. No AQI transform is computed anywhere in this system.
 
-This system intentionally keeps things simple:
-- No attempt to hide that the naive baseline is competitive
-- No over-engineering - we stop at the first solution that works
-- Clear separation of concerns: data → features → models → API
-- All numbers are explainable from memory (we know where every metric comes from)
-- If deployed, it will provide real value while we continue learning elsewhere
+## Automation
 
-*"The best code is the code never written." - We've written only what was necessary.*
+- `.github/workflows/daily-pipeline.yml` — one sequential job, fail-fast:
+  ingest → engineer features → leakage test → score pending → make forecast → verify.
+  Scoring runs *before* forecasting because yesterday's actual has to exist first.
+- `.github/workflows/weekly-retrain.yml` — Sundays: retrain and commit
+  `lightgbm_model.txt` back to the repo, which the daily pipeline picks up on its
+  next checkout.
+
+`score_predictions.py` scores *every* pending row, not just yesterday's, so a
+missed run self-heals on the next one instead of leaving a permanent NULL.
+
+## Running it
+
+```bash
+cp .env.example .env          # then fill in DATABASE_URL
+pip install -r requirements.txt
+python -m pytest tests -q
+uvicorn app:app --host 0.0.0.0 --port 8000
+python verify_deployment_readiness.py   # must print ALL CHECKS PASSED
+```
+
+Docker:
+
+```bash
+docker build -t vericast-api .
+docker run -p 8000:8000 -e DATABASE_URL=... -e CITY=Nagpur -e FRONTEND_ORIGIN=... vericast-api
+```
+
+Environment variables: `DATABASE_URL` (required), `CITY` (default `Nagpur`),
+`FRONTEND_ORIGIN` (comma-separated allowed origins; empty means no browser origin
+is allowed — there is no `*` fallback). `API_BASE` optionally points
+`verify_deployment_readiness.py` at a deployed instance instead of localhost.

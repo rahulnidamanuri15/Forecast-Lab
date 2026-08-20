@@ -1,9 +1,10 @@
 import os
-import sys
 import httpx
 import psycopg
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
+
+import local_time
 
 load_dotenv()
 
@@ -41,7 +42,7 @@ def resolve_date_range():
       for the current day yet.
     """
     last_date = get_last_observed_date()
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = local_time.yesterday()
 
     if last_date is None:
         start = datetime.strptime(INITIAL_START, "%Y-%m-%d").date()
