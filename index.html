@@ -386,7 +386,7 @@
   // API base URL. Change the fallback to the deployed Render URL when going
   // live (no trailing slash). Overridable at runtime via window.API_BASE so the
   // same file works locally without an edit.
-  const API_BASE = (window.API_BASE || 'http://localhost:8000').replace(/\/$/, '');
+  const API_BASE = (window.API_BASE || 'https://forecast-lab-2l0q.onrender.com').replace(/\/$/, '');
 
   // Raw PM2.5 concentration bands (μg/m³). Deliberately NOT the CPCB AQI
   // categories: AQI is a transformed index, and this dashboard publishes the
