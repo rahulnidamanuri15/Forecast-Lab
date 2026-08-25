@@ -55,7 +55,15 @@ def resolve_date_range():
 
 
 def fetch_and_aggregate_data(start_date, end_date):
-    """Fetch hourly AQ and daily weather data, aggregate to daily level"""
+    """Fetch hourly AQ and daily weather data, aggregate to daily level.
+
+    pm2_5/pm10 here are CAMS *reanalysis* (a model), not ground-station
+    readings — the scoring target is a model estimate, not measured air. Chosen for
+    gap-free coverage over 2023->present, which is what makes the publish-then-verify
+    record clean. Upgrade path: swap the air-quality call below for OpenAQ (CPCB
+    stations, free key) and handle its gaps; this is the only function that touches
+    the AQ source.
+    """
     START, END = start_date.isoformat(), end_date.isoformat()
 
     print("Fetching air quality data...")

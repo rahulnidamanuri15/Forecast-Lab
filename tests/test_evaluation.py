@@ -93,3 +93,54 @@ def test_evaluation_endpoint_database_error():
         assert response.status_code == 500
         data = response.json()
         assert "detail" in data
+
+
+def test_evaluation_full_record_omits_window():
+    """No days= means every prediction ever published, and window_days is null."""
+    with patch('app.get_db_connection') as mock_get_db:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_get_db.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+
+        mock_cursor.fetchall.return_value = [
+            ('lightgbm', 15.0, 14.5),
+            ('lightgbm', 16.0, 15.8),
+        ]
+
+        response = client.get("/evaluation")
+
+        assert response.status_code == 200
+        entry = response.json()["evaluation"][0]
+        assert entry["window_days"] is None
+        assert entry["scored_count"] == 2
+
+        # The full-record query must not filter on forecast_date at all.
+        sql = mock_cursor.execute.call_args[0][0]
+        assert "forecast_date" not in sql
+
+
+def test_evaluation_rejects_negative_days():
+    """days=-1 is a client error, not a silently-empty window."""
+    response = client.get("/evaluation?days=-1")
+    assert response.status_code == 400
+
+
+def test_evaluation_sorts_unscored_models_last():
+    """A model with no scored rows must not blow up the sort."""
+    with patch('app.get_db_connection') as mock_get_db:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_get_db.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+
+        # Both models are entirely pending -> two None maes.
+        mock_cursor.fetchall.return_value = [
+            ('lightgbm', 15.0, None),
+            ('naive_baseline', 12.0, None),
+        ]
+
+        response = client.get("/evaluation?days=7")
+
+        assert response.status_code == 200
+        assert all(e["mae"] is None for e in response.json()["evaluation"])
