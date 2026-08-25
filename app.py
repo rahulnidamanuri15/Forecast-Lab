@@ -236,31 +236,52 @@ async def get_predictions(
 
 
 @app.get("/evaluation")
-async def get_evaluation(days: int = 30):
+async def get_evaluation(days: Optional[int] = None):
     """
-    Rolling evaluation: for each model, MAE/RMSE computed over predictions
-    scored within the last `days` days (based on forecast_date), plus how
-    many of those predictions are still pending an actual.
+    Accuracy over published predictions, grouped by model.
+
+    Default (no `days`) is the full record - every prediction ever published.
+    That is the headline MAE the README quotes, and the only figure that should
+    be used for accuracy claims. Pass `days=N` for a rolling window instead
+    (`days=0` is also the full record).
     """
+    if days is not None and days < 0:
+        raise HTTPException(status_code=400, detail="days must be >= 0")
+
+    full_record = not days  # None or 0
+
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
         # Window is anchored to the app timezone (see local_time.py), not
         # Postgres's CURRENT_DATE, which is GMT on Neon.
-        cur.execute("""
-            SELECT model, predicted_pm2_5, actual_pm2_5
-            FROM predictions
-            WHERE city = %s
-              AND forecast_date >= %s - %s * INTERVAL '1 day'
-        """, (CITY, local_time.today(), days))
+        if full_record:
+            cur.execute("""
+                SELECT model, predicted_pm2_5, actual_pm2_5
+                FROM predictions
+                WHERE city = %s
+            """, (CITY,))
+        else:
+            cur.execute("""
+                SELECT model, predicted_pm2_5, actual_pm2_5
+                FROM predictions
+                WHERE city = %s
+                  AND forecast_date >= %s - %s * INTERVAL '1 day'
+            """, (CITY, local_time.today(), days))
 
         rows = cur.fetchall()
         cur.close()
         conn.close()
 
         if not rows:
-            raise HTTPException(status_code=404, detail="No predictions found in that window")
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No predictions found" if full_record
+                    else "No predictions found in that window"
+                ),
+            )
 
         by_model = {}
         for model_name, predicted, actual in rows:
@@ -275,7 +296,7 @@ async def get_evaluation(days: int = 30):
             scored = data["scored"]
             entry = {
                 "model": model_name,
-                "window_days": days,
+                "window_days": None if full_record else days,
                 "scored_count": len(scored),
                 "pending_count": data["pending"],
             }
@@ -289,7 +310,9 @@ async def get_evaluation(days: int = 30):
                 entry["rmse"] = None
             evaluation.append(entry)
 
-        evaluation.sort(key=lambda x: (x["mae"] is None, x["mae"]))
+        # Unscored models sort last. inf rather than a (is_none, mae) tuple:
+        # two None maes would make that tuple compare None < None -> TypeError.
+        evaluation.sort(key=lambda x: float("inf") if x["mae"] is None else x["mae"])
 
         return {"evaluation": evaluation}
     except HTTPException:

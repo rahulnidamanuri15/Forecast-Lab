@@ -819,7 +819,9 @@
     </div>
   </div>
 
-  <footer>VERICAST · Verified Next-Day Air Quality Intelligence</footer>
+  <footer>VERICAST · Verified Next-Day Air Quality Intelligence<br>
+    <span style="font-size: 0.85em; color: var(--text-faint)">Observations: Open-Meteo / CAMS reanalysis — modelled, not ground-station measurements.</span>
+  </footer>
 
 </div>
 
@@ -850,12 +852,13 @@
 
   async function initDashboard() {
     try {
-      const [health, forecast, history, leaderboard, evaluation, predictions] = await Promise.all([
+      const [health, forecast, history, evaluation, predictions] = await Promise.all([
         fetchJSON('/health').catch(() => null),
         fetchJSON('/forecast?model=lightgbm').catch(() => null),
         fetchJSON('/history?days=30').catch(() => null),
-        fetchJSON('/leaderboard').catch(() => null),
-        fetchJSON('/evaluation?days=30').catch(() => null),
+        // No days= -> full record. /leaderboard reports only the most recent
+        // scored day (n=1), which is not the headline accuracy claim.
+        fetchJSON('/evaluation').catch(() => null),
         fetchJSON('/predictions?model=lightgbm&limit=15').catch(() => null),
       ]);
 
@@ -891,19 +894,19 @@
         document.getElementById('hero-change-desc').innerHTML = `<b>${sign}${pctDiff}% vs today</b> · Based on latest observation`;
       }
 
-      // 4. Leaderboard & Model Comparison
-      if (leaderboard && leaderboard.leaderboard) {
-        const lgb = leaderboard.leaderboard.find(m => m.model === 'lightgbm');
-        const naive = leaderboard.leaderboard.find(m => m.model === 'naive_baseline');
+      // 4. Full-record accuracy & model comparison
+      if (evaluation && evaluation.evaluation) {
+        const lgb = evaluation.evaluation.find(m => m.model === 'lightgbm');
+        const naive = evaluation.evaluation.find(m => m.model === 'naive_baseline');
 
-        if (lgb && naive) {
+        if (lgb && naive && lgb.mae != null && naive.mae != null) {
           const lgbMae = lgb.mae;
           const naiveMae = naive.mae;
           const improvement = (((naiveMae - lgbMae) / naiveMae) * 100).toFixed(1);
 
           document.getElementById('kpi-mae-val').innerHTML = `${fmt(lgbMae, 2)} <span class="unit">vs ${fmt(naiveMae, 2)}</span>`;
-          document.getElementById('kpi-record-val').textContent = lgb.sample_size || '705';
-          document.getElementById('metric-total-scored').textContent = lgb.sample_size || '705';
+          document.getElementById('kpi-record-val').textContent = lgb.scored_count;
+          document.getElementById('metric-total-scored').textContent = lgb.scored_count;
 
           document.getElementById('metric-lgb-mae').textContent = fmt(lgbMae, 2);
           document.getElementById('metric-lgb-rmse').textContent = fmt(lgb.rmse, 2);

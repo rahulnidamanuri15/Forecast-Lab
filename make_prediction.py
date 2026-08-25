@@ -54,7 +54,7 @@ def make_daily_prediction():
         lgbm_model = load_lightgbm_model()
 
         # Real-world "today" in the operating timezone (see local_time.py),
-        # used only to detect staleness and to drive yesterday's scoring below.
+        # used only to detect staleness in the warning below.
         today = local_time.today()
         yesterday = today - timedelta(days=1)
 
@@ -137,50 +137,11 @@ def make_daily_prediction():
                     conn.commit()
                     print(f"[OK] Stored lightgbm prediction for {forecast_date}: {lgbm_pred:.2f} PM2.5")
 
-        # Now check if we have actuals for yesterday's forecast(s) and update those
-        # records. There can be more than one row for `yesterday` now (one per
-        # model - naive_baseline, lightgbm, ...), so this must handle all of them,
-        # not just the first one found.
-        cur.execute("""
-            SELECT model, predicted_pm2_5
-            FROM predictions
-            WHERE city = %s
-              AND forecast_date = %s
-              AND actual_pm2_5 IS NULL
-        """, (CITY, yesterday))
-
-        pending_rows = cur.fetchall()
-        if pending_rows:
-            # Get the actual PM2.5 for yesterday from observations
-            cur.execute("""
-                SELECT pm2_5
-                FROM observations
-                WHERE city = %s
-                  AND as_of = %s
-            """, (CITY, yesterday))
-
-            actual_row = cur.fetchone()
-            if actual_row:
-                actual_pm2_5 = actual_row[0]
-
-                update_sql = """
-                UPDATE predictions
-                SET actual_pm2_5 = %s
-                WHERE city = %s
-                  AND forecast_date = %s
-                  AND model = %s
-                """
-
-                for model_name, predicted_pm2_5 in pending_rows:
-                    cur.execute(update_sql, (actual_pm2_5, CITY, yesterday, model_name))
-                    conn.commit()
-                    error = abs(actual_pm2_5 - predicted_pm2_5)
-                    print(f"[OK] Updated {model_name} forecast for {yesterday}: "
-                          f"predicted={predicted_pm2_5:.2f}, actual={actual_pm2_5:.2f}, error={error:.2f}")
-            else:
-                print(f"[WARN] No actual observation found for {yesterday} yet")
-        else:
-            print(f"[INFO] No pending forecast to update for {yesterday}")
+        # Scoring is score_predictions.py's job, not this script's. It runs as
+        # step 4/6 of the daily pipeline, before this script, and it scores
+        # *every* pending row rather than just yesterday's - so a missed day
+        # self-heals. A second copy of that logic here only gave the same rule
+        # two places to drift apart.
 
         cur.close()
         conn.close()
