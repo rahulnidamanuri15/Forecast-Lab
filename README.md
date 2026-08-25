@@ -128,3 +128,13 @@ Environment variables: `DATABASE_URL` (required), `CITY` (default `Nagpur`),
 `FRONTEND_ORIGIN` (comma-separated allowed origins; empty means no browser origin
 is allowed — there is no `*` fallback). `API_BASE` optionally points
 `verify_deployment_readiness.py` at a deployed instance instead of localhost.
+
+## Security
+
+Report vulnerabilities privately — see [`.github/SECURITY.md`](.github/SECURITY.md).
+Do not open a public issue.
+
+## License
+
+[MIT](LICENSE).
+
