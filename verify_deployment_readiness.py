@@ -435,6 +435,38 @@ def check_api_predictions_endpoint():
         print(f"FAIL: Error checking /predictions endpoint: {e}")
         return False
 
+def check_api_electricity_endpoints():
+    """Check that all five /electricity/* endpoints return 200.
+
+    One function rather than five: they either all work or the router is broken.
+    Deliberately no DB-freshness equivalent of check_observations_freshness here -
+    that check requires <=1 day stale, and the demand mirror normally runs 2-4 days
+    behind, so it would fail a correct deployment every day. diagnose_elec_forecast.py
+    owns electricity freshness, with the right 5-day threshold.
+    """
+    endpoints = [
+        ('/electricity/health', 'latest_observation'),
+        ('/electricity/forecast?model=lightgbm', 'forecast_demand_mw'),
+        ('/electricity/forecast?model=seasonal_naive', 'forecast_demand_mw'),
+        ('/electricity/history?days=7', 'days_returned'),
+        ('/electricity/evaluation', 'evaluation'),
+        ('/electricity/predictions?model=lightgbm&limit=5', 'count'),
+    ]
+    try:
+        for path, key in endpoints:
+            response = httpx.get(f'{API_BASE}{path}', timeout=10.0)
+            if response.status_code != 200:
+                print(f"FAIL: {path} returns status {response.status_code}")
+                return False
+            value = response.json().get(key, 'N/A')
+            if isinstance(value, list):
+                value = f"{len(value)} models"
+            print(f"PASS: {path} returns 200 ({key}: {value})")
+        return True
+    except Exception as e:
+        print(f"FAIL: Error checking /electricity endpoints: {e}")
+        return False
+
 def main():
     """Run all deployment readiness checks"""
     print("Running VeriCast Deployment Readiness Check")
@@ -456,6 +488,7 @@ def main():
         ("API /leaderboard endpoint", check_api_leaderboard_endpoint),
         ("API /evaluation endpoint", check_api_evaluation_endpoint),
         ("API /predictions endpoint", check_api_predictions_endpoint),
+        ("API /electricity/* endpoints", check_api_electricity_endpoints),
     ]
 
     results = []
