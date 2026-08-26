@@ -20,6 +20,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 CITY = os.getenv("CITY", "Nagpur")
+STATE = os.getenv("STATE", "Maharashtra")
 
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
 
@@ -109,3 +110,75 @@ def test_scored_predictions_match_observations(cur):
           AND ABS(p.actual_pm2_5 - o.pm2_5) > 1e-6
     """, (CITY,))
     assert mismatches == 0, f"{mismatches} scored prediction(s) disagree with observations"
+
+
+# --------------------------------------------------------------------------
+# Electricity pipeline. The lag/rolling columns come from Postgres date-addressed
+# window frames rather than a Python loop, so what needs verifying is that the
+# frames really do null themselves out across the known date gap instead of
+# quietly reaching over it.
+# --------------------------------------------------------------------------
+
+def test_elec_every_feature_row_has_a_next_day_target(cur):
+    """The features(t) -> target(t+1) contract, as an orphan count.
+
+    Rows at the very end of the series and on the far side of the gap legitimately
+    have no t+1 observation yet, so those are excluded rather than asserted away.
+    """
+    orphans = _scalar(cur, """
+        SELECT COUNT(*)
+        FROM electricity_features f
+        WHERE f.state = %s
+          AND f.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
+                         FROM electricity_observations WHERE state = f.state)
+          AND NOT EXISTS (
+              SELECT 1 FROM electricity_observations o
+              WHERE o.state = f.state
+                AND o.as_of = f.as_of + INTERVAL '1 day'
+          )
+    """, (STATE,))
+    # The 2025-05-21 -> 2025-05-24 gap accounts for the only expected orphan:
+    # 2025-05-21's features have no 2025-05-22 observation to predict.
+    assert orphans <= 1, f"{orphans} feature rows have no next-day target"
+
+
+def test_elec_lag_is_null_across_the_date_gap(cur):
+    """2025-05-24 follows a 2-day hole, so demand_lag_1 must be NULL.
+
+    This is the leakage guarantee: `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND
+    INTERVAL '1 day' PRECEDING` is addressed by date, not row position, so it
+    returns NULL rather than silently grabbing 2025-05-21's value.
+    """
+    cur.execute("""
+        SELECT demand_lag_1, demand_lag_2, demand_lag_6
+        FROM electricity_features
+        WHERE state = %s AND as_of = DATE '2025-05-24'
+    """, (STATE,))
+    row = cur.fetchone()
+    if row is None:
+        pytest.skip("2025-05-24 not in the ingested range")
+    lag_1, lag_2, lag_6 = row
+    assert lag_1 is None, f"demand_lag_1 should be NULL across the gap, got {lag_1}"
+    assert lag_2 is None, f"demand_lag_2 should be NULL across the gap, got {lag_2}"
+    assert lag_6 is not None, "demand_lag_6 reaches back past the gap and should be set"
+
+
+def test_elec_rolling_30_requires_a_full_window(cur):
+    """demand_roll_30_mean must be NULL until 30 days of history exist.
+
+    COUNT(*) OVER w30 = 30 is a stricter guard than a row-index check: it also
+    nulls out any window that a date gap left short.
+    """
+    first_29_nonnull = _scalar(cur, """
+        SELECT COUNT(*) FROM (
+            SELECT demand_roll_30_mean
+            FROM electricity_features
+            WHERE state = %s
+            ORDER BY as_of
+            LIMIT 29
+        ) head
+        WHERE demand_roll_30_mean IS NOT NULL
+    """, (STATE,))
+    assert first_29_nonnull == 0, (
+        f"{first_29_nonnull} of the first 29 rows have a 30-day mean with under 30 days of data"
+    )

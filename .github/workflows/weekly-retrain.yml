@@ -33,14 +33,20 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python train_production_model.py
 
+      - name: Retrain electricity model
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          STATE: Maharashtra
+        run: python train_elec_model.py
+
       - name: Commit updated model artifact
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add lightgbm_model.txt
+          git add lightgbm_model.txt lightgbm_elec_model.txt
           if git diff --cached --quiet; then
-            echo "No change in model artifact; nothing to commit."
+            echo "No change in model artifacts; nothing to commit."
           else
-            git commit -m "Weekly retrain: update lightgbm_model.txt [skip ci]"
+            git commit -m "Weekly retrain: update model artifacts [skip ci]"
             git push
           fi

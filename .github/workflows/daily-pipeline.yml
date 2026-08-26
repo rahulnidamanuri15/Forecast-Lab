@@ -49,3 +49,38 @@ jobs:
 
       - name: 6/6 Verify forecast is publishable
         run: python diagnose_lightgbm_forecast.py
+
+  # Deliberately no `needs:` - the two targets share nothing but the database.
+  # The electricity source is a community mirror that lags 2-4 days and can
+  # stall; chaining these would let that stall block the live PM2.5 forecast,
+  # which has its own working upstream. Independent jobs also run in parallel.
+  electricity:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      STATE: Maharashtra
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 1/5 Ingest demand and temperature
+        run: python ingest_electricity.py
+
+      - name: 2/5 Engineer features
+        run: python engineer_elec_features.py
+
+      - name: 3/5 Score pending predictions
+        run: python score_elec_predictions.py
+
+      - name: 4/5 Make new forecast
+        run: python make_elec_prediction.py
+
+      - name: 5/5 Verify forecast is publishable
+        run: python diagnose_elec_forecast.py
