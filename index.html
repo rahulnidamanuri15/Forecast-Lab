@@ -645,7 +645,7 @@
     <div class="nav-right">
       <div class="live-pill" id="status-pill">
         <div class="pulse-dot"></div>
-        <span id="status-text">LIVE · 2026-08-19</span>
+        <span id="status-text">CONNECTING...</span>
       </div>
       <a href="https://forecast-lab-2l0q.onrender.com/docs" target="_blank" class="api-link-btn">FastAPI Docs</a>
     </div>
@@ -865,6 +865,8 @@
       // 1. Status Pill
       if (health && health.status === 'ok') {
         document.getElementById('status-text').textContent = `LIVE · ${health.latest_observation}`;
+      } else {
+        document.getElementById('status-text').textContent = 'OFFLINE / WAKING UP';
       }
 
       // 2. Latest Observed PM2.5
@@ -1053,7 +1055,11 @@
     }
   }
 
-  window.addEventListener('DOMContentLoaded', initDashboard);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initDashboard);
+  } else {
+    initDashboard();
+  }
 </script>
 
 </body>
