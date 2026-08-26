@@ -121,3 +121,127 @@ def test_forecast_endpoint_database_error():
         assert response.status_code == 500
         data = response.json()
         assert "detail" in data
+
+
+# --------------------------------------------------------------------------
+# /electricity/* routes. Same mocking shape; the allowlist and the MAPE
+# arithmetic are the parts that can silently go wrong.
+# --------------------------------------------------------------------------
+
+def _mock_cursor(mock_get_db):
+    """Wire a MagicMock cursor into the `with get_db_connection()` pattern."""
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_get_db.return_value.__enter__.return_value = mock_conn
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    return mock_cursor
+
+
+def test_electricity_forecast_success():
+    """A pending electricity forecast comes back with MW units and status."""
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        forecast_date = date(2026, 8, 23)
+        cur.fetchone.return_value = [
+            forecast_date, 25923.9, None, 'lightgbm', datetime.now(timezone.utc)
+        ]
+
+        response = client.get("/electricity/forecast?model=lightgbm")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["state"] == "Maharashtra"
+        assert data["forecast_demand_mw"] == 25923.9
+        assert data["status"] == "pending"
+
+
+def test_electricity_forecast_seasonal_naive_allowed():
+    """seasonal_naive is a published electricity model, so it must not 400."""
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        cur.fetchone.return_value = [
+            date(2026, 8, 23), 24907.0, 24907.0, 'seasonal_naive',
+            datetime.now(timezone.utc)
+        ]
+
+        response = client.get("/electricity/forecast?model=seasonal_naive")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "verified"
+
+
+def test_seasonal_naive_rejected_on_pm25_forecast():
+    """The two allowlists stay separate: there is no PM2.5 seasonal_naive model,
+    so /forecast must keep rejecting it even though /electricity/forecast takes it."""
+    response = client.get("/forecast?model=seasonal_naive")
+    assert response.status_code == 400
+
+
+def test_electricity_forecast_invalid_model():
+    response = client.get("/electricity/forecast?model=invalid_model")
+    assert response.status_code == 400
+    assert "Unsupported model" in response.json()["detail"]
+
+
+def test_electricity_evaluation_metrics():
+    """MAE / RMSE / MAPE arithmetic, and the MAE sort putting the best first."""
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        cur.fetchall.return_value = [
+            # (model, predicted, actual)
+            ('lightgbm', 900.0, 1000.0),       # error 100
+            ('lightgbm', 1100.0, 1000.0),      # error 100
+            ('naive_baseline', 800.0, 1000.0),  # error 200
+            ('naive_baseline', 1000.0, 1000.0),  # error 0
+            ('seasonal_naive', 1000.0, None),   # pending, must not be scored
+        ]
+
+        response = client.get("/electricity/evaluation")
+
+        assert response.status_code == 200
+        models = {m["model"]: m for m in response.json()["evaluation"]}
+
+        lgb = models["lightgbm"]
+        assert lgb["scored_count"] == 2
+        assert lgb["mae"] == pytest.approx(100.0)
+        assert lgb["rmse"] == pytest.approx(100.0)
+        assert lgb["mape"] == pytest.approx(10.0)
+
+        naive = models["naive_baseline"]
+        assert naive["mae"] == pytest.approx(100.0)
+        # RMSE punishes the single large error: sqrt((200^2 + 0)/2) > MAE
+        assert naive["rmse"] == pytest.approx(141.4213562, rel=1e-6)
+
+        # Unscored model sorts last rather than raising on a None comparison.
+        assert models["seasonal_naive"]["mae"] is None
+        assert models["seasonal_naive"]["pending_count"] == 1
+        assert response.json()["evaluation"][-1]["model"] == "seasonal_naive"
+
+
+def test_electricity_evaluation_no_data():
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        cur.fetchall.return_value = []
+
+        response = client.get("/electricity/evaluation")
+
+        assert response.status_code == 404
+
+
+def test_electricity_predictions_error_pct():
+    """error_pct is what the dashboard bands its badges on."""
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        cur.fetchall.return_value = [
+            (date(2026, 8, 22), 'lightgbm', 27000.0, 28000.0, datetime.now(timezone.utc)),
+            (date(2026, 8, 23), 'lightgbm', 25000.0, None, datetime.now(timezone.utc)),
+        ]
+
+        response = client.get("/electricity/predictions?limit=2")
+
+        assert response.status_code == 200
+        rows = response.json()["predictions"]
+        assert rows[0]["error"] == pytest.approx(1000.0)
+        assert rows[0]["error_pct"] == pytest.approx(1000 / 28000 * 100)
+        assert rows[1]["error"] is None
+        assert rows[1]["error_pct"] is None
