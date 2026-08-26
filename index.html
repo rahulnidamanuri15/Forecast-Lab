@@ -636,7 +636,8 @@
       </a>
 
       <div class="city-tabs">
-        <button class="tab-btn active">Nagpur PM2.5</button>
+        <button class="tab-btn active" id="tab-pm25" onclick="switchTab('pm25')">Nagpur PM2.5</button>
+        <button class="tab-btn" id="tab-electricity" onclick="switchTab('electricity')">Maharashtra Demand</button>
       </div>
     </div>
 
@@ -648,6 +649,9 @@
       <a href="https://forecast-lab-2l0q.onrender.com/docs" target="_blank" class="api-link-btn">FastAPI Docs</a>
     </div>
   </header>
+
+  <!-- ===================== PM2.5 PANEL ===================== -->
+  <div id="panel-pm25">
 
   <!-- TOP 4 KPI CARDS -->
   <div class="kpi-grid">
@@ -817,8 +821,166 @@
     </div>
   </div>
 
-  <footer>VERICAST · Verified Next-Day Air Quality Intelligence<br>
-    <span style="font-size: 0.85em; color: var(--text-faint)">Observations: Open-Meteo / CAMS reanalysis — modelled, not ground-station measurements.</span>
+  </div>
+  <!-- ===================== END PM2.5 PANEL ===================== -->
+
+  <!-- ===================== ELECTRICITY PANEL ===================== -->
+  <div id="panel-electricity" hidden>
+
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Latest Peak Demand</div>
+        <div class="kpi-value val-orange" id="el-kpi-today-val">— <span class="unit">MW</span></div>
+        <div class="kpi-sub" id="el-kpi-today-sub">Peak met · Maharashtra</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">Next-Day Forecast</div>
+        <div class="kpi-value val-teal" id="el-kpi-forecast-val">— <span class="unit">MW</span></div>
+        <div class="kpi-sub">LightGBM prediction</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">Model MAPE</div>
+        <div class="kpi-value val-white" id="el-kpi-mape-val">— <span class="unit">vs —</span></div>
+        <div class="kpi-sub">vs persistence baseline</div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-label">Track Record</div>
+        <div class="kpi-value val-cyan" id="el-kpi-record-val">—</div>
+        <div class="kpi-sub">public forecasts logged</div>
+      </div>
+    </div>
+
+    <div class="hero-section">
+      <div class="hero-main-card">
+        <div>
+          <div class="hero-header">
+            <div class="hero-eyebrow" id="el-hero-date">NEXT-DAY FORECAST · MAHARASHTRA</div>
+            <div class="model-pill" id="el-hero-model-badge">LIGHTGBM</div>
+          </div>
+
+          <div class="hero-body">
+            <div class="hero-number" id="el-hero-number">—</div>
+            <div class="hero-meta-col">
+              <div class="hero-unit-tag">PEAK DEMAND MW</div>
+              <div class="category-pill cat-mod" id="el-hero-cat-pill">—</div>
+            </div>
+          </div>
+
+          <div class="hero-change-text" id="el-hero-change-desc">
+            Based on the latest published observation
+          </div>
+        </div>
+
+        <div class="improvement-banner">
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span id="el-hero-improvement-text">Measuring against persistence baseline…</span>
+        </div>
+      </div>
+
+      <div class="metrics-card">
+        <div class="metric-row">
+          <span class="metric-name">Total Forecasts</span>
+          <span class="metric-val" id="el-metric-total-scored">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-name">Within ±3%</span>
+          <span class="metric-val" id="el-metric-within-3">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-name">LightGBM MAE</span>
+          <span class="metric-val" id="el-metric-lgb-mae" style="color: var(--brand-teal);">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-name">LightGBM RMSE</span>
+          <span class="metric-val" id="el-metric-lgb-rmse">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-name">Seasonal Naive MAE</span>
+          <span class="metric-val" id="el-metric-seasonal-mae" style="color: #94A3B8;">—</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="analytics-grid">
+      <div class="analytics-card">
+        <div class="card-header-flex">
+          <div class="card-title">Peak Demand vs Temperature</div>
+        </div>
+        <div class="chart-container">
+          <canvas id="elDemandChart"></canvas>
+        </div>
+      </div>
+
+      <div class="analytics-card">
+        <div class="card-header-flex">
+          <div class="card-title">Absolute % Error</div>
+        </div>
+        <div class="accuracy-number" id="el-acc-big-num">
+          — <span>recent avg accuracy</span>
+        </div>
+        <div class="chart-container" style="height: 120px;">
+          <canvas id="elErrorChart"></canvas>
+        </div>
+      </div>
+
+      <div class="analytics-card">
+        <div class="card-header-flex">
+          <div class="card-title">All Models (MAE, MW)</div>
+        </div>
+        <div class="bar-comparison-group" id="el-bar-group">
+          <div class="bar-item">
+            <div class="bar-label-row">
+              <span class="bar-model-name">Loading…</span>
+              <span class="bar-score">—</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill fill-slate" style="width: 0%;"></div></div>
+          </div>
+        </div>
+
+        <div class="improvement-callout-box">
+          <span class="callout-label">MAE vs Persistence</span>
+          <span class="callout-value" id="el-callout-improve-val">—</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="history-section">
+      <div class="history-header">
+        <div class="history-title">Prediction History</div>
+        <div class="history-subtitle">Predictions logged before actual outcomes were known</div>
+      </div>
+
+      <div style="overflow-x: auto;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Model</th>
+              <th>Prediction (MW)</th>
+              <th>Actual (MW)</th>
+              <th>Error (MW)</th>
+              <th>Error %</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="el-history-table-body">
+            <tr><td colspan="7" style="text-align: center; color: var(--text-faint); padding: 30px;">Loading prediction records…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+  <!-- ===================== END ELECTRICITY PANEL ===================== -->
+
+  <footer>VERICAST · Verified Next-Day Forecasting<br>
+    <span style="font-size: 0.85em; color: var(--text-faint)">PM2.5 observations: Open-Meteo / CAMS reanalysis — modelled, not ground-station measurements.<br>
+    Electricity demand: community mirror of Grid-India state reports (<a href="https://github.com/HalcyonVector/Grid-Sentinel" target="_blank" style="color: var(--brand-cyan);">HalcyonVector/Grid-Sentinel</a>), not the operator directly — it lags real time by 2–4 days.</span>
   </footer>
 
 </div>
@@ -1013,12 +1175,18 @@
           }
         });
 
-        // 7. Chart: Accuracy Over Time (Rolling Area)
+        // 7. Chart: Absolute error over the recent scored predictions.
         const ctx2 = document.getElementById('accuracyChart').getContext('2d');
         if (accChartInstance) accChartInstance.destroy();
 
-        const dummyAcc = [88, 91, 89, 94, 92, 95, 93, 91, 94, 96, 93, 94];
-        const accLabels = dummyAcc.map((_, i) => `D-${12 - i}`);
+        // Real scored rows, oldest-first. Was a hardcoded array; a
+        // publish-then-verify dashboard cannot show invented accuracy.
+        const scored = (predictions && predictions.predictions || [])
+          .filter(r => r.actual_pm2_5 !== null && r.actual_pm2_5 !== undefined)
+          .slice().reverse();
+        const accLabels = scored.map(r => r.forecast_date.slice(5));
+        const accValues = scored.map(
+          r => Math.max(0, 100 - Math.abs(r.actual_pm2_5 - r.predicted_pm2_5) / r.actual_pm2_5 * 100));
 
         accChartInstance = new Chart(ctx2, {
           type: 'line',
@@ -1026,7 +1194,7 @@
             labels: accLabels,
             datasets: [
               {
-                data: dummyAcc,
+                data: accValues,
                 borderColor: '#38BDF8',
                 backgroundColor: 'rgba(56, 189, 248, 0.08)',
                 borderWidth: 2,
@@ -1050,6 +1218,239 @@
 
     } catch (err) {
       console.error('Failed to initialize dashboard:', err);
+    }
+  }
+
+  // ===================== ELECTRICITY PANEL =====================
+
+  let elDemandChartInstance = null;
+  let elErrorChartInstance = null;
+  let elLoaded = false;
+
+  // MAPE bands. Demand forecasting is a percentage game: a 400 MW miss is
+  // excellent at 28 GW and would be catastrophic on a PM2.5 scale, so the
+  // thresholds are relative, not the absolute ones getBand uses.
+  function getMapeBand(mape) {
+    if (mape == null) return { label: 'UNSCORED', cls: 'cat-mod' };
+    if (mape < 2) return { label: 'EXCELLENT', cls: 'cat-low' };
+    if (mape < 5) return { label: 'GOOD', cls: 'cat-mod' };
+    return { label: 'MODERATE', cls: 'cat-elevated' };
+  }
+
+  async function initElectricity() {
+    try {
+      const [health, forecast, history, evaluation, predictions] = await Promise.all([
+        fetchJSON('/electricity/health').catch(() => null),
+        fetchJSON('/electricity/forecast?model=lightgbm').catch(() => null),
+        fetchJSON('/electricity/history?days=30').catch(() => null),
+        fetchJSON('/electricity/evaluation').catch(() => null),
+        fetchJSON('/electricity/predictions?model=lightgbm&limit=15').catch(() => null),
+      ]);
+
+      // 1. Latest observation. The mirror lags 2-4 days, so say how stale it is
+      // rather than implying it is today's number.
+      let latestObs = null;
+      if (history && history.historical_data && history.historical_data.length) {
+        latestObs = history.historical_data[history.historical_data.length - 1];
+        document.getElementById('el-kpi-today-val').innerHTML =
+          `${fmt(latestObs.peak_demand_mw, 0)} <span class="unit">MW</span>`;
+        const staleNote = health && health.stale_days != null
+          ? ` (${health.stale_days}d behind)` : '';
+        document.getElementById('el-kpi-today-sub').textContent =
+          `Observed ${latestObs.date}${staleNote}`;
+      }
+
+      // 2. Forecast hero.
+      if (forecast) {
+        const fVal = forecast.forecast_demand_mw;
+        document.getElementById('el-kpi-forecast-val').innerHTML =
+          `${fmt(fVal, 0)} <span class="unit">MW</span>`;
+        document.getElementById('el-hero-number').textContent = fmt(fVal, 0);
+        document.getElementById('el-hero-date').textContent =
+          `FORECAST FOR ${forecast.forecast_date} · MAHARASHTRA`;
+
+        if (latestObs) {
+          const diff = fVal - latestObs.peak_demand_mw;
+          const pct = (diff / latestObs.peak_demand_mw * 100).toFixed(1);
+          document.getElementById('el-hero-change-desc').innerHTML =
+            `<b>${diff >= 0 ? '+' : ''}${pct}% vs ${latestObs.date}</b> · Based on the latest published observation`;
+        }
+      }
+
+      // 3. Full-record accuracy across all three models.
+      if (evaluation && evaluation.evaluation) {
+        const models = evaluation.evaluation;
+        const lgb = models.find(m => m.model === 'lightgbm');
+        const naive = models.find(m => m.model === 'naive_baseline');
+        const seasonal = models.find(m => m.model === 'seasonal_naive');
+
+        if (lgb) {
+          const band = getMapeBand(lgb.mape);
+          const pill = document.getElementById('el-hero-cat-pill');
+          pill.textContent = band.label;
+          pill.className = `category-pill ${band.cls}`;
+
+          document.getElementById('el-kpi-record-val').textContent = lgb.scored_count;
+          document.getElementById('el-metric-total-scored').textContent = lgb.scored_count;
+          document.getElementById('el-metric-lgb-mae').textContent = fmt(lgb.mae, 0);
+          document.getElementById('el-metric-lgb-rmse').textContent = fmt(lgb.rmse, 0);
+        }
+        if (seasonal) {
+          document.getElementById('el-metric-seasonal-mae').textContent = fmt(seasonal.mae, 0);
+        }
+        if (lgb && naive && lgb.mape != null && naive.mape != null) {
+          document.getElementById('el-kpi-mape-val').innerHTML =
+            `${fmt(lgb.mape, 2)}% <span class="unit">vs ${fmt(naive.mape, 2)}%</span>`;
+          const improvement = ((naive.mae - lgb.mae) / naive.mae * 100).toFixed(1);
+          document.getElementById('el-callout-improve-val').textContent = `+${improvement}%`;
+          document.getElementById('el-hero-improvement-text').textContent =
+            `${improvement}% better than persistence baseline (MAE ${fmt(lgb.mae, 0)} vs ${fmt(naive.mae, 0)} MW)`;
+        }
+
+        // Bar per model, already MAE-sorted by the API.
+        const scoredModels = models.filter(m => m.mae != null);
+        if (scoredModels.length) {
+          const maxVal = Math.max(...scoredModels.map(m => m.mae)) * 1.35;
+          document.getElementById('el-bar-group').innerHTML = scoredModels.map((m, i) => `
+            <div class="bar-item">
+              <div class="bar-label-row">
+                <span class="bar-model-name">${m.model}</span>
+                <span class="bar-score" style="color: ${i === 0 ? 'var(--brand-teal)' : '#94A3B8'};">${fmt(m.mae, 0)}</span>
+              </div>
+              <div class="bar-track">
+                <div class="bar-fill ${i === 0 ? 'fill-teal' : 'fill-slate'}" style="width: ${(m.mae / maxVal) * 100}%;"></div>
+              </div>
+            </div>
+          `).join('');
+        }
+      }
+
+      // 4. History table + error chart, both off the same scored rows.
+      if (predictions && predictions.predictions && predictions.predictions.length) {
+        const rows = predictions.predictions;
+        let within3 = 0, totalScored = 0, accSum = 0;
+
+        document.getElementById('el-history-table-body').innerHTML = rows.map(r => {
+          let errStr = '—', pctStr = '—';
+          let badge = '<span class="status-badge badge-pending">PENDING</span>';
+
+          if (r.error_pct !== null && r.error_pct !== undefined) {
+            errStr = fmt(r.error, 0);
+            pctStr = `${fmt(r.error_pct, 2)}%`;
+            totalScored++;
+            if (r.error_pct <= 3) within3++;
+            accSum += Math.max(0, 100 - r.error_pct);
+
+            if (r.error_pct < 2) badge = '<span class="status-badge badge-excellent">EXCELLENT</span>';
+            else if (r.error_pct < 5) badge = '<span class="status-badge badge-good">GOOD</span>';
+            else badge = '<span class="status-badge badge-moderate">MODERATE</span>';
+          }
+
+          return `
+            <tr>
+              <td>${r.forecast_date}</td>
+              <td><span style="color: var(--brand-teal); font-weight: 600;">${r.model}</span></td>
+              <td class="mono pred-highlight">${fmt(r.predicted_demand_mw, 0)}</td>
+              <td class="mono">${r.actual_demand_mw !== null ? fmt(r.actual_demand_mw, 0) : '<span style="color: var(--text-faint)">—</span>'}</td>
+              <td class="mono">${errStr}</td>
+              <td class="mono">${pctStr}</td>
+              <td>${badge}</td>
+            </tr>
+          `;
+        }).join('');
+
+        if (totalScored > 0) {
+          document.getElementById('el-metric-within-3').textContent =
+            `${((within3 / totalScored) * 100).toFixed(0)}%`;
+          document.getElementById('el-acc-big-num').innerHTML =
+            `${(accSum / totalScored).toFixed(1)}% <span>recent avg accuracy</span>`;
+        }
+
+        const scored = rows.filter(r => r.error_pct != null).slice().reverse();
+        const ctxErr = document.getElementById('elErrorChart').getContext('2d');
+        if (elErrorChartInstance) elErrorChartInstance.destroy();
+        elErrorChartInstance = new Chart(ctxErr, {
+          type: 'bar',
+          data: {
+            labels: scored.map(r => r.forecast_date.slice(5)),
+            datasets: [{
+              data: scored.map(r => r.error_pct),
+              backgroundColor: scored.map(
+                r => r.error_pct < 2 ? '#10B981' : r.error_pct < 5 ? '#38BDF8' : '#F59E0B'),
+              borderRadius: 2
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { display: false },
+              y: {
+                beginAtZero: true,
+                grid: { color: 'rgba(255,255,255,0.03)' },
+                ticks: { color: '#64748B', font: { size: 9 }, callback: v => `${v}%` }
+              }
+            }
+          }
+        });
+      }
+
+      // 5. Demand vs temperature, dual axis - the thermal driver is the whole
+      // reason cooling_degree_days is a feature, so show it next to the load.
+      if (history && history.historical_data && history.historical_data.length) {
+        const data = history.historical_data;
+        const ctx = document.getElementById('elDemandChart').getContext('2d');
+        if (elDemandChartInstance) elDemandChartInstance.destroy();
+        elDemandChartInstance = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: data.map(d => d.date.slice(5)),
+            datasets: [
+              {
+                label: 'Peak demand (MW)',
+                data: data.map(d => d.peak_demand_mw),
+                borderColor: '#00E5A3',
+                backgroundColor: 'rgba(0, 229, 163, 0.05)',
+                borderWidth: 2, tension: 0.3, pointRadius: 0, fill: true, yAxisID: 'y'
+              },
+              {
+                label: 'Mean temp (°C)',
+                data: data.map(d => d.temperature_2m_mean),
+                borderColor: '#F59E0B',
+                borderWidth: 1.5, tension: 0.3, pointRadius: 0, fill: false,
+                borderDash: [4, 3], yAxisID: 'y1'
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748B', font: { size: 10 }, maxTicksLimit: 6 } },
+              y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748B', font: { size: 10 } } },
+              y1: { position: 'right', grid: { display: false }, ticks: { color: '#F59E0B', font: { size: 9 } } }
+            }
+          }
+        });
+      }
+    } catch (err) {
+      console.error('Failed to initialize electricity panel:', err);
+    }
+  }
+
+  // Lazy: the electricity panel only fetches the first time it is opened, so the
+  // default PM2.5 view still costs exactly the 5 requests it always did.
+  function switchTab(name) {
+    document.getElementById('panel-pm25').hidden = name !== 'pm25';
+    document.getElementById('panel-electricity').hidden = name !== 'electricity';
+    document.getElementById('tab-pm25').classList.toggle('active', name === 'pm25');
+    document.getElementById('tab-electricity').classList.toggle('active', name === 'electricity');
+
+    if (name === 'electricity' && !elLoaded) {
+      elLoaded = true;
+      initElectricity();
     }
   }
 
