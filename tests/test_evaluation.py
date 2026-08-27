@@ -18,8 +18,8 @@ def test_evaluation_endpoint_success():
     with patch('app.get_db_connection') as mock_get_db:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_get_db.return_value = mock_conn
-        mock_conn.cursor.return_value = mock_cursor
+        mock_get_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
         # Mock the database response - prediction data for evaluation
         # Format: (model, predicted_pm2_5, actual_pm2_5)
@@ -65,8 +65,8 @@ def test_evaluation_endpoint_no_data():
     with patch('app.get_db_connection') as mock_get_db:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_get_db.return_value = mock_conn
-        mock_conn.cursor.return_value = mock_cursor
+        mock_get_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
         # Mock the database response - no data
         mock_cursor.fetchall.return_value = []
@@ -100,8 +100,8 @@ def test_evaluation_full_record_omits_window():
     with patch('app.get_db_connection') as mock_get_db:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_get_db.return_value = mock_conn
-        mock_conn.cursor.return_value = mock_cursor
+        mock_get_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
         mock_cursor.fetchall.return_value = [
             ('lightgbm', 15.0, 14.5),
@@ -131,8 +131,8 @@ def test_evaluation_sorts_unscored_models_last():
     with patch('app.get_db_connection') as mock_get_db:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_get_db.return_value = mock_conn
-        mock_conn.cursor.return_value = mock_cursor
+        mock_get_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
         # Both models are entirely pending -> two None maes.
         mock_cursor.fetchall.return_value = [

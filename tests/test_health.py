@@ -47,3 +47,20 @@ def test_health_endpoint_database_error():
         assert response.status_code == 503
         data = response.json()
         assert "detail" in data
+def test_health_endpoint_empty_table():
+    """An empty observations table is 200 no_data, not a 503 outage."""
+    with patch('app.get_db_connection') as mock_get_db:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_get_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        mock_cursor.fetchone.return_value = [None]
+
+        for route in ("/health", "/electricity/health"):
+            response = client.get(route)
+            assert response.status_code == 200, route
+            data = response.json()
+            assert data["status"] == "no_data", route
+            assert data["latest_observation"] is None, route
+            assert data["stale_days"] is None, route

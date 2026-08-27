@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg
 from dotenv import load_dotenv
@@ -18,8 +18,11 @@ STATE = os.getenv("STATE", "Maharashtra")  # target #2: regional electricity dem
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
 
 app = FastAPI(
-    title="ML Forecasting API",
-    description="API for air quality forecasting in Nagpur",
+    title="VeriCast API",
+    description=(
+        f"Read-only public record of next-day forecasts published before the "
+        f"actual was knowable: {CITY} PM2.5 (ug/m3) and {STATE} peak demand met (MW)."
+    ),
     version="0.1.0"
 )
 
@@ -71,13 +74,16 @@ async def root():
         }
     }
 
+# The two published PM2.5 models. Module-level so /forecast and /predictions
+# validate against the same set instead of two literals drifting apart; the
+# electricity equivalent is ELEC_MODELS below.
+PM25_MODELS = {"lightgbm", "naive_baseline"}
+
 @app.get("/forecast")
 async def get_forecast(model: str = "lightgbm"):
     """Return the latest stored forecast for the requested model."""
 
-    allowed_models = {"lightgbm", "naive_baseline"}
-
-    if model not in allowed_models:
+    if model not in PM25_MODELS:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported model: {model}",
@@ -143,19 +149,16 @@ async def get_leaderboard():
     score_date on record for that model), not a fixed backtest snapshot.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-
-        # For each model, grab the row with the most recent score_date.
-        # DISTINCT ON is Postgres-specific and exactly fits "latest per group".
-        cur.execute("""
-            SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
-            FROM model_performance
-            ORDER BY model, score_date DESC
-        """)
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # For each model, grab the row with the most recent score_date.
+                # DISTINCT ON is Postgres-specific and exactly fits "latest per group".
+                cur.execute("""
+                    SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
+                    FROM model_performance
+                    ORDER BY model, score_date DESC
+                """)
+                rows = cur.fetchall()
 
         if not rows:
             raise HTTPException(status_code=404, detail="No model performance data found")
@@ -187,16 +190,19 @@ async def get_leaderboard():
 @app.get("/predictions")
 async def get_predictions(
     model: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     scored_only: bool = False,
 ):
     """
     Get individual prediction rows from the predictions table.
 
     - model: filter to a single model (e.g. 'lightgbm'). Omit for all models.
-    - limit: max rows returned, most recent forecast_date first.
+    - limit: max rows returned (1-500), most recent forecast_date first.
     - scored_only: if true, only return rows where actual_pm2_5 is known.
     """
+    if model is not None and model not in PM25_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
+
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -210,6 +216,11 @@ async def get_predictions(
                 if scored_only:
                     clauses.append("actual_pm2_5 IS NOT NULL")
 
+                # ponytail: f-string WHERE, not a query builder. Safe because
+                # every fragment joined here is a literal in this file and the
+                # only user value (`model`) is allowlisted above; all real
+                # values still go through %s. Revisit if a caller-supplied
+                # column or operator ever needs to reach this string.
                 where_clause = " AND ".join(clauses)
                 params.append(limit)
 
@@ -259,28 +270,25 @@ async def get_evaluation(days: Optional[int] = None):
     full_record = not days  # None or 0
 
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Window is anchored to the app timezone (see vericast/local_time.py),
+                # not Postgres's CURRENT_DATE, which is GMT on Neon.
+                if full_record:
+                    cur.execute("""
+                        SELECT model, predicted_pm2_5, actual_pm2_5
+                        FROM predictions
+                        WHERE city = %s
+                    """, (CITY,))
+                else:
+                    cur.execute("""
+                        SELECT model, predicted_pm2_5, actual_pm2_5
+                        FROM predictions
+                        WHERE city = %s
+                          AND forecast_date >= %s - %s * INTERVAL '1 day'
+                    """, (CITY, local_time.today(), days))
 
-        # Window is anchored to the app timezone (see vericast/local_time.py), not
-        # Postgres's CURRENT_DATE, which is GMT on Neon.
-        if full_record:
-            cur.execute("""
-                SELECT model, predicted_pm2_5, actual_pm2_5
-                FROM predictions
-                WHERE city = %s
-            """, (CITY,))
-        else:
-            cur.execute("""
-                SELECT model, predicted_pm2_5, actual_pm2_5
-                FROM predictions
-                WHERE city = %s
-                  AND forecast_date >= %s - %s * INTERVAL '1 day'
-            """, (CITY, local_time.today(), days))
-
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+                rows = cur.fetchall()
 
         if not rows:
             raise HTTPException(
@@ -330,28 +338,26 @@ async def get_evaluation(days: Optional[int] = None):
 
 
 @app.get("/history")
-async def get_history(days: int = 30):
+async def get_history(days: int = Query(30, ge=1, le=365)):
     """
     Get historical observations for the last N days available.
     Defaults to last 30 days of available data.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Get observations - order by date descending and limit to 'days'
+                # This gives us the most recent 'days' days of available data
+                cur.execute("""
+                    SELECT as_of, pm2_5, pm10, temperature_2m_mean,
+                           wind_speed_10m_max, precipitation_sum
+                    FROM observations
+                    WHERE city = %s
+                    ORDER BY as_of DESC
+                    LIMIT %s
+                """, (CITY, days))
 
-        # Get observations - order by date descending and limit to 'days'
-        # This gives us the most recent 'days' days of available data
-        cur.execute("""
-            SELECT as_of, pm2_5, pm10, temperature_2m_mean, wind_speed_10m_max, precipitation_sum
-            FROM observations
-            WHERE city = %s
-            ORDER BY as_of DESC
-            LIMIT %s
-        """, (CITY, days))
-
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+                rows = cur.fetchall()
 
         if not rows:
             raise HTTPException(status_code=404, detail="No historical data found")
@@ -387,6 +393,12 @@ async def health():
             with conn.cursor() as cur:
                 cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", (CITY,))
                 latest = cur.fetchone()[0]
+        # An empty table is not an outage. Without this the arithmetic below
+        # raises TypeError, the blanket handler turns it into 503, and the one
+        # endpoint whose job is saying what is wrong reports the wrong thing.
+        if latest is None:
+            return {"status": "no_data", "latest_observation": None, "stale_days": None,
+                    "detail": f"no observations for {CITY}"}
         stale_days = (local_time.today() - latest).days
         return {"status": "ok", "latest_observation": latest.isoformat(), "stale_days": stale_days}
     except Exception as e:
@@ -434,6 +446,10 @@ async def electricity_health():
                     (STATE,),
                 )
                 latest = cur.fetchone()[0]
+        if latest is None:
+            return {"status": "no_data", "state": STATE, "latest_observation": None,
+                    "stale_days": None, "source_lag_expected": None,
+                    "detail": f"no electricity observations for {STATE}"}
         stale_days = (local_time.today() - latest).days
         return {
             "status": "ok",
@@ -492,7 +508,7 @@ async def get_electricity_forecast(model: str = "lightgbm"):
 @app.get("/electricity/predictions")
 async def get_electricity_predictions(
     model: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     scored_only: bool = False,
 ):
     """Individual prediction rows from electricity_predictions.
@@ -500,6 +516,9 @@ async def get_electricity_predictions(
     `error_pct` is the per-row absolute percentage error, which is what the
     dashboard's status badges are banded on.
     """
+    if model is not None and model not in ELEC_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
+
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -513,6 +532,11 @@ async def get_electricity_predictions(
                 if scored_only:
                     clauses.append("actual_demand_mw IS NOT NULL")
 
+                # ponytail: f-string WHERE, not a query builder. Safe because
+                # every fragment joined here is a literal in this file and the
+                # only user value (`model`) is allowlisted above; all real
+                # values still go through %s. Revisit if a caller-supplied
+                # column or operator ever needs to reach this string.
                 where_clause = " AND ".join(clauses)
                 params.append(limit)
 
@@ -628,7 +652,7 @@ async def get_electricity_evaluation(days: Optional[int] = None):
 
 
 @app.get("/electricity/history")
-async def get_electricity_history(days: int = 30):
+async def get_electricity_history(days: int = Query(30, ge=1, le=365)):
     """Historical peak demand (MW), energy (MU) and temperature for the last N
     days of available data."""
     try:
