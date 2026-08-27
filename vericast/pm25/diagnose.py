@@ -14,7 +14,16 @@ from vericast import MODEL_PM25 as MODEL_PATH
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-CITY = "Nagpur"
+CITY = os.getenv("CITY", "Nagpur")
+
+# Nagpur's observed 2023-2026 daily CAMS range is roughly 4-160 ug/m3. Bounds are
+# wide enough for a bad Diwali week, tight enough that a unit error or a sign flip
+# fails instead of publishing. Nothing anywhere else in the stack looks at the
+# forecast's *value* - not app.py, not verify_deployment_readiness.py - so this is
+# the only gate between a -40 ug/m3 prediction and the public record.
+MIN_PM25, MAX_PM25 = 1.0, 500.0
+
+SIGMA_LIMIT = 3.0   # forecast must sit within 3 sd of the trailing 30-day mean
 
 
 def check(label, ok, detail=""):
@@ -102,6 +111,53 @@ def main():
                     "Latest lightgbm forecast_date is current",
                     not stale,
                     f"forecast_date={fdate}, latest_obs={latest_obs}" if stale else "",
+                )
+
+            # 6. Is every value published for that date physically plausible?
+            #    Ported from vericast/elec/diagnose.py:108-114.
+            cur.execute(
+                """
+                SELECT model, predicted_pm2_5 FROM predictions
+                WHERE city = %s AND forecast_date = (
+                    SELECT MAX(forecast_date) FROM predictions WHERE city = %s)
+                """,
+                (CITY, CITY),
+            )
+            published = {m: v for m, v in cur.fetchall()}
+            out_of_range = {m: v for m, v in published.items()
+                            if v is None or not (MIN_PM25 <= v <= MAX_PM25)}
+            all_ok &= check(
+                f"Forecasts within {MIN_PM25:,.0f}-{MAX_PM25:,.0f} ug/m3",
+                not out_of_range,
+                str(out_of_range) if out_of_range else str(published),
+            )
+
+            # 7. Trend sanity on the trailing 30 days of actuals rather than a
+            #    fixed band, so it tightens as the series grows.
+            cur.execute(
+                """
+                SELECT AVG(pm2_5), STDDEV_SAMP(pm2_5)
+                FROM (SELECT pm2_5 FROM observations
+                      WHERE city = %s AND pm2_5 IS NOT NULL
+                      ORDER BY as_of DESC LIMIT 30) recent
+                """,
+                (CITY,),
+            )
+            mean_pm, sd_pm = cur.fetchone()
+
+            if published.get("lightgbm") is None:
+                all_ok &= check("LightGBM forecast within trend", False,
+                                "no lightgbm row to check")
+            elif not sd_pm:
+                check("LightGBM forecast within trend", True,
+                      "not enough history for a sd; skipped")
+            else:
+                sigma = abs(published["lightgbm"] - float(mean_pm)) / float(sd_pm)
+                all_ok &= check(
+                    f"LightGBM forecast within {SIGMA_LIMIT} sd of 30-day mean",
+                    sigma <= SIGMA_LIMIT,
+                    f"{sigma:.2f} sd from mean={float(mean_pm):.1f} "
+                    f"(sd={float(sd_pm):.1f})",
                 )
 
     print("=" * 60)
