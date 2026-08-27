@@ -91,7 +91,7 @@ def run_leakage_test():
                         prev_date = obs_dates[i-1]
                         prev_obs = obs_dict[prev_date]
                         # If there's a gap (prev_date is not literally the day
-                        # before as_of), engineer_features.py intentionally
+                        # before as_of), vericast/pm25/features.py intentionally
                         # leaves the lag features NULL for this row instead of
                         # pulling in a stale value. Expect NULLs, not a match.
                         is_gap = (as_of - prev_date) != timedelta(days=1)
