@@ -1,10 +1,11 @@
-"""Create the four electricity tables (Phase 2, target #2: Maharashtra peak demand).
+"""DDL for every table in both targets. Idempotent: CREATE TABLE IF NOT EXISTS
+only, so running it against the live database cannot touch the published record.
 
-One script for all four because they're created in one sitting and never again -
-unlike the PM2.5 tables, which grew one at a time.
+    python -m vericast.schema
 
-Deliberately does NOT touch the existing observations/features/predictions/
-model_performance tables: the published PM2.5 accuracy record lives there.
+Replaces the four one-table-per-file create_*_table.py scripts. ponytail: no
+migration tool - these tables are created once and columns are added by hand;
+add Alembic when a column actually needs to change on a live table.
 """
 import os
 import psycopg
@@ -18,6 +19,75 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # same-weekday-last-week value for the *target* is y(t-6), not y(t-7). The same
 # column feeds LightGBM's weekly signal and the seasonal_naive baseline.
 TABLES = {
+    "observations": """
+        CREATE TABLE IF NOT EXISTS observations (
+            id SERIAL PRIMARY KEY,
+            city VARCHAR(100) NOT NULL,
+            as_of DATE NOT NULL,
+            pm2_5 FLOAT,
+            pm10 FLOAT,
+            temperature_2m_mean FLOAT,
+            wind_speed_10m_max FLOAT,
+            precipitation_sum FLOAT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(city, as_of)
+        );
+    """,
+    "features": """
+        CREATE TABLE IF NOT EXISTS features (
+            id SERIAL PRIMARY KEY,
+            city VARCHAR(100) NOT NULL,
+            as_of DATE NOT NULL,
+
+            pm2_5_lag_1 FLOAT,
+            pm10_lag_1 FLOAT,
+            temperature_lag_1 FLOAT,
+            wind_speed_lag_1 FLOAT,
+            precipitation_lag_1 FLOAT,
+
+            pm2_5_roll_7 FLOAT,
+            pm2_5_roll_30 FLOAT,
+            pm10_roll_7 FLOAT,
+            pm10_roll_30 FLOAT,
+
+            day_of_week INTEGER,  -- 0=Monday, 6=Sunday
+            month INTEGER,        -- 1-12
+            is_weekend BOOLEAN,
+
+            temperature_2m_mean FLOAT,
+            wind_speed_10m_max FLOAT,
+            precipitation_sum FLOAT,
+
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(city, as_of)
+        );
+    """,
+    "predictions": """
+        CREATE TABLE IF NOT EXISTS predictions (
+            id SERIAL PRIMARY KEY,
+            city VARCHAR(100) NOT NULL,
+            forecast_date DATE NOT NULL,
+            predicted_pm2_5 FLOAT,
+            actual_pm2_5 FLOAT,
+            model VARCHAR(50) DEFAULT 'naive_baseline',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(city, forecast_date, model)
+        );
+    """,
+    # No city column, unlike its electricity counterpart: this table predates
+    # the second target and the live PM2.5 record is keyed on (score_date, model).
+    "model_performance": """
+        CREATE TABLE IF NOT EXISTS model_performance (
+            id SERIAL PRIMARY KEY,
+            score_date DATE NOT NULL,
+            model VARCHAR(50) NOT NULL,
+            mae FLOAT,
+            rmse FLOAT,
+            sample_size INTEGER,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(score_date, model)
+        );
+    """,
     "electricity_observations": """
         CREATE TABLE IF NOT EXISTS electricity_observations (
             id SERIAL PRIMARY KEY,
@@ -91,7 +161,7 @@ TABLES = {
 }
 
 
-def create_electricity_tables():
+def create_tables():
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             for name, ddl in TABLES.items():
@@ -113,4 +183,4 @@ def create_electricity_tables():
 
 
 if __name__ == "__main__":
-    create_electricity_tables()
+    create_tables()

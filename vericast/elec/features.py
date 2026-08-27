@@ -1,7 +1,7 @@
 """Engineer the point-in-time electricity feature store.
 
 One idempotent INSERT ... SELECT instead of the Python row-loop that
-engineer_features.py uses for PM2.5, because Postgres window frames do the same
+vericast/pm25/features.py uses for PM2.5, because Postgres window frames do the same
 job with stronger guarantees:
 
   * `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND INTERVAL '1 day' PRECEDING` is
@@ -12,9 +12,9 @@ job with stronger guarantees:
     version averages the previous 7 *rows* whether or not they are 7 consecutive
     days, silently spanning gaps. This refuses instead.
   * Look-ahead leakage is structurally unexpressible - a `RANGE ... PRECEDING`
-    frame cannot reference a future row. That is why there is no
-    elec_leakage_test.py mirroring leakage_test.py; what does need asserting is
-    the features(t) -> target(t+1) *join*, which lives in
+    frame cannot reference a future row. That is why this package has no
+    leakage_test.py mirroring vericast/pm25/leakage_test.py; what does need
+    asserting is the features(t) -> target(t+1) *join*, which lives in
     tests/test_feature_alignment.py.
 
 Full recompute every run, so changing a feature definition needs no backfill.

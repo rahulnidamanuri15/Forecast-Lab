@@ -9,7 +9,7 @@ WORKDIR /app
 # wheels that this base (bookworm, glibc 2.36) satisfies. libgomp1 is the one
 # real system dep - lightgbm links OpenMP at import time and slim doesn't ship
 # it. The tz database comes from the pip `tzdata` package, since this image has
-# none and local_time.py needs Asia/Kolkata.
+# none and vericast/local_time.py needs Asia/Kolkata.
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 

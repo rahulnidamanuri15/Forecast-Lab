@@ -17,18 +17,19 @@ separate routes. A stall in one cannot block the other.
 ## Architecture
 
 ```
-Open-Meteo  →  observations  →  engineer_features.py  →  features
+Open-Meteo  →  observations  →  vericast/pm25/features.py  →  features
                                                             ↓
                                     LightGBM / naive baseline
                                                             ↓
                         predictions  →  FastAPI  →  dashboard (Chart.js)
                              ↑
-                    score_predictions.py (joins observations on forecast_date)
+                    vericast/pm25/score.py (joins observations on forecast_date)
 ```
 
-The electricity path mirrors it with `electricity_`-prefixed tables and `_elec_`
-scripts, except that features are built by **one idempotent `INSERT ... SELECT`**
-using Postgres date-addressed window frames rather than a Python row loop:
+The electricity path mirrors it file for file under `vericast/elec/`, with
+`electricity_`-prefixed tables, except that features are built by **one idempotent
+`INSERT ... SELECT`** using Postgres date-addressed window frames rather than a
+Python row loop:
 
 ```sql
 MAX(peak_demand_mw) OVER (ORDER BY as_of
@@ -42,7 +43,7 @@ leakage guarantee is a property of the query rather than a test that has to pass
 stricter than a row-index check because it also nulls out gap-shortened windows.
 
 All application-level date decisions ("today", "yesterday", forecast date, scoring
-date) go through `local_time.py`, which is fixed to **Asia/Kolkata**. PostgreSQL
+date) go through `vericast/local_time.py`, which is fixed to **Asia/Kolkata**. PostgreSQL
 timestamps stay timezone-aware.
 
 ## What the ground truth actually is
@@ -61,7 +62,7 @@ The claim this repo makes is "the forecasting and verification loop is honest",
 not "these numbers are measured air".
 
 Swapping to real sensor readings (OpenAQ → CPCB) touches exactly one function,
-`fetch_and_aggregate_data` in `ingest_observations.py` — nothing else in the
+`fetch_and_aggregate_data` in `vericast/pm25/ingest.py` — nothing else in the
 pipeline reads the AQ API. Deferred on purpose: the loop matters more than the
 sensor.
 
@@ -80,7 +81,7 @@ to state plainly rather than bury:
   are 5 days rather than PM2.5's 1. A 2–4 day lag is the normal case here, not an
   incident — `GET /electricity/health` reports `source_lag_expected` for exactly this.
 - **It is treated as untrusted input.** Blank demand values are skipped rather than
-  coerced, and `diagnose_elec_forecast.py` refuses to publish outside 15,000–40,000 MW.
+  coerced, and `vericast/elec/diagnose.py` refuses to publish outside 15,000–40,000 MW.
 
 If the mirror stops updating, the electricity job fails its own freshness gate and
 publishes nothing. It cannot affect the PM2.5 record.
@@ -137,34 +138,47 @@ scored day* from `model_performance`, so its `sample_size` is normally 1. Use
 Reproduce the frozen walk-forward benchmark with `python experiments/compare_models.py`
 (n=700, MAE 9.5798 vs 11.0962 — consistent with the live record above).
 
-## Files
+## Layout
 
-Production path (root), PM2.5:
+```
+app.py                            FastAPI service, both targets
+index.html                        dashboard, one tab per target
+verify_deployment_readiness.py    the single go-live gate (16 checks)
+models/                           committed LightGBM artifacts
+vericast/
+├── __init__.py                   resolves models/ paths from the package, not cwd
+├── local_time.py                 the only source of "today" (Asia/Kolkata)
+├── schema.py                     idempotent DDL for all eight tables
+├── pm25/                         Nagpur PM2.5 (μg/m³)
+│   ├── ingest.py                 Open-Meteo → observations
+│   ├── features.py               lag/rolling/calendar → features (Python row loop)
+│   ├── leakage_test.py           assert no feature row sees data past its own as_of
+│   ├── train.py                  retrain → models/lightgbm_model.txt; owns FEATURE_COLUMNS
+│   ├── predict.py                write tomorrow's forecast for both models
+│   ├── score.py                  fill actual_pm2_5 for every pending row (only writer of actuals)
+│   └── diagnose.py               refuse to publish an unfit forecast (non-zero exit)
+└── elec/                         Maharashtra peak demand (MW), same seven roles
+    ├── ingest.py                 demand mirror + Open-Meteo temperature
+    ├── features.py               one INSERT ... SELECT; no leakage test needed (see Architecture)
+    ├── train.py                  retrain → models/lightgbm_elec_model.txt; owns FEATURE_COLUMNS
+    ├── predict.py                three models, per-model publish guards
+    ├── score.py                  fill actual_demand_mw, upsert MAE/RMSE/MAPE
+    └── diagnose.py               6-check publish gate (non-zero exit)
+```
 
-- `ingest_observations.py` — pull new Open-Meteo data into `observations`
-- `engineer_features.py` — build lag/rolling/calendar features into `features`
-- `leakage_test.py` — assert no feature row sees data past its own `as_of`
-- `train_production_model.py` — retrain and write `lightgbm_model.txt`
-- `make_prediction.py` — write tomorrow's forecast for both models
-- `score_predictions.py` — fill in `actual_pm2_5` for every pending row, upsert `model_performance` (the only writer of actuals)
-- `diagnose_lightgbm_forecast.py` — refuse to publish an unfit forecast (non-zero exit)
+Same seven filenames in both target packages, so `pm25/x.py` and `elec/x.py` always
+do the same job — that symmetry is what makes the two pipelines readable side by side.
+Each `train.py` is the single definition of its target's `FEATURE_COLUMNS`; `predict.py`
+and the backtests import it, so the lists cannot drift (asserted in
+`tests/test_layout.py`).
 
-Production path, electricity (same order, `electricity_*` tables):
+Every script runs as a module from the repo root:
 
-- `create_electricity_tables.py` — one-time DDL for all four tables
-- `ingest_electricity.py` — demand mirror + Open-Meteo temperature → `electricity_observations`
-- `engineer_elec_features.py` — one idempotent `INSERT ... SELECT`; no separate leakage test needed (see Architecture)
-- `train_elec_model.py` — retrain and write `lightgbm_elec_model.txt`
-- `make_elec_prediction.py` — write next-day forecasts for all three models
-- `score_elec_predictions.py` — fill in `actual_demand_mw`, upsert `electricity_model_performance`
-- `diagnose_elec_forecast.py` — 6-check publish gate (non-zero exit)
-
-Shared:
-
-- `app.py` — FastAPI service, both targets
-- `index.html` — dashboard, one tab per target
-- `local_time.py` — the only source of "today"
-- `verify_deployment_readiness.py` — the single go-live gate
+```bash
+python -m vericast.pm25.ingest      # …features, .leakage_test, .train, .predict, .score, .diagnose
+python -m vericast.elec.ingest      # …same names under elec
+python -m vericast.schema           # create any missing tables
+```
 
 Not on the production path: `experiments/` (`compare_models.py`,
 `naive_baseline_backtest.py`, `train_lightgbm.py`, `train_sarima.py`,
@@ -207,8 +221,8 @@ published.
   sequential and fail-fast — scoring runs *before* forecasting because yesterday's
   actual has to exist first.
 - `.github/workflows/weekly-retrain.yml` — Sundays: retrain both models and commit
-  `lightgbm_model.txt` and `lightgbm_elec_model.txt` back to the repo, which the daily
-  pipeline picks up on its next checkout.
+  `models/lightgbm_model.txt` and `models/lightgbm_elec_model.txt` back to the repo,
+  which the daily pipeline picks up on its next checkout.
 
 Both scoring scripts score *every* pending row, not just yesterday's, so a missed run
 self-heals on the next one instead of leaving a permanent NULL.
@@ -226,10 +240,10 @@ python verify_deployment_readiness.py   # must print ALL CHECKS PASSED
 First-time electricity setup (one-off, then the daily job takes over):
 
 ```bash
-python create_electricity_tables.py
-python ingest_electricity.py                          # ~1,300 rows, 2023-01-01 →
-python engineer_elec_features.py
-python train_elec_model.py
+python -m vericast.schema
+python -m vericast.elec.ingest                        # ~1,300 rows, 2023-01-01 →
+python -m vericast.elec.features
+python -m vericast.elec.train
 python experiments/save_elec_backtest_results.py      # seeds the launch record
 ```
 

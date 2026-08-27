@@ -1,6 +1,6 @@
 """Attach actuals to pending electricity predictions and record per-day metrics.
 
-Same shape as score_predictions.py - deliberately not scoped to "yesterday", so
+Same shape as vericast/pm25/score.py - deliberately not scoped to "yesterday", so
 a missed run self-heals instead of leaving rows pending forever - plus MAPE,
 which is the metric that actually travels for demand: 400 MW of error means
 something different at 20,000 MW than a PM2.5 error of 400 would.

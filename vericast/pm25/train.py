@@ -4,16 +4,16 @@ import numpy as np
 import lightgbm as lgb
 from dotenv import load_dotenv
 
+from vericast import MODEL_PM25 as MODEL_PATH
+
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 CITY = "Nagpur"
-MODEL_PATH = "lightgbm_model.txt"
 
-# Same feature order used everywhere else (compare_models.py, train_lightgbm.py,
-# save_backtest_results.py, make_prediction.py) - keep this list in sync or
-# predictions will silently use the wrong columns.
+# Single definition of the feature order for this target: predict.py and the
+# experiments/ backtests import it from here, so they cannot drift.
 FEATURE_COLUMNS = [
     "pm2_5_lag_1", "pm10_lag_1", "temperature_lag_1", "wind_speed_lag_1", "precipitation_lag_1",
     "pm2_5_roll_7", "pm2_5_roll_30", "pm10_roll_7", "pm10_roll_30",

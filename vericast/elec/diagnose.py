@@ -3,14 +3,14 @@
 Runs last in the daily job; a non-zero exit stops the pipeline rather than
 letting an unfit forecast stand.
 
-Thresholds are NOT copied from diagnose_lightgbm_forecast.py. The demand mirror
+Thresholds are NOT copied from vericast/pm25/diagnose.py. The demand mirror
 lags real time by 2-4 days, so PM2.5's "must be current" freshness check would
 fail here every single day and block a forecast that is in fact correct for the
 data available. What this checks instead is internal consistency: the forecast is
 labelled one day after the newest observation, sits in a physically plausible
 range, and is not wildly off the recent trend.
 
-Usage: python diagnose_elec_forecast.py
+Usage: python -m vericast.elec.diagnose
 """
 import os
 import sys
@@ -19,12 +19,11 @@ from datetime import timedelta
 import psycopg
 from dotenv import load_dotenv
 
-import local_time
+from vericast import MODEL_ELEC as MODEL_PATH, local_time
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 STATE = "Maharashtra"
-MODEL_PATH = "lightgbm_elec_model.txt"
 
 # Observed 2023-2026 Maharashtra range is 20,147-32,419 MW. Bounds are wide
 # enough for growth and a mild winter, tight enough that a unit error or a
@@ -83,12 +82,12 @@ def main():
                 "features as_of matches observations as_of",
                 latest_feat == latest_obs,
                 f"features={latest_feat}, observations={latest_obs}; "
-                "engineer_elec_features.py needs to run"
+                "vericast/elec/features.py needs to run"
                 if latest_feat != latest_obs else "",
             )
 
             # Every model should have published for the day after the newest
-            # observation - that is what make_elec_prediction.py labels it.
+            # observation - that is what vericast/elec/predict.py labels it.
             expected_date = latest_obs + timedelta(days=1)
             cur.execute("""
                 SELECT model, predicted_demand_mw
