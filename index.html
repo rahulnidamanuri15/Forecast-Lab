@@ -3,8 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VERICAST · PM2.5 & Air Quality Forecasting</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<title>VeriCast · Published-then-verified PM2.5 &amp; Electricity Demand Forecasts</title>
+<!-- Version-pinned: an unpinned jsDelivr tag means a silent major-version
+     bump can break every chart on this page without a commit here. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -657,25 +659,25 @@
   <div class="kpi-grid">
     <div class="kpi-card">
       <div class="kpi-label">Today's Reading</div>
-      <div class="kpi-value val-orange" id="kpi-today-val">16.9 <span class="unit">μg/m³</span></div>
-      <div class="kpi-sub" id="kpi-today-sub">PM2.5 · Nagpur, MH</div>
+      <div class="kpi-value val-orange" id="kpi-today-val">— <span class="unit">μg/m³</span></div>
+      <div class="kpi-sub" id="kpi-today-sub">PM2.5 · latest observation</div>
     </div>
 
     <div class="kpi-card">
       <div class="kpi-label">Tomorrow's Forecast</div>
-      <div class="kpi-value val-teal" id="kpi-forecast-val">16.95 <span class="unit">μg/m³</span></div>
+      <div class="kpi-value val-teal" id="kpi-forecast-val">— <span class="unit">μg/m³</span></div>
       <div class="kpi-sub">LightGBM prediction</div>
     </div>
 
     <div class="kpi-card">
       <div class="kpi-label">Model MAE</div>
-      <div class="kpi-value val-white" id="kpi-mae-val">9.54 <span class="unit">vs 11.06</span></div>
+      <div class="kpi-value val-white" id="kpi-mae-val">— <span class="unit">vs —</span></div>
       <div class="kpi-sub">vs persistence baseline</div>
     </div>
 
     <div class="kpi-card">
       <div class="kpi-label">Track Record</div>
-      <div class="kpi-value val-cyan" id="kpi-record-val">705</div>
+      <div class="kpi-value val-cyan" id="kpi-record-val">—</div>
       <div class="kpi-sub">public forecasts logged</div>
     </div>
   </div>
@@ -685,20 +687,20 @@
     <div class="hero-main-card">
       <div>
         <div class="hero-header">
-          <div class="hero-eyebrow" id="hero-forecast-date">TOMORROW'S FORECAST · NAGPUR, MH</div>
+          <div class="hero-eyebrow" id="hero-forecast-date">NEXT-DAY FORECAST</div>
           <div class="model-pill" id="hero-model-badge">LIGHTGBM</div>
         </div>
 
         <div class="hero-body">
-          <div class="hero-number" id="hero-main-number">16.95</div>
+          <div class="hero-number" id="hero-main-number">—</div>
           <div class="hero-meta-col">
             <div class="hero-unit-tag">PM2.5 μg/m³</div>
-            <div class="category-pill cat-low" id="hero-cat-pill">LOW CONCENTRATION</div>
+            <div class="category-pill cat-mod" id="hero-cat-pill">—</div>
           </div>
         </div>
 
         <div class="hero-change-text" id="hero-change-desc">
-          <b>~0.3% vs today</b> · Based on yesterday's reading
+          Based on the latest published observation
         </div>
       </div>
 
@@ -706,7 +708,7 @@
         <svg viewBox="0 0 24 24" fill="none">
           <path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        <span id="hero-improvement-text">13.7% better than persistence baseline (MAE 9.54 vs 11.06)</span>
+        <span id="hero-improvement-text">Measuring against persistence baseline…</span>
       </div>
     </div>
 
@@ -714,23 +716,23 @@
     <div class="metrics-card">
       <div class="metric-row">
         <span class="metric-name">Total Forecasts</span>
-        <span class="metric-val" id="metric-total-scored">705</span>
+        <span class="metric-val" id="metric-total-scored">—</span>
       </div>
       <div class="metric-row">
         <span class="metric-name">Within ±5 μg/m³</span>
-        <span class="metric-val" id="metric-within-5">72%</span>
+        <span class="metric-val" id="metric-within-5">—</span>
       </div>
       <div class="metric-row">
         <span class="metric-name">LightGBM MAE</span>
-        <span class="metric-val" id="metric-lgb-mae" style="color: var(--brand-teal);">9.54</span>
+        <span class="metric-val" id="metric-lgb-mae" style="color: var(--brand-teal);">—</span>
       </div>
       <div class="metric-row">
         <span class="metric-name">LightGBM RMSE</span>
-        <span class="metric-val" id="metric-lgb-rmse">12.48</span>
+        <span class="metric-val" id="metric-lgb-rmse">—</span>
       </div>
       <div class="metric-row">
         <span class="metric-name">Naive Baseline MAE</span>
-        <span class="metric-val" id="metric-naive-mae" style="color: #94A3B8;">11.06</span>
+        <span class="metric-val" id="metric-naive-mae" style="color: #94A3B8;">—</span>
       </div>
     </div>
   </div>
@@ -753,7 +755,7 @@
         <div class="card-title">Accuracy Over Time</div>
       </div>
       <div class="accuracy-number" id="acc-big-num">
-        93% <span>30-day rolling</span>
+        — <span>last 15 scored</span>
       </div>
       <div class="chart-container" style="height: 120px;">
         <canvas id="accuracyChart"></canvas>
@@ -769,27 +771,27 @@
         <div class="bar-item">
           <div class="bar-label-row">
             <span class="bar-model-name">LightGBM</span>
-            <span class="bar-score" style="color: var(--brand-teal);" id="bar-lgb-val">9.54</span>
+            <span class="bar-score" style="color: var(--brand-teal);" id="bar-lgb-val">—</span>
           </div>
           <div class="bar-track">
-            <div class="bar-fill fill-teal" id="bar-lgb-fill" style="width: 46%;"></div>
+            <div class="bar-fill fill-teal" id="bar-lgb-fill" style="width: 0%;"></div>
           </div>
         </div>
 
         <div class="bar-item">
           <div class="bar-label-row">
             <span class="bar-model-name">Persistence (Naive)</span>
-            <span class="bar-score" style="color: #94A3B8;" id="bar-naive-val">11.06</span>
+            <span class="bar-score" style="color: #94A3B8;" id="bar-naive-val">—</span>
           </div>
           <div class="bar-track">
-            <div class="bar-fill fill-slate" id="bar-naive-fill" style="width: 62%;"></div>
+            <div class="bar-fill fill-slate" id="bar-naive-fill" style="width: 0%;"></div>
           </div>
         </div>
       </div>
 
       <div class="improvement-callout-box">
         <span class="callout-label">MAE Improvement</span>
-        <span class="callout-value" id="callout-improve-val">+13.7%</span>
+        <span class="callout-value" id="callout-improve-val">—</span>
       </div>
     </div>
   </div>
@@ -1007,6 +1009,22 @@
     return (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
   }
 
+  // Values below come from our own DB and the API allowlists `model`, so this
+  // is belt-and-braces - but every row built as an innerHTML template string
+  // goes through it, so a future column of free text cannot inject markup.
+  function esc(v) {
+    return String(v ?? '').replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // Percentage accuracy against an actual. Returns null when the actual is
+  // zero or missing: dividing by it gives Infinity, which renders as a
+  // nonsense 100% row rather than an honest gap.
+  function accuracyPct(actual, predicted) {
+    if (actual === null || actual === undefined || !Number.isFinite(actual) || actual === 0) return null;
+    return Math.max(0, 100 - Math.abs(actual - predicted) / actual * 100);
+  }
+
   let predChartInstance = null;
   let accChartInstance = null;
 
@@ -1030,7 +1048,7 @@
       }
 
       // 2. Latest Observed PM2.5
-      let latestObsVal = 16.9;
+      let latestObsVal = null;
       if (history && history.historical_data && history.historical_data.length) {
         const last = history.historical_data[history.historical_data.length - 1];
         latestObsVal = last.pm2_5;
@@ -1050,10 +1068,13 @@
         pill.textContent = band.label;
         pill.className = `category-pill ${band.cls}`;
 
-        const diff = fVal - latestObsVal;
-        const pctDiff = ((diff / latestObsVal) * 100).toFixed(1);
-        const sign = diff >= 0 ? '+' : '';
-        document.getElementById('hero-change-desc').innerHTML = `<b>${sign}${pctDiff}% vs today</b> · Based on latest observation`;
+        if (latestObsVal) {
+          const diff = fVal - latestObsVal;
+          const pctDiff = ((diff / latestObsVal) * 100).toFixed(1);
+          const sign = diff >= 0 ? '+' : '';
+          document.getElementById('hero-change-desc').innerHTML =
+            `<b>${sign}${pctDiff}% vs today</b> · Based on latest observation`;
+        }
       }
 
       // 4. Full-record accuracy & model comparison
@@ -1093,6 +1114,7 @@
         let within5Count = 0;
         let totalScored = 0;
         let totalAccuracySum = 0;
+        let accScored = 0;   // rows with a usable (non-zero) actual
 
         const tableHtml = rows.map(r => {
           let errStr = '—';
@@ -1105,9 +1127,12 @@
             totalScored++;
             if (err <= 5) within5Count++;
 
-            const acc = Math.max(0, 100 - (err / r.actual_pm2_5) * 100);
-            accStr = `${acc.toFixed(0)}%`;
-            totalAccuracySum += acc;
+            const acc = accuracyPct(r.actual_pm2_5, r.predicted_pm2_5);
+            if (acc !== null) {
+              accStr = `${acc.toFixed(0)}%`;
+              totalAccuracySum += acc;
+              accScored++;
+            }
 
             if (err <= 3) badge = '<span class="status-badge badge-excellent">EXCELLENT</span>';
             else if (err <= 6) badge = '<span class="status-badge badge-good">GOOD</span>';
@@ -1117,7 +1142,7 @@
           return `
             <tr>
               <td>${r.forecast_date}</td>
-              <td><span style="color: var(--brand-teal); font-weight: 600;">${r.model}</span></td>
+              <td><span style="color: var(--brand-teal); font-weight: 600;">${esc(r.model)}</span></td>
               <td class="mono pred-highlight">${fmt(r.predicted_pm2_5, 2)}</td>
               <td class="mono">${r.actual_pm2_5 !== null ? fmt(r.actual_pm2_5, 2) : '<span style="color: var(--text-faint)">—</span>'}</td>
               <td class="mono">${errStr}</td>
@@ -1132,9 +1157,11 @@
         if (totalScored > 0) {
           const withinPct = ((within5Count / totalScored) * 100).toFixed(0);
           document.getElementById('metric-within-5').textContent = `${withinPct}%`;
-
-          const avgAcc = (totalAccuracySum / totalScored).toFixed(0);
-          document.getElementById('acc-big-num').innerHTML = `${avgAcc}% <span>recent avg</span>`;
+        }
+        if (accScored > 0) {
+          const avgAcc = (totalAccuracySum / accScored).toFixed(0);
+          document.getElementById('acc-big-num').innerHTML =
+            `${avgAcc}% <span>last ${accScored} scored</span>`;
         }
       }
 
@@ -1142,6 +1169,15 @@
       if (history && history.historical_data && forecast) {
         const labels = history.historical_data.map(d => d.date.slice(5)); // MM-DD
         const obsValues = history.historical_data.map(d => d.pm2_5);
+
+        // Published predictions on the same axis, keyed by the day they were
+        // for. Days outside the /predictions window stay null and simply break
+        // the line - the card claims two series, so it has to draw two.
+        const predByDate = new Map(
+          ((predictions && predictions.predictions) || [])
+            .map(r => [r.forecast_date, r.predicted_pm2_5]));
+        const predValues = history.historical_data.map(
+          d => predByDate.has(d.date) ? predByDate.get(d.date) : null);
 
         // Render Prediction line on Chart
         const ctx1 = document.getElementById('predVsActualChart').getContext('2d');
@@ -1153,7 +1189,7 @@
             labels: labels,
             datasets: [
               {
-                label: 'Observed PM2.5',
+                label: 'Observed',
                 data: obsValues,
                 borderColor: '#00E5A3',
                 backgroundColor: 'rgba(0, 229, 163, 0.05)',
@@ -1161,13 +1197,30 @@
                 tension: 0.3,
                 pointRadius: 0,
                 fill: true
+              },
+              {
+                label: 'Predicted',
+                data: predValues,
+                borderColor: '#38BDF8',
+                borderWidth: 2,
+                borderDash: [4, 3],
+                tension: 0.3,
+                pointRadius: 0,
+                fill: false,
+                spanGaps: false
               }
             ]
           },
           options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
+            plugins: {
+              legend: {
+                display: true,
+                position: 'bottom',
+                labels: { color: '#94A3B8', boxWidth: 10, font: { size: 10 } }
+              }
+            },
             scales: {
               x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748B', font: { size: 10 }, maxTicksLimit: 6 } },
               y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748B', font: { size: 10 } } }
@@ -1185,8 +1238,7 @@
           .filter(r => r.actual_pm2_5 !== null && r.actual_pm2_5 !== undefined)
           .slice().reverse();
         const accLabels = scored.map(r => r.forecast_date.slice(5));
-        const accValues = scored.map(
-          r => Math.max(0, 100 - Math.abs(r.actual_pm2_5 - r.predicted_pm2_5) / r.actual_pm2_5 * 100));
+        const accValues = scored.map(r => accuracyPct(r.actual_pm2_5, r.predicted_pm2_5));
 
         accChartInstance = new Chart(ctx2, {
           type: 'line',
@@ -1210,7 +1262,9 @@
             plugins: { legend: { display: false } },
             scales: {
               x: { display: false },
-              y: { min: 70, max: 100, grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748B', font: { size: 9 }, stepSize: 10 } }
+              // No min/max: clamping to 70-100 truncated every bad day out of
+              // existence, which is the one thing this chart must not do.
+              y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748B', font: { size: 9 } } }
             }
           }
         });
@@ -1349,7 +1403,7 @@
           return `
             <tr>
               <td>${r.forecast_date}</td>
-              <td><span style="color: var(--brand-teal); font-weight: 600;">${r.model}</span></td>
+              <td><span style="color: var(--brand-teal); font-weight: 600;">${esc(r.model)}</span></td>
               <td class="mono pred-highlight">${fmt(r.predicted_demand_mw, 0)}</td>
               <td class="mono">${r.actual_demand_mw !== null ? fmt(r.actual_demand_mw, 0) : '<span style="color: var(--text-faint)">—</span>'}</td>
               <td class="mono">${errStr}</td>
