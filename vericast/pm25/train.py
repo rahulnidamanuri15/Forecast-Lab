@@ -5,15 +5,17 @@ import lightgbm as lgb
 from dotenv import load_dotenv
 
 from vericast import MODEL_PM25 as MODEL_PATH
+from vericast.gate import challenger_ships
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-CITY = "Nagpur"
+CITY = os.getenv("CITY", "Nagpur")
 
-# Single definition of the feature order for this target: predict.py and the
-# experiments/ backtests import it from here, so they cannot drift.
+# 15 features, fixed order. Single definition of the feature order for this
+# target: predict.py and the experiments/ backtests import it from here, so
+# they cannot drift.
 FEATURE_COLUMNS = [
     "pm2_5_lag_1", "pm10_lag_1", "temperature_lag_1", "wind_speed_lag_1", "precipitation_lag_1",
     "pm2_5_roll_7", "pm2_5_roll_30", "pm10_roll_7", "pm10_roll_30",
@@ -34,40 +36,39 @@ PARAMS = {
     "random_state": 42,
 }
 
+NUM_BOOST_ROUND = 100
+
+UNIT = "ug/m3"
+
+
+# The INTERVAL '1 day' join is what makes this a t -> t+1 dataset. Every feature
+# is computed from data at or before f.as_of; the label is the next day's actual.
+# Both the select list and the NOT-NULL filter are generated from
+# FEATURE_COLUMNS, so a reorder or rename cannot silently mislabel the model's
+# features - which the count-only assert below could not catch.
+DATASET_SQL = f"""
+    SELECT
+        f.as_of AS feature_date,
+        o.as_of AS target_date,
+        {", ".join("f." + c for c in FEATURE_COLUMNS)},
+        o.pm2_5 AS target_pm2_5
+    FROM features f
+    JOIN observations o
+      ON o.city = f.city
+     AND o.as_of = f.as_of + INTERVAL '1 day'
+    WHERE f.city = %s
+      AND {" AND ".join("f." + c + " IS NOT NULL" for c in FEATURE_COLUMNS)}
+      AND o.pm2_5 IS NOT NULL
+    ORDER BY f.as_of;
+"""
+
 
 def load_full_dataset():
     """Load the full t -> t+1 dataset (unlike backtest scripts, no walk-forward split;
     this is meant to train one final model on everything we have)."""
-    query = """
-        SELECT
-            f.as_of AS feature_date,
-            o.as_of AS target_date,
-
-            f.pm2_5_lag_1, f.pm10_lag_1, f.temperature_lag_1,
-            f.wind_speed_lag_1, f.precipitation_lag_1,
-
-            f.pm2_5_roll_7, f.pm2_5_roll_30, f.pm10_roll_7, f.pm10_roll_30,
-
-            f.day_of_week, f.month, f.is_weekend,
-
-            f.temperature_2m_mean, f.wind_speed_10m_max, f.precipitation_sum,
-
-            o.pm2_5 AS target_pm2_5
-
-        FROM features f
-        JOIN observations o
-          ON o.city = f.city
-         AND o.as_of = f.as_of + INTERVAL '1 day'
-
-        WHERE f.city = %s
-          AND f.pm2_5_lag_1 IS NOT NULL
-          AND o.pm2_5 IS NOT NULL
-
-        ORDER BY f.as_of;
-    """
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (CITY,))
+            cur.execute(DATASET_SQL, (CITY,))
             rows = cur.fetchall()
 
     if not rows:
@@ -97,8 +98,17 @@ def train_and_save():
         "The SQL column order and FEATURE_COLUMNS must match."
     )
 
+    # Retrain gate before anything is written. A refused retrain leaves the
+    # incumbent artifact untouched and exits 0 - see vericast/gate.py.
+    if not challenger_ships(X, y, PARAMS, NUM_BOOST_ROUND,
+                            FEATURE_COLUMNS.index("pm2_5_lag_1"),
+                            incumbent_path=MODEL_PATH,
+                            feature_names=FEATURE_COLUMNS, unit=UNIT):
+        print(f"[SKIP] Keeping the existing model at {MODEL_PATH}.")
+        return None
+
     train_data = lgb.Dataset(X, label=y, feature_name=FEATURE_COLUMNS)
-    model = lgb.train(PARAMS, train_data, num_boost_round=100)
+    model = lgb.train(PARAMS, train_data, num_boost_round=NUM_BOOST_ROUND)
 
     model.save_model(MODEL_PATH)
     print(f"[OK] Saved production model to {MODEL_PATH}")
@@ -108,6 +118,12 @@ def train_and_save():
     check_pred = reloaded.predict(X[-1:])
     print(f"Sanity check - reloaded model prediction on last row: {check_pred[0]:.4f} "
           f"(actual was {y[-1]:.4f})")
+
+    importance = sorted(zip(FEATURE_COLUMNS, model.feature_importance("gain")),
+                        key=lambda pair: pair[1], reverse=True)
+    print("\nFeature importance (gain):")
+    for name, gain in importance:
+        print(f"  {name}: {gain:.0f}")
 
     return MODEL_PATH
 
