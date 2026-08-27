@@ -1,0 +1,7 @@
+# LightGBM's model parser is line-ending sensitive: it reads a `.txt` artifact
+# line by line and a trailing \r makes every tree header fail with
+# "Model format error, expect a tree here". Git's core.autocrlf=true (the
+# Windows default) converts these on checkout, so a clone that CI trains and
+# pushes as LF becomes unloadable locally while `git status` stays clean.
+# Mark them as not-text so no conversion ever happens, in either direction.
+models/*.txt -text
