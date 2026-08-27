@@ -99,8 +99,8 @@ same query, not a hand-maintained copy.
 
 | Model | Scored | MAE (μg/m³) | RMSE (μg/m³) | Description |
 |-------|--------|------|------|-------------|
-| lightgbm | 709 | **9.51** | 12.44 | LightGBM on lagged + rolling + weather features |
-| naive_baseline | 710 | 11.01 | 14.40 | Predict tomorrow's PM2.5 as today's PM2.5 |
+| lightgbm | 711 | **9.49** | 12.42 | LightGBM on lagged + rolling + weather features |
+| naive_baseline | 712 | 10.99 | 14.38 | Predict tomorrow's PM2.5 as today's PM2.5 |
 
 LightGBM beats the naive baseline by **~13.7% MAE**. That margin is the whole point:
 persistence is a genuinely hard baseline for daily air quality, and a model that
@@ -110,9 +110,9 @@ can't beat it isn't worth deploying.
 
 | Model | Scored | MAE (MW) | RMSE (MW) | MAPE | Description |
 |-------|--------|----------|-----------|------|-------------|
-| lightgbm | 1238 | **773.54** | 1036.30 | **3.00%** | 14 features: lagged demand, rolling aggregates, thermal, calendar |
-| naive_baseline | 1238 | 981.15 | 1309.45 | 3.79% | Tomorrow's peak = today's peak |
-| seasonal_naive | 1238 | 1154.08 | 1590.27 | 4.48% | Tomorrow's peak = the same weekday last week |
+| lightgbm | 1239 | **773.90** | 1036.46 | **3.00%** | 14 features: lagged demand, rolling aggregates, thermal, calendar |
+| naive_baseline | 1239 | 981.46 | 1309.49 | 3.79% | Tomorrow's peak = today's peak |
+| seasonal_naive | 1239 | 1154.95 | 1590.89 | 4.49% | Tomorrow's peak = the same weekday last week |
 
 LightGBM beats persistence by **21.2% MAE** here — a wider margin than PM2.5's.
 
@@ -123,7 +123,7 @@ Two results worth reading carefully:
   comparisons should use MAPE, never MAE.
 - **`seasonal_naive` came last, not first.** The design expectation was that a power
   grid's same-weekday-last-week value would beat plain persistence, because Sunday
-  looks more like last Sunday than like Saturday. Measured over 1,238 days it is the
+  looks more like last Sunday than like Saturday. Measured over 1,239 days it is the
   worst of the three — a 6-day-old value carries too much drift for the weekly cycle
   to pay for. The weekly cycle is real (`day_of_week` ranks 3rd in feature importance,
   behind `demand_roll_7_mean` and `demand_lag_1`); LightGBM just extracts it better
@@ -136,7 +136,9 @@ scored day* from `model_performance`, so its `sample_size` is normally 1. Use
 `/evaluation` for accuracy claims and `/leaderboard` for "how did yesterday go".
 
 Reproduce the frozen walk-forward benchmark with `python experiments/compare_models.py`
-(n=700, MAE 9.5798 vs 11.0962 — consistent with the live record above).
+(n=1062, MAE 9.3567 vs 10.7975 — consistent with the live record above). Its sample
+count is smaller than the 1,092-row dataset because the first 30 days seed the
+walk-forward window rather than being scored.
 
 ## Layout
 
@@ -148,6 +150,7 @@ models/                           committed LightGBM artifacts
 vericast/
 ├── __init__.py                   resolves models/ paths from the package, not cwd
 ├── local_time.py                 the only source of "today" (Asia/Kolkata)
+├── gate.py                       retrain gate: refuse to ship a broken model
 ├── schema.py                     idempotent DDL for all eight tables
 ├── pm25/                         Nagpur PM2.5 (μg/m³)
 │   ├── ingest.py                 Open-Meteo → observations
@@ -222,7 +225,16 @@ published.
   actual has to exist first.
 - `.github/workflows/weekly-retrain.yml` — Sundays: retrain both models and commit
   `models/lightgbm_model.txt` and `models/lightgbm_elec_model.txt` back to the repo,
-  which the daily pipeline picks up on its next checkout.
+  which the daily pipeline picks up on its next checkout. Neither artifact is
+  overwritten unconditionally: `vericast/gate.py` holds out the last 30 days, fits a
+  challenger on the head only, and refuses to write unless it beats persistence,
+  varies as much as the actuals do, and correlates with them. A refused retrain exits
+  0 and leaves the artifact untouched, so the workflow reports "nothing to commit".
+
+  The gate deliberately does *not* vote on "challenger beats the artifact on disk":
+  that artifact was trained on the held-out rows, which on live data makes it look
+  1.5x (PM2.5) to 2.0x (electricity) better than an honest challenger and would freeze
+  the incumbent forever. Its score is printed for drift, not compared.
 
 Both scoring scripts score *every* pending row, not just yesterday's, so a missed run
 self-heals on the next one instead of leaving a permanent NULL.
