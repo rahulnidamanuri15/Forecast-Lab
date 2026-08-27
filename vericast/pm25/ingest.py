@@ -4,13 +4,13 @@ import psycopg
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-import local_time
+from vericast import local_time
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Configuration - same as check-data.py
+# Configuration
 LAT, LON = 21.1463, 79.0849          # Nagpur, India
 CITY = "Nagpur"
 

@@ -21,7 +21,7 @@ import psycopg
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-import local_time
+from vericast import local_time
 
 load_dotenv()
 

@@ -3,7 +3,7 @@ name: Weekly Model Retrain
 # Retrains the production LightGBM model on all data accumulated so far and
 # commits the updated artifact back to the repo. daily-pipeline.yml checks out
 # the repo fresh on every run, so it will automatically pick up whatever
-# lightgbm_model.txt is committed here - no changes needed there.
+# models/lightgbm_model.txt is committed here - no changes needed there.
 on:
   schedule:
     - cron: '0 4 * * 0'  # 04:00 UTC every Sunday, an hour before the daily pipeline
@@ -31,19 +31,19 @@ jobs:
       - name: Retrain production model
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python train_production_model.py
+        run: python -m vericast.pm25.train
 
       - name: Retrain electricity model
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           STATE: Maharashtra
-        run: python train_elec_model.py
+        run: python -m vericast.elec.train
 
       - name: Commit updated model artifact
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add lightgbm_model.txt lightgbm_elec_model.txt
+          git add models/lightgbm_model.txt models/lightgbm_elec_model.txt
           if git diff --cached --quiet; then
             echo "No change in model artifacts; nothing to commit."
           else

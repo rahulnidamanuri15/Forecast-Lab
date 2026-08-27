@@ -5,7 +5,7 @@ predict strictly the next day, never let a model see its own target. Run once at
 launch so the public leaderboard opens with a real measured record instead of an
 empty table.
 
-Imports FEATURE_COLUMNS / PARAMS / DATASET_SQL from train_elec_model rather than
+Imports FEATURE_COLUMNS / PARAMS / DATASET_SQL from vericast.elec.train rather than
 re-declaring them, so the backtest cannot silently drift from the production
 model it is meant to characterise.
 
@@ -23,7 +23,7 @@ import lightgbm as lgb
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from train_elec_model import FEATURE_COLUMNS, PARAMS, DATASET_SQL, STATE  # noqa: E402
+from vericast.elec.train import FEATURE_COLUMNS, PARAMS, DATASET_SQL, STATE  # noqa: E402
 
 load_dotenv()
 
