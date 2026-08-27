@@ -6,7 +6,7 @@ from datetime import timedelta
 from dotenv import load_dotenv
 import httpx
 
-import local_time
+from vericast import MODEL_PM25, local_time
 
 load_dotenv()
 
@@ -162,7 +162,7 @@ def check_leakage_test():
     print("Running leakage test:")
     try:
         result = subprocess.run([
-            sys.executable, 'leakage_test.py'
+            sys.executable, '-m', 'vericast.pm25.leakage_test'
         ], capture_output=True, text=True, cwd=os.getcwd(), timeout=180)
 
         if result.returncode == 0:
@@ -187,7 +187,7 @@ def check_leakage_test():
 
 def check_model_artifact():
     """Check that LightGBM model artifact exists"""
-    model_path = "lightgbm_model.txt"
+    model_path = MODEL_PM25
     if os.path.exists(model_path):
         # Check if it's not empty
         if os.path.getsize(model_path) > 0:
@@ -441,7 +441,7 @@ def check_api_electricity_endpoints():
     One function rather than five: they either all work or the router is broken.
     Deliberately no DB-freshness equivalent of check_observations_freshness here -
     that check requires <=1 day stale, and the demand mirror normally runs 2-4 days
-    behind, so it would fail a correct deployment every day. diagnose_elec_forecast.py
+    behind, so it would fail a correct deployment every day. vericast/elec/diagnose.py
     owns electricity freshness, with the right 5-day threshold.
     """
     endpoints = [

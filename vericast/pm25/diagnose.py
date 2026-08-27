@@ -1,8 +1,8 @@
 """
-Run this locally (where DATABASE_URL and lightgbm_model.txt are actually
+Run this locally (where DATABASE_URL and the model artifact are actually
 reachable) to figure out why /forecast?model=lightgbm might be 404ing.
 
-Usage: python diagnose_lightgbm_forecast.py
+Usage: python -m vericast.pm25.diagnose
 """
 import os
 import sys
@@ -10,10 +10,11 @@ import sys
 import psycopg
 from dotenv import load_dotenv
 
+from vericast import MODEL_PM25 as MODEL_PATH
+
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 CITY = "Nagpur"
-MODEL_PATH = "lightgbm_model.txt"
 
 
 def check(label, ok, detail=""):
@@ -56,7 +57,7 @@ def main():
                 "features as_of matches observations as_of",
                 latest_feat == latest_obs,
                 f"features={latest_feat}, observations={latest_obs} "
-                "engineer_features.py needs to run" if latest_feat != latest_obs else "",
+                "vericast/pm25/features.py needs to run" if latest_feat != latest_obs else "",
             )
 
             # 4. Are there NULLs in the latest features row?

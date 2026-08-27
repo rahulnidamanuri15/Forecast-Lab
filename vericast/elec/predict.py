@@ -1,7 +1,7 @@
 """Publish tomorrow's Maharashtra peak demand forecast for three models.
 
 The forecast is always labelled "the day after the data we actually have", not
-blindly real-world tomorrow - same rule as make_prediction.py, and it matters
+blindly real-world tomorrow - same rule as vericast/pm25/predict.py, and it matters
 more here: the upstream demand mirror runs 2-4 days behind, so a stale-data run
 is the normal case rather than an incident. The staleness WARN threshold is
 therefore looser than PM2.5's.
@@ -15,25 +15,16 @@ import lightgbm as lgb
 from datetime import timedelta
 from dotenv import load_dotenv
 
-import local_time
+from vericast import MODEL_ELEC as MODEL_PATH, local_time
+from vericast.elec.train import FEATURE_COLUMNS
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 STATE = "Maharashtra"
-MODEL_PATH = "lightgbm_elec_model.txt"
 
 # The mirror is typically 2-4 days behind; only warn past that.
 STALE_WARN_DAYS = 5
-
-# Must match the column order in train_elec_model.py.
-FEATURE_COLUMNS = [
-    "demand_lag_1", "demand_lag_2", "demand_lag_6",
-    "demand_roll_7_mean", "demand_roll_7_max", "demand_roll_30_mean",
-    "temp_lag_1", "temp_roll_7", "cooling_degree_days",
-    "day_of_week", "month", "is_weekend",
-    "temperature_2m_mean", "temperature_2m_max",
-]
 
 UPSERT_SQL = """
 INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model)
@@ -49,7 +40,7 @@ def load_lightgbm_model():
     so the pipeline degrades to baselines-only instead of crashing."""
     if not os.path.exists(MODEL_PATH):
         print(f"[WARN] No LightGBM model artifact found at {MODEL_PATH}; "
-              f"skipping LightGBM forecast. Run train_elec_model.py first.")
+              f"skipping LightGBM forecast. Run vericast/elec/train.py first.")
         return None
     return lgb.Booster(model_file=MODEL_PATH)
 
@@ -121,7 +112,7 @@ def make_daily_prediction():
         elif feature_row[0] != as_of:
             print(
                 f"[WARN] Latest features row ({feature_row[0]}) doesn't match latest "
-                f"observation ({as_of}); has engineer_elec_features.py been run for "
+                f"observation ({as_of}); has vericast/elec/features.py been run for "
                 f"today's data yet? Skipping seasonal_naive and LightGBM."
             )
         else:
@@ -158,7 +149,7 @@ def make_daily_prediction():
                 print(f"[OK] Stored lightgbm prediction for {forecast_date}: "
                       f"{lgbm_pred:.0f} MW")
 
-        # Scoring is score_elec_predictions.py's job (step 4 of the daily job,
+        # Scoring is vericast/elec/score.py's job (step 4 of the daily job,
         # before this one). It scores *every* pending row, so a missed day
         # self-heals; a second copy of that rule here would only drift.
 

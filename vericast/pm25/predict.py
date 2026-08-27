@@ -4,21 +4,13 @@ import lightgbm as lgb
 from datetime import timedelta
 from dotenv import load_dotenv
 
-import local_time
+from vericast import MODEL_PM25 as MODEL_PATH, local_time
+from vericast.pm25.train import FEATURE_COLUMNS
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 CITY = "Nagpur"
-MODEL_PATH = "lightgbm_model.txt"
-
-# Must match the column order in train_production_model.py / compare_models.py
-FEATURE_COLUMNS = [
-    "pm2_5_lag_1", "pm10_lag_1", "temperature_lag_1", "wind_speed_lag_1", "precipitation_lag_1",
-    "pm2_5_roll_7", "pm2_5_roll_30", "pm10_roll_7", "pm10_roll_30",
-    "day_of_week", "month", "is_weekend",
-    "temperature_2m_mean", "wind_speed_10m_max", "precipitation_sum",
-]
 
 
 def load_lightgbm_model():
@@ -26,7 +18,7 @@ def load_lightgbm_model():
     trained yet, so the pipeline degrades to naive-only instead of crashing."""
     if not os.path.exists(MODEL_PATH):
         print(f"[WARN] No LightGBM model artifact found at {MODEL_PATH}; "
-              f"skipping LightGBM forecast. Run train_production_model.py first.")
+              f"skipping LightGBM forecast. Run vericast/pm25/train.py first.")
         return None
     return lgb.Booster(model_file=MODEL_PATH)
 
@@ -53,7 +45,7 @@ def make_daily_prediction():
 
         lgbm_model = load_lightgbm_model()
 
-        # Real-world "today" in the operating timezone (see local_time.py),
+        # Real-world "today" in the operating timezone (see vericast/local_time.py),
         # used only to detect staleness in the warning below.
         today = local_time.today()
         yesterday = today - timedelta(days=1)
@@ -122,7 +114,7 @@ def make_daily_prediction():
                 if feat_as_of != as_of:
                     print(
                         f"[WARN] Latest features row ({feat_as_of}) doesn't match latest "
-                        f"observation ({as_of}); has engineer_features.py been run for "
+                        f"observation ({as_of}); has vericast/pm25/features.py been run for "
                         f"today's data yet? Skipping LightGBM forecast."
                     )
                 elif any(v is None for v in feature_values):
@@ -137,7 +129,7 @@ def make_daily_prediction():
                     conn.commit()
                     print(f"[OK] Stored lightgbm prediction for {forecast_date}: {lgbm_pred:.2f} PM2.5")
 
-        # Scoring is score_predictions.py's job, not this script's. It runs as
+        # Scoring is vericast/pm25/score.py's job, not this script's. It runs as
         # step 4/6 of the daily pipeline, before this script, and it scores
         # *every* pending row rather than just yesterday's - so a missed day
         # self-heals. A second copy of that logic here only gave the same rule

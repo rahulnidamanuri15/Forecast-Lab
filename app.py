@@ -5,7 +5,7 @@ import psycopg
 from dotenv import load_dotenv
 from typing import Optional
 
-import local_time
+from vericast import local_time
 
 load_dotenv()
 
@@ -262,7 +262,7 @@ async def get_evaluation(days: Optional[int] = None):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Window is anchored to the app timezone (see local_time.py), not
+        # Window is anchored to the app timezone (see vericast/local_time.py), not
         # Postgres's CURRENT_DATE, which is GMT on Neon.
         if full_record:
             cur.execute("""
@@ -414,7 +414,7 @@ ELEC_MODEL_DESCRIPTIONS = {
 }
 
 # The demand mirror publishes a few days behind real time, so 2-4 stale days is
-# normal here and only past this is it a stalled source (see ingest_electricity.py).
+# normal here and only past this is it a stalled source (see vericast/elec/ingest.py).
 ELEC_STALE_LIMIT_DAYS = 5
 
 

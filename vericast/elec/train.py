@@ -1,6 +1,6 @@
 """Train the production LightGBM model for Maharashtra peak demand.
 
-Same PARAMS and num_boost_round as train_production_model.py - no tuning until
+Same PARAMS and num_boost_round as vericast/pm25/train.py - no tuning until
 there is a measured reason to. Separate artifact so the two targets' weekly
 retrains cannot clobber each other.
 """
@@ -10,16 +10,16 @@ import numpy as np
 import lightgbm as lgb
 from dotenv import load_dotenv
 
+from vericast import MODEL_ELEC as MODEL_PATH
+
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 STATE = "Maharashtra"
-MODEL_PATH = "lightgbm_elec_model.txt"
 
-# 14 features, fixed order. Same list and order used by make_elec_prediction.py
-# and experiments/save_elec_backtest_results.py - keep in sync or predictions
-# silently use the wrong columns.
+# 14 features, fixed order. Single definition for this target: predict.py and
+# experiments/save_elec_backtest_results.py import it from here.
 FEATURE_COLUMNS = [
     "demand_lag_1", "demand_lag_2", "demand_lag_6",
     "demand_roll_7_mean", "demand_roll_7_max", "demand_roll_30_mean",

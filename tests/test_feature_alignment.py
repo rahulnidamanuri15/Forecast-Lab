@@ -39,7 +39,7 @@ def _scalar(cur, sql, params=()):
 
 
 def test_features_reach_latest_observation(cur):
-    """engineer_features.py must have run for the newest observation."""
+    """vericast/pm25/features.py must have run for the newest observation."""
     latest_obs = _scalar(cur, "SELECT MAX(as_of) FROM observations WHERE city = %s", (CITY,))
     latest_feat = _scalar(cur, "SELECT MAX(as_of) FROM features WHERE city = %s", (CITY,))
     assert latest_obs is not None, "no observations at all"

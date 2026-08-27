@@ -33,22 +33,22 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: 1/6 Ingest observations
-        run: python ingest_observations.py
+        run: python -m vericast.pm25.ingest
 
       - name: 2/6 Engineer features
-        run: python engineer_features.py
+        run: python -m vericast.pm25.features
 
       - name: 3/6 Leakage test
-        run: python leakage_test.py
+        run: python -m vericast.pm25.leakage_test
 
       - name: 4/6 Score pending predictions
-        run: python score_predictions.py
+        run: python -m vericast.pm25.score
 
       - name: 5/6 Make new forecast
-        run: python make_prediction.py
+        run: python -m vericast.pm25.predict
 
       - name: 6/6 Verify forecast is publishable
-        run: python diagnose_lightgbm_forecast.py
+        run: python -m vericast.pm25.diagnose
 
   # Deliberately no `needs:` - the two targets share nothing but the database.
   # The electricity source is a community mirror that lags 2-4 days and can
@@ -71,16 +71,16 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: 1/5 Ingest demand and temperature
-        run: python ingest_electricity.py
+        run: python -m vericast.elec.ingest
 
       - name: 2/5 Engineer features
-        run: python engineer_elec_features.py
+        run: python -m vericast.elec.features
 
       - name: 3/5 Score pending predictions
-        run: python score_elec_predictions.py
+        run: python -m vericast.elec.score
 
       - name: 4/5 Make new forecast
-        run: python make_elec_prediction.py
+        run: python -m vericast.elec.predict
 
       - name: 5/5 Verify forecast is publishable
-        run: python diagnose_elec_forecast.py
+        run: python -m vericast.elec.diagnose
