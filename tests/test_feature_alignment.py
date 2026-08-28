@@ -3,8 +3,11 @@
 These are the invariants that silently break when a step is skipped or a
 timezone slips: features must be engineered up to the latest observation, and
 a forecast must be labelled for the day after the data it was built from.
-Skipped (not failed) when DATABASE_URL is absent, so the API-only tests still
-run in a bare checkout.
+Skipped (not failed) when no database is *reachable*, so the API-only tests
+still run in a bare checkout and in CI - which must set a dummy DSN because
+app.py raises at import without one. Skipping on an unreachable DSN rather than
+an unset variable is what lets ci.yml stop excluding this file by name: it now
+runs the day a real DATABASE_URL is available and skips, stating why, until then.
 """
 import os
 import sys
@@ -22,7 +25,18 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 CITY = os.getenv("CITY", "Nagpur")
 STATE = os.getenv("STATE", "Maharashtra")
 
-pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
+def _unreachable():
+    """Why the live database can't be used, or None if it can."""
+    if not DATABASE_URL:
+        return "DATABASE_URL not set"
+    try:
+        psycopg.connect(DATABASE_URL, connect_timeout=5).close()
+        return None
+    except Exception as exc:
+        return f"database unreachable: {type(exc).__name__}"
+
+
+pytestmark = pytest.mark.skipif(_unreachable() is not None, reason=_unreachable() or "")
 
 
 @pytest.fixture(scope="module")

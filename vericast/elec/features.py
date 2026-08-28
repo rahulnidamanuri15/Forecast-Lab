@@ -27,7 +27,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-STATE = "Maharashtra"
+STATE = os.getenv("STATE", "Maharashtra")
 
 COOLING_BASE = 24.0  # degC above which air-conditioning load kicks in
 

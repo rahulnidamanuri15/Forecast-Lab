@@ -27,12 +27,14 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-STATE = "Maharashtra"
+STATE = os.getenv("STATE", "Maharashtra")
 
 DEMAND_CSV_URL = (
     "https://raw.githubusercontent.com/HalcyonVector/Grid-Sentinel/main/"
     "Dataset/study3_states.csv"
 )
+
+REQUIRED_CSV_COLUMNS = {"state", "date", "max_demand_met_mw", "energy_met_mu"}
 
 # Maharashtra's temperature as the unweighted mean of its three largest cities.
 # ponytail: unweighted 3-city mean. Population-weight it (or add a 4th city) only
@@ -88,7 +90,18 @@ def fetch_demand(start_date, end_date):
     demand = {}
     skipped = 0
 
-    for row in csv.DictReader(io.StringIO(response.text)):
+    reader = csv.DictReader(io.StringIO(response.text))
+    # Third-party mirror tracked at `main`, so a column rename upstream lands
+    # here with no warning. Fail naming the URL, not with a KeyError mid-loop
+    # after some rows have already been accepted.
+    missing = REQUIRED_CSV_COLUMNS - set(reader.fieldnames or ())
+    if missing:
+        raise RuntimeError(
+            f"Demand mirror is missing column(s) {sorted(missing)}; "
+            f"got {reader.fieldnames}. Source: {DEMAND_CSV_URL}"
+        )
+
+    for row in reader:
         if row["state"].strip() != STATE:
             continue
         date_str = row["date"].strip()

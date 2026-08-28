@@ -21,7 +21,7 @@ from vericast.elec.train import FEATURE_COLUMNS
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-STATE = "Maharashtra"
+STATE = os.getenv("STATE", "Maharashtra")
 
 # The mirror is typically 2-4 days behind; only warn past that.
 STALE_WARN_DAYS = 5
@@ -60,10 +60,9 @@ def get_latest_feature_row(cur):
 
 def make_daily_prediction():
     """Predict peak demand for the day after the latest observation and store it."""
-    try:
-        conn = psycopg.connect(DATABASE_URL)
-        cur = conn.cursor()
-
+    # Connection as context manager, as in score.py: a raise anywhere below
+    # closes it instead of leaking it against Neon's connection limit.
+    with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
         lgbm_model = load_lightgbm_model()
 
         today = local_time.today()
@@ -153,14 +152,7 @@ def make_daily_prediction():
         # before this one). It scores *every* pending row, so a missed day
         # self-heals; a second copy of that rule here would only drift.
 
-        cur.close()
-        conn.close()
-
         return True
-
-    except Exception as e:
-        print(f"[FAIL] Error making electricity prediction: {e}")
-        raise
 
 
 if __name__ == "__main__":

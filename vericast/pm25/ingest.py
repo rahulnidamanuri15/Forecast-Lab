@@ -12,7 +12,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Configuration
 LAT, LON = 21.1463, 79.0849          # Nagpur, India
-CITY = "Nagpur"
+CITY = os.getenv("CITY", "Nagpur")
+
+# Hours of hourly data a day needs before its mean is called a daily mean. One
+# hour averaged alone is indistinguishable downstream from 24, and it feeds the
+# lag and rolling features. ponytail: a flat threshold, not a coverage-weighted
+# average - go weighted only if partial days turn out to be common.
+MIN_HOURS_PER_DAY = 18
 
 # Fallback start date used only when the observations table is empty
 # (i.e. the very first run / initial backfill).
@@ -71,6 +77,7 @@ def fetch_and_aggregate_data(start_date, end_date):
         "latitude": LAT, "longitude": LON, "hourly": "pm2_5,pm10",
         "start_date": START, "end_date": END, "timezone": "UTC",
     }, timeout=60)
+    aq_response.raise_for_status()
     aq_data = aq_response.json()
 
     print("Fetching weather data...")
@@ -79,6 +86,7 @@ def fetch_and_aggregate_data(start_date, end_date):
         "daily": "temperature_2m_mean,wind_speed_10m_max,precipitation_sum",
         "start_date": START, "end_date": END, "timezone": "UTC",
     }, timeout=60)
+    wx_response.raise_for_status()
     wx_data = wx_response.json()
 
     # Extract hourly data
@@ -135,9 +143,16 @@ def fetch_and_aggregate_data(start_date, end_date):
             # Weather data might not exist for this date
             temp = wind = precip = None
 
-        # Calculate averages (handle division by zero)
-        pm2_5_avg = data['pm2_5_sum'] / data['pm2_5_count'] if data['pm2_5_count'] > 0 else None
-        pm10_avg = data['pm10_sum'] / data['pm10_count'] if data['pm10_count'] > 0 else None
+        # A day with too few hours becomes NULL rather than a mean over a
+        # window that isn't a day. The rest of the pipeline already handles
+        # NULL observations (features.py NULLs the lags, train.py filters).
+        pm2_5_avg = (data['pm2_5_sum'] / data['pm2_5_count']
+                     if data['pm2_5_count'] >= MIN_HOURS_PER_DAY else None)
+        pm10_avg = (data['pm10_sum'] / data['pm10_count']
+                    if data['pm10_count'] >= MIN_HOURS_PER_DAY else None)
+        if pm2_5_avg is None or pm10_avg is None:
+            print(f"  [skip] {date_str}: only {data['pm2_5_count']}h pm2_5 / "
+                  f"{data['pm10_count']}h pm10 (need {MIN_HOURS_PER_DAY})")
 
         records_to_insert.append((
             CITY,      # city

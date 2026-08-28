@@ -184,16 +184,17 @@ def test_electricity_forecast_invalid_model():
 
 
 def test_electricity_evaluation_metrics():
-    """MAE / RMSE / MAPE arithmetic, and the MAE sort putting the best first."""
+    """Payload shape, MAPE passthrough, and the MAE sort putting the best first.
+
+    /electricity/evaluation aggregates in SQL, so one mocked row per model:
+    (model, scored, pending, mae, rmse, mape).
+    """
     with patch('app.get_db_connection') as mock_get_db:
         cur = _mock_cursor(mock_get_db)
         cur.fetchall.return_value = [
-            # (model, predicted, actual)
-            ('lightgbm', 900.0, 1000.0),       # error 100
-            ('lightgbm', 1100.0, 1000.0),      # error 100
-            ('naive_baseline', 800.0, 1000.0),  # error 200
-            ('naive_baseline', 1000.0, 1000.0),  # error 0
-            ('seasonal_naive', 1000.0, None),   # pending, must not be scored
+            ('lightgbm', 2, 0, 100.0, 100.0, 10.0),
+            ('naive_baseline', 2, 0, 100.0, 141.4213562, 10.0),
+            ('seasonal_naive', 0, 1, None, None, None),
         ]
 
         response = client.get("/electricity/evaluation")
@@ -216,6 +217,11 @@ def test_electricity_evaluation_metrics():
         assert models["seasonal_naive"]["mae"] is None
         assert models["seasonal_naive"]["pending_count"] == 1
         assert response.json()["evaluation"][-1]["model"] == "seasonal_naive"
+
+        # Full record must stay unfiltered by date, and must not fetch raw rows.
+        sql = cur.execute.call_args[0][0]
+        assert "forecast_date" not in sql
+        assert "GROUP BY model" in sql
 
 
 def test_electricity_evaluation_no_data():

@@ -18,6 +18,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Drop root before the app runs. Nothing here writes to the image at runtime -
+# the API is read-only and models/ is baked in at build time - so an unwritable
+# /app is correct, not a limitation. ponytail: a fixed uid, no home directory
+# and no gosu; add them only if something in here ever needs to write.
+RUN useradd --system --uid 10001 vericast
+USER 10001
+
 # Render (and most PaaS) inject $PORT; 8000 is the local default. Shell form so
 # the variable actually expands.
 ENV PORT=8000

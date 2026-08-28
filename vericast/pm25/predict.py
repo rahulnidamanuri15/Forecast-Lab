@@ -10,7 +10,7 @@ from vericast.pm25.train import FEATURE_COLUMNS
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-CITY = "Nagpur"
+CITY = os.getenv("CITY", "Nagpur")
 
 
 def load_lightgbm_model():
@@ -39,10 +39,11 @@ def get_latest_feature_row(cur):
 
 def make_daily_prediction():
     """Make a daily prediction for the day after the latest observation and store it"""
-    try:
-        conn = psycopg.connect(DATABASE_URL)
-        cur = conn.cursor()
-
+    # The connection is the context manager, as in score.py: a raise anywhere
+    # below closes it instead of leaking it against Neon's connection limit. No
+    # try/except wrapper - it only relabelled a traceback that already names
+    # this module.
+    with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
         lgbm_model = load_lightgbm_model()
 
         # Real-world "today" in the operating timezone (see vericast/local_time.py),
@@ -135,14 +136,7 @@ def make_daily_prediction():
         # self-heals. A second copy of that logic here only gave the same rule
         # two places to drift apart.
 
-        cur.close()
-        conn.close()
-
         return True
-
-    except Exception as e:
-        print(f"[FAIL] Error making prediction: {e}")
-        raise
 
 if __name__ == "__main__":
     make_daily_prediction()

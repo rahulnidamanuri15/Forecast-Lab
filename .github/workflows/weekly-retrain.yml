@@ -4,6 +4,12 @@ name: Weekly Model Retrain
 # commits the updated artifact back to the repo. daily-pipeline.yml checks out
 # the repo fresh on every run, so it will automatically pick up whatever
 # models/lightgbm_model.txt is committed here - no changes needed there.
+#
+# Neither retrain step overwrites its artifact unconditionally: vericast/gate.py
+# scores a held-out challenger first and train.py returns without writing if it
+# fails. A refused retrain exits 0 and leaves the file untouched, so the commit
+# step below takes its existing "nothing to commit" branch - no special-casing
+# here, and a bad upstream week cannot replace a working model.
 on:
   schedule:
     - cron: '0 4 * * 0'  # 04:00 UTC every Sunday, an hour before the daily pipeline
