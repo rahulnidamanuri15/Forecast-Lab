@@ -69,6 +69,21 @@ def fetch_and_aggregate_data(start_date, end_date):
     record clean. Upgrade path: swap the air-quality call below for OpenAQ (CPCB
     stations, free key) and handle its gaps; this is the only function that touches
     the AQ source.
+
+    A "daily mean" here is a **UTC** day: `"timezone": "UTC"` below, and the
+    bucketing loop keys on the UTC date of each hourly timestamp. The date range
+    it is asked for comes from local_time (Asia/Kolkata), so an as_of of
+    2026-08-27 labels 2026-08-27 00:00-23:00 UTC, which in IST is 05:30 that day
+    to 04:30 the next. Both models see the same definition on both sides of the
+    train/score boundary, so the record is internally consistent - that is the
+    property that matters here, not which 24 hours the label names.
+
+    Deliberately NOT switched to Asia/Kolkata: the whole series was ingested this
+    way, and re-ingesting under a different timezone would silently redefine every
+    historical actual - moving the numbers this repo has already published and
+    scored against. That is retro-fitting, the one thing a publish-then-verify
+    record cannot do. Anyone who wants IST-day means starts a new city key rather
+    than rewriting this one.
     """
     START, END = start_date.isoformat(), end_date.isoformat()
 

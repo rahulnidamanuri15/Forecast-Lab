@@ -40,7 +40,12 @@ def _unreachable():
         return f"database unreachable: {type(exc).__name__}"
 
 
-pytestmark = pytest.mark.skipif(_unreachable() is not None, reason=_unreachable() or "")
+# Called once, not once per pytestmark argument: each call opens a real
+# connection, and two connection attempts for one skip decision is two chances
+# to hang on a 5s timeout.
+_SKIP_REASON = _unreachable()
+
+pytestmark = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
 
 @pytest.fixture(scope="module")
@@ -114,7 +119,10 @@ ON CONFLICT (state, as_of) DO NOTHING;
 # One published forecast per model at MAX(as_of) + 1 day - the t -> t+1 contract
 # the tests below assert. Written directly rather than by running predict.py,
 # which needs a trained artifact and a features row this seed cannot guarantee.
-# Left unscored: nothing may fill actual_* except the score.py files.
+# Left unscored: on the daily path nothing fills actual_* except the score.py
+# files. (The one exception lives outside that path -
+# experiments/save_*_backtest_results.py seed the launch record with actuals a
+# walk-forward backtest already knows. They are never run from the pipeline.)
 SEED_PM25_PREDICTIONS = """
 INSERT INTO predictions (city, forecast_date, predicted_pm2_5, model)
 SELECT %s, MAX(as_of) + 1, 47.5, m

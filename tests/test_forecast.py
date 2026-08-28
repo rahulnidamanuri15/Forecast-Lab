@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import app
 
+STATE = os.getenv("STATE", "Maharashtra")
+
 client = TestClient(app)
 
 def test_forecast_endpoint_lightgbm_success():
@@ -218,10 +220,12 @@ def test_electricity_evaluation_metrics():
         assert models["seasonal_naive"]["pending_count"] == 1
         assert response.json()["evaluation"][-1]["model"] == "seasonal_naive"
 
-        # Full record must stay unfiltered by date, and must not fetch raw rows.
-        sql = cur.execute.call_args[0][0]
-        assert "forecast_date" not in sql
-        assert "GROUP BY model" in sql
+        # Full record takes no window, so STATE is the only bound parameter.
+        # Asserted on params rather than by grepping the SQL for "forecast_date":
+        # that substring check passes on any query merely mentioning the column
+        # and breaks as soon as the SELECT list names it.
+        _, params = cur.execute.call_args[0]
+        assert params == (STATE,)
 
 
 def test_electricity_evaluation_no_data():

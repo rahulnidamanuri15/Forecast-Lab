@@ -28,8 +28,12 @@ def test_predictions_endpoint_success():
             (forecast_date, 'naive_baseline', 12.3, 12.3, datetime.now(timezone.utc))
         ]
 
-        # Make the request
-        response = client.get("/predictions?model=lightgbm&limit=5&scored_only=false")
+        # Make the request. Deliberately unfiltered: the mock returns rows for
+        # both models and ignores the WHERE clause, so asking for
+        # ?model=lightgbm here and then asserting a naive_baseline row came back
+        # encoded the opposite of the endpoint's contract. The model filter is
+        # asserted on the query itself in test_predictions_model_filter_reaches_sql.
+        response = client.get("/predictions?limit=5&scored_only=false")
 
         # Assertions
         assert response.status_code == 200
@@ -76,8 +80,10 @@ def test_predictions_endpoint_scored_only():
         # Make the request with scored_only=true
         response = client.get("/predictions?scored_only=true")
 
-        # Debug: print the execute call
-        print("Execute called with:", mock_cursor.execute.call_args)
+        # The mock ignores the WHERE clause, so the filter can only be verified
+        # on the SQL that was actually sent.
+        sql, params = mock_cursor.execute.call_args[0]
+        assert "actual_pm2_5 IS NOT NULL" in sql
 
         # Assertions
         assert response.status_code == 200
@@ -89,6 +95,31 @@ def test_predictions_endpoint_scored_only():
         pred = data["predictions"][0]
         assert pred["actual_pm2_5"] is not None
         assert pred["error"] == 0.0
+
+def test_predictions_model_filter_reaches_sql():
+    """?model=lightgbm must become a WHERE clause with the model as a bound
+    parameter - not a value interpolated into the SQL, and not silently dropped."""
+    with patch('app.get_db_connection') as mock_get_db:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_get_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchall.return_value = []
+
+        assert client.get("/predictions?model=lightgbm").status_code == 200
+
+        sql, params = mock_cursor.execute.call_args[0]
+        assert "model = %s" in sql
+        assert "lightgbm" in params
+        assert "lightgbm" not in sql   # bound, never interpolated
+
+
+def test_predictions_rejects_unknown_model():
+    """An unallowlisted model is a 400 before any query runs - that allowlist is
+    what makes the f-string WHERE clause in app.py safe."""
+    response = client.get("/predictions?model=DROP TABLE predictions")
+    assert response.status_code == 400
+
 
 def test_predictions_endpoint_no_data():
     """Test that the predictions endpoint handles missing prediction data."""
