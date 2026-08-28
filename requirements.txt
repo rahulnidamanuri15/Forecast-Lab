@@ -8,7 +8,7 @@ psycopg[binary]==3.3.4
 # pinned like everything else here; without it every request paid a fresh
 # connect + TLS handshake + auth to Neon.
 psycopg-pool==3.3.1
-numpy==2.4.6
+numpy==2.5.2
 python-dotenv==1.2.3
 lightgbm==4.7.0
 fastapi==0.141.1
