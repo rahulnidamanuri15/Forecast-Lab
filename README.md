@@ -223,6 +223,14 @@ published.
   PM2.5 forecast whose own upstream is working. Within each job the steps are
   sequential and fail-fast — scoring runs *before* forecasting because yesterday's
   actual has to exist first.
+
+  **Two crons, not one:** `17 5 * * *` (10:47 IST) and `42 8 * * *` (14:12 IST).
+  GitHub's `schedule:` trigger is best-effort on a free public repo — queued at low
+  priority, routinely delayed, and droppable outright. Measured on this repo: 20–32
+  minutes of drift for a week, then 11 hours, then a run that never fired. Both minutes
+  are deliberately off the top of the hour, which is the most contended slot. The second
+  cron costs nothing when the first landed: every write is an `ON CONFLICT … DO UPDATE`
+  upsert, ingest resumes from `MAX(as_of)`, and a same-day re-run finds nothing new.
 - `.github/workflows/weekly-retrain.yml` — Sundays: retrain both models and commit
   `models/lightgbm_model.txt` and `models/lightgbm_elec_model.txt` back to the repo,
   which the daily pipeline picks up on its next checkout. Neither artifact is
