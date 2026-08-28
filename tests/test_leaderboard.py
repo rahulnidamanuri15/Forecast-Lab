@@ -21,10 +21,14 @@ def test_leaderboard_endpoint_success():
         mock_get_db.return_value.__enter__.return_value = mock_conn
         mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-        # Mock the database response - model performance data
+        # Mock the database response - model performance data.
+        # sample_size 400 rather than a daily 1: these are the backtest-seeded
+        # rows experiments/save_backtest_results.py writes, which is what a fresh
+        # deployment's leaderboard actually serves. See README, "Not on the
+        # production path".
         mock_cursor.fetchall.return_value = [
-            ('lightgbm', 2.5, 3.2, 100, date(2026, 8, 17)),
-            ('naive_baseline', 3.1, 4.0, 100, date(2026, 8, 17))
+            ('lightgbm', 2.5, 3.2, 400, date(2026, 8, 17)),
+            ('naive_baseline', 3.1, 4.0, 400, date(2026, 8, 17))
         ]
 
         # Make the request
@@ -40,14 +44,14 @@ def test_leaderboard_endpoint_success():
         assert data["leaderboard"][0]["model"] == "lightgbm"
         assert data["leaderboard"][0]["mae"] == 2.5
         assert data["leaderboard"][0]["rmse"] == 3.2
-        assert data["leaderboard"][0]["sample_size"] == 100
+        assert data["leaderboard"][0]["sample_size"] == 400
         assert data["leaderboard"][0]["as_of"] == date(2026, 8, 17).isoformat()
 
         # Check that naive_baseline comes second
         assert data["leaderboard"][1]["model"] == "naive_baseline"
         assert data["leaderboard"][1]["mae"] == 3.1
         assert data["leaderboard"][1]["rmse"] == 4.0
-        assert data["leaderboard"][1]["sample_size"] == 100
+        assert data["leaderboard"][1]["sample_size"] == 400
         assert data["leaderboard"][1]["as_of"] == date(2026, 8, 17).isoformat()
 
 def test_leaderboard_endpoint_no_data():

@@ -6,6 +6,7 @@ Usage: python -m vericast.pm25.diagnose
 """
 import os
 import sys
+from datetime import timedelta
 
 import psycopg
 from dotenv import load_dotenv
@@ -24,6 +25,12 @@ CITY = os.getenv("CITY", "Nagpur")
 MIN_PM25, MAX_PM25 = 1.0, 500.0
 
 SIGMA_LIMIT = 3.0   # forecast must sit within 3 sd of the trailing 30-day mean
+
+# Both models vericast/pm25/predict.py publishes. Same role as
+# vericast/elec/diagnose.py:36: predict.py warns and skips a model rather than
+# raising, so without a completeness check here a day that published only the
+# naive baseline exits 0 and the pipeline treats it as a full run.
+EXPECTED_MODELS = {"naive_baseline", "lightgbm"}
 
 
 def check(label, ok, detail=""):
@@ -107,23 +114,37 @@ def main():
             if pred_row:
                 fdate = pred_row[0]
                 stale = (latest_obs and (fdate < latest_obs)) if fdate else True
-                check(
+                all_ok &= check(
                     "Latest lightgbm forecast_date is current",
                     not stale,
                     f"forecast_date={fdate}, latest_obs={latest_obs}" if stale else "",
                 )
 
             # 6. Is every value published for that date physically plausible?
-            #    Ported from vericast/elec/diagnose.py:108-114.
+            #    Ported from vericast/elec/diagnose.py:91-117. Anchored to
+            #    latest_obs + 1 day, not MAX(forecast_date): if predict.py failed
+            #    today, MAX() silently falls back to yesterday's already-published
+            #    row, which passes every check below and clears the pipeline.
+            expected_date = latest_obs + timedelta(days=1) if latest_obs else None
             cur.execute(
                 """
                 SELECT model, predicted_pm2_5 FROM predictions
-                WHERE city = %s AND forecast_date = (
-                    SELECT MAX(forecast_date) FROM predictions WHERE city = %s)
+                WHERE city = %s AND forecast_date = %s
                 """,
-                (CITY, CITY),
+                (CITY, expected_date),
             )
-            published = {m: v for m, v in cur.fetchall()}
+            published = dict(cur.fetchall())
+            print(f"  Expected forecast_date:  {expected_date}")
+
+            missing = EXPECTED_MODELS - published.keys()
+            all_ok &= check(
+                f"All {len(EXPECTED_MODELS)} models published for {expected_date}",
+                not missing,
+                f"missing: {sorted(missing)}" if missing else
+                ", ".join(f"{m}={published[m]:.1f}" for m in sorted(published)
+                          if published[m] is not None),
+            )
+
             out_of_range = {m: v for m, v in published.items()
                             if v is None or not (MIN_PM25 <= v <= MAX_PM25)}
             all_ok &= check(

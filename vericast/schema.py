@@ -76,6 +76,15 @@ TABLES = {
     """,
     # No city column, unlike its electricity counterpart: this table predates
     # the second target and the live PM2.5 record is keyed on (score_date, model).
+    # Consequence, since nothing else states it: changing CITY needs a migration,
+    # not just an env var - rows from two cities would land on the same
+    # (score_date, model) key and overwrite each other.
+    #
+    # Rows here come from vericast/pm25/score.py (one scored day, sample_size
+    # normally 1) and, once at launch, from experiments/save_backtest_results.py
+    # (a whole backtest, sample_size in the hundreds). sample_size is the only
+    # thing that tells them apart; a provenance column would mean altering a live
+    # table the published record reads from, for no caller that needs it.
     "model_performance": """
         CREATE TABLE IF NOT EXISTS model_performance (
             id SERIAL PRIMARY KEY,

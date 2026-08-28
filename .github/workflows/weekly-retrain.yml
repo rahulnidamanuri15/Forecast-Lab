@@ -18,6 +18,15 @@ on:
 permissions:
   contents: write  # required to commit the retrained model back to the repo
 
+# This workflow pushes. Two overlapping runs - a drifted cron catching a manual
+# workflow_dispatch, or a re-run - would both train and both `git push`, and the
+# loser rejects on a non-fast-forward after having spent the training. Same shape
+# as daily-pipeline.yml; cancel-in-progress: false for the same reason, so a run
+# is never killed between train.py writing the artifact and the commit step.
+concurrency:
+  group: weekly-retrain
+  cancel-in-progress: false
+
 jobs:
   retrain:
     runs-on: ubuntu-latest

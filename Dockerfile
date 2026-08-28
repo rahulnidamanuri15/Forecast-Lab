@@ -14,6 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+# Production deps only. requirements-dev.txt (pytest) is deliberately not
+# installed: .dockerignore excludes tests/, so the image had a test runner and
+# nothing to run it on.
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
@@ -27,6 +30,12 @@ USER 10001
 
 # Render (and most PaaS) inject $PORT; 8000 is the local default. Shell form so
 # the variable actually expands.
+#
+# EXPOSE is build-time metadata and cannot read a runtime $PORT, so it documents
+# the default only. If $PORT is overridden the app still binds the override -
+# EXPOSE publishes nothing on its own, and every host that injects $PORT routes
+# by its own value rather than by this label. Left as the honest default rather
+# than an ARG that would have to be kept in sync with the deploy for no gain.
 ENV PORT=8000
 EXPOSE 8000
 CMD uvicorn app:app --host 0.0.0.0 --port ${PORT}

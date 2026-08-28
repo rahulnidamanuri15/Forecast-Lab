@@ -1,15 +1,22 @@
-# Production runtime + test deps. Kept minimal so the Docker image stays small.
+# Production runtime deps only. Kept minimal so the Docker image stays small.
+# Test-only deps live in requirements-dev.txt; the Dockerfile installs this file
+# alone, so the image no longer ships a test runner it has no tests to run
+# (.dockerignore excludes tests/).
 httpx==0.28.1
 psycopg[binary]==3.3.4
+# Connection pool for app.py. Separate distribution from psycopg itself, and
+# pinned like everything else here; without it every request paid a fresh
+# connect + TLS handshake + auth to Neon.
+psycopg-pool==3.3.1
 numpy==2.4.6
 python-dotenv==1.2.3
 lightgbm==4.7.0
 fastapi==0.141.1
 uvicorn==0.34.0
-pytest==9.1.1
 # python:*-slim ships without a tz database; Asia/Kolkata (see vericast/local_time.py)
 # fails without this.
 tzdata==2026.3
 
-# Dropped: pandas (nothing imports it), statsmodels (only experiments/train_sarima.py,
-# which is not on the production path - pip install statsmodels to run it).
+# Dropped: pandas (nothing imports it) and statsmodels (its only consumer,
+# experiments/train_sarima.py, was deleted - SARIMA lost the backtest to
+# LightGBM and the script's printed baseline had gone stale against the record).
