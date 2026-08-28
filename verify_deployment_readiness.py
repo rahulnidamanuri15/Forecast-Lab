@@ -529,7 +529,7 @@ def main():
         print("\nALL CHECKS PASSED - SYSTEM IS READY FOR DEPLOYMENT!")
         print("\nNext steps:")
         print("  1. Deploy to your chosen platform (Render, Fly.io, etc.)")
-        print("  2. Set environment variables: see .env.example (DATABASE_URL, CITY, STATE, FRONTEND_ORIGIN)")
+        print("  2. Set environment variables: DATABASE_URL (required), CITY, STATE, FRONTEND_ORIGIN")
         print("  3. Verify GitHub Actions workflow runs successfully")
         print("  4. Monitor the system for 24-48 hours before marking as production")
         return True
