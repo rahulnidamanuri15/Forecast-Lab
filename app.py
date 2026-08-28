@@ -70,6 +70,7 @@ async def root():
                 "history": "/electricity/history?days=30",
                 "predictions": "/electricity/predictions?model=lightgbm&limit=15&scored_only=false",
                 "evaluation": "/electricity/evaluation?days=30",
+                "leaderboard": "/electricity/leaderboard",
             },
         }
     }
@@ -174,8 +175,11 @@ async def get_leaderboard():
                 "description": MODEL_DESCRIPTIONS.get(model, ""),
             })
 
-        # Sort by MAE (ascending) - lower is better
-        leaderboard.sort(key=lambda x: x["mae"])
+        # Sort by MAE (ascending) - lower is better. model_performance.mae is
+        # nullable, so unscored models sort last via inf rather than a bare key:
+        # a None mae raises TypeError comparing float < None. Same key as
+        # /evaluation and /electricity/evaluation below.
+        leaderboard.sort(key=lambda x: float("inf") if x["mae"] is None else x["mae"])
 
         return {
             "leaderboard": leaderboard,
@@ -649,6 +653,60 @@ async def get_electricity_evaluation(days: Optional[int] = None):
     except Exception as e:
         raise db_error(e)
 
+
+@app.get("/electricity/leaderboard")
+async def get_electricity_leaderboard():
+    """Most recent scored MAE/RMSE/MAPE per electricity model.
+
+    The counterpart of /leaderboard, reading electricity_model_performance -
+    which vericast/elec/score.py writes one row per scored day into. Same
+    caveat as the PM2.5 version: this is the latest scored *day*, so
+    sample_size is normally 1. /electricity/evaluation is the accuracy claim.
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # DISTINCT ON is Postgres-specific and exactly fits "latest per
+                # group", as in /leaderboard. Unlike model_performance this table
+                # has a state column, so it filters on STATE.
+                cur.execute("""
+                    SELECT DISTINCT ON (model)
+                           model, mae, rmse, mape, sample_size, score_date
+                    FROM electricity_model_performance
+                    WHERE state = %s
+                    ORDER BY model, score_date DESC
+                """, (STATE,))
+                rows = cur.fetchall()
+
+        if not rows:
+            raise HTTPException(status_code=404, detail="No model performance data found")
+
+        leaderboard = [
+            {
+                "model": model,
+                "mae": float(mae) if mae is not None else None,
+                "rmse": float(rmse) if rmse is not None else None,
+                "mape": float(mape) if mape is not None else None,
+                "sample_size": sample_size,
+                "as_of": score_date.isoformat(),
+                "description": ELEC_MODEL_DESCRIPTIONS.get(model, ""),
+            }
+            for model, mae, rmse, mape, sample_size, score_date in rows
+        ]
+
+        leaderboard.sort(key=lambda x: float("inf") if x["mae"] is None else x["mae"])
+
+        return {
+            "state": STATE,
+            "leaderboard": leaderboard,
+            "note": ("Lower MAE, RMSE and MAPE indicate better performance. Each model "
+                     "shows its most recently scored metrics; use /electricity/evaluation "
+                     "for the full record."),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise db_error(e)
 
 @app.get("/electricity/history")
 async def get_electricity_history(days: int = Query(30, ge=1, le=365)):

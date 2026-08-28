@@ -1,16 +1,16 @@
 """Engineer the point-in-time electricity feature store.
 
-One idempotent INSERT ... SELECT instead of the Python row-loop that
-vericast/pm25/features.py uses for PM2.5, because Postgres window frames do the same
-job with stronger guarantees:
+One idempotent INSERT ... SELECT. This is the design both feature stores use -
+vericast/pm25/features.py was ported to it from a Python row-loop - because
+Postgres window frames give guarantees a loop cannot:
 
   * `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND INTERVAL '1 day' PRECEDING` is
     date-addressed, not row-addressed, so it returns NULL across a date gap on
     its own - no explicit gap guard to forget. (Maharashtra has one such gap:
     2025-05-21 -> 2025-05-24.)
-  * `COUNT(*) OVER w7 = 7` is stricter than a row-index check: the Python
-    version averages the previous 7 *rows* whether or not they are 7 consecutive
-    days, silently spanning gaps. This refuses instead.
+  * `COUNT(*) OVER w7 = 7` is stricter than a row-index check: counting rows
+    averages the previous 7 *rows* whether or not they are 7 consecutive days,
+    silently spanning gaps. This refuses instead.
   * Look-ahead leakage is structurally unexpressible - a `RANGE ... PRECEDING`
     frame cannot reference a future row. That is why this package has no
     leakage_test.py mirroring vericast/pm25/leakage_test.py; what does need
