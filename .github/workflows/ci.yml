@@ -1,9 +1,10 @@
 name: CI
 
-# Unit tests on every push and PR. No live database here, so
-# tests/test_feature_alignment.py (which asserts against real pipeline rows) is
-# ignored; the remaining 20 tests cover the API and pure logic. app.py raises at
-# import without DATABASE_URL, hence the dummy DSN - nothing ever connects to it.
+# Unit tests on every push and PR. The whole suite runs - no file is excluded by
+# name. tests/test_feature_alignment.py asserts against real pipeline rows and
+# skips itself when no database is reachable, so it reports as skipped-with-a-
+# reason here and starts running the day DATABASE_URL points at a real one.
+# app.py raises at import without DATABASE_URL, hence the dummy DSN below.
 #
 # ponytail: no matrix, no coverage gate, no lint job. Add a matrix when a second
 # Python version is actually supported.
@@ -26,6 +27,6 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python -m pytest tests -q --ignore=tests/test_feature_alignment.py
+      - run: python -m pytest tests -q -ra
         env:
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/unused
