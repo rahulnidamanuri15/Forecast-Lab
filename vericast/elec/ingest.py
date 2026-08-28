@@ -27,7 +27,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-STATE = "Maharashtra"
+STATE = os.getenv("STATE", "Maharashtra")
 
 DEMAND_CSV_URL = (
     "https://raw.githubusercontent.com/HalcyonVector/Grid-Sentinel/main/"

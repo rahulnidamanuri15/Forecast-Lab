@@ -17,7 +17,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-STATE = "Maharashtra"
+STATE = os.getenv("STATE", "Maharashtra")
 
 # 14 features, fixed order. Single definition for this target: predict.py and
 # experiments/save_elec_backtest_results.py import it from here.
