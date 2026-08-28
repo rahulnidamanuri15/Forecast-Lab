@@ -105,8 +105,11 @@ def main():
                 ", ".join(f"{m}={published[m]:.0f} MW" for m in sorted(published)),
             )
 
+            # `v is None or` matches vericast/pm25/diagnose.py: predicted_demand_mw
+            # is NOT NULL today, but the comparison must not raise if that ever
+            # changes - the gate has to report the bad forecast, not crash on it.
             out_of_range = {m: v for m, v in published.items()
-                            if not (MIN_MW <= v <= MAX_MW)}
+                            if v is None or not (MIN_MW <= v <= MAX_MW)}
             all_ok &= check(
                 f"Forecasts within {MIN_MW:,.0f}-{MAX_MW:,.0f} MW",
                 not out_of_range,

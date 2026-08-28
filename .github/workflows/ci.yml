@@ -1,10 +1,16 @@
 name: CI
 
 # Unit tests on every push and PR. The whole suite runs - no file is excluded by
-# name. tests/test_feature_alignment.py asserts against real pipeline rows and
-# skips itself when no database is reachable, so it reports as skipped-with-a-
-# reason here and starts running the day DATABASE_URL points at a real one.
-# app.py raises at import without DATABASE_URL, hence the dummy DSN below.
+# name - against a throwaway Postgres service, so tests/test_feature_alignment.py
+# runs here instead of skipping itself. Those nine tests are the only ones that
+# execute real SQL, and they are the ones that verify the leakage guarantee (a
+# date-addressed RANGE frame nulls across a gap), the features(t) -> target(t+1)
+# contract, and same-date scoring. They seed themselves when the database is
+# empty; see the seeding block in that file.
+#
+# The two `- run:` self-checks after pytest need no database and are not pytest
+# tests - they are assert-based __main__ blocks that already exist in the modules
+# they check. Running them is cheaper than wrapping them in a second copy.
 #
 # ponytail: no matrix, no coverage gate, no lint job. Add a matrix when a second
 # Python version is actually supported.
@@ -20,6 +26,27 @@ permissions: read-all
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # Throwaway database, created and discarded per run. Credentials are
+    # deliberately literal: this container is reachable only from this job's
+    # network namespace and holds nothing but synthetic rows.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: vericast
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports: ['5432:5432']
+
+    env:
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/vericast
+
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -27,6 +54,11 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
+
+      # Idempotent CREATE TABLE IF NOT EXISTS for all eight tables.
+      - run: python -m vericast.schema
+
       - run: python -m pytest tests -q -ra
-        env:
-          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/unused
+
+      - run: python -m vericast.gate         # retrain-gate self-check, no database
+      - run: python -m vericast.local_time   # asserts Asia/Kolkata resolves (+5:30)
