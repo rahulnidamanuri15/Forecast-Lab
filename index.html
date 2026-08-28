@@ -653,7 +653,9 @@
         <div class="pulse-dot"></div>
         <span id="status-text">CONNECTING...</span>
       </div>
-      <a href="https://forecast-lab-2l0q.onrender.com/docs" target="_blank" class="api-link-btn">FastAPI Docs</a>
+      <!-- href is set from API_BASE in the script below, so the deployed backend
+           URL lives in exactly one place. -->
+      <a href="/docs" target="_blank" class="api-link-btn" id="api-docs-link">FastAPI Docs</a>
     </div>
   </header>
 
@@ -993,8 +995,15 @@
 </div>
 
 <script>
-  // Backend API URL
+  // Backend API URL. The one place the deployed host is written down - the
+  // FastAPI Docs link in the header is pointed at it below rather than
+  // hardcoding it a second time, so a redeploy to a new host is a one-line
+  // change. Override for local work with `window.API_BASE = 'http://localhost:8000'`
+  // before this script runs; same env-override shape as
+  // verify_deployment_readiness.py's API_BASE.
   const API_BASE = window.API_BASE || 'https://forecast-lab-2l0q.onrender.com';
+
+  document.getElementById('api-docs-link').href = `${API_BASE}/docs`;
 
   async function fetchJSON(path) {
     const res = await fetch(`${API_BASE}${path}`);

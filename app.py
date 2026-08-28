@@ -1,7 +1,10 @@
 import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg
+from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
 from typing import Optional
 
@@ -17,13 +20,45 @@ CITY = os.getenv("CITY", "Nagpur")
 STATE = os.getenv("STATE", "Maharashtra")  # target #2: regional electricity demand
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
 
+# One TCP connect + TLS handshake + Postgres auth per request is the single
+# largest slice of this API's latency, and Neon is a network hop away. The pool
+# hands out an already-authenticated connection instead.
+#
+# max_size=8: this is a read-only GET API on a small instance, and Neon's free
+# tier caps concurrent connections - a pool larger than the work queue only
+# holds server slots idle. check=check_connection is the one knob that is not
+# optional here: Neon closes idle connections on its side, so without a check
+# the pool eventually hands out a dead socket and the request 500s.
+_pool: Optional[ConnectionPool] = None
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global _pool
+    _pool = ConnectionPool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=8,
+        timeout=10,                              # wait for a free slot, then fail
+        check=ConnectionPool.check_connection,   # never hand out a dead socket
+        open=False,
+    )
+    _pool.open()
+    try:
+        yield
+    finally:
+        _pool.close()
+        _pool = None
+
+
 app = FastAPI(
     title="VeriCast API",
     description=(
         f"Read-only public record of next-day forecasts published before the "
         f"actual was knowable: {CITY} PM2.5 (ug/m3) and {STATE} peak demand met (MW)."
     ),
-    version="0.1.0"
+    version="0.1.0",
+    lifespan=lifespan,
 )
 
 # Configure CORS. Read-only public GET API: no cookies or auth headers, so
@@ -43,8 +78,17 @@ app.add_middleware(
 )
 
 def get_db_connection():
-    """Create a new database connection"""
-    return psycopg.connect(DATABASE_URL)
+    """A pooled connection, as a context manager.
+
+    Every caller already uses `with get_db_connection() as conn`, which is
+    exactly pool.connection()'s contract, so the pool went in behind this one
+    function rather than through 13 handlers. Falls back to a direct connect
+    when the pool is absent - the TestClient in tests/ drives handlers without
+    running the lifespan, and every test patches this function anyway.
+    """
+    if _pool is None:
+        return psycopg.connect(DATABASE_URL)
+    return _pool.connection()
 
 
 def db_error(exc: Exception) -> HTTPException:
@@ -386,6 +430,8 @@ async def get_history(days: int = Query(30, ge=1, le=365)):
             "days_returned": len(history),
             "city": CITY
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise db_error(e)
 
