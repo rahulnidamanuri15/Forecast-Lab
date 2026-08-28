@@ -1,61 +1,31 @@
 import os
+import sys
 import psycopg
 import numpy as np
 import lightgbm as lgb
 from dotenv import load_dotenv
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from vericast.pm25.train import FEATURE_COLUMNS, PARAMS, DATASET_SQL, CITY  # noqa: E402
+
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-CITY = "Nagpur"
 MIN_TRAIN_SIZE = 30
+
+# Looked up by name, not hardcoded to index 0, so a reorder of
+# FEATURE_COLUMNS cannot silently repoint the baseline.
+NAIVE_COL = FEATURE_COLUMNS.index("pm2_5_lag_1")  # y(t) -> persistence
 
 
 def load_dataset():
     """Load the exact t -> t+1 forecasting dataset."""
 
-    query = """
-        SELECT
-            f.as_of AS feature_date,
-            o.as_of AS target_date,
-
-            f.pm2_5_lag_1,
-            f.pm10_lag_1,
-            f.temperature_lag_1,
-            f.wind_speed_lag_1,
-            f.precipitation_lag_1,
-
-            f.pm2_5_roll_7,
-            f.pm2_5_roll_30,
-            f.pm10_roll_7,
-            f.pm10_roll_30,
-
-            f.day_of_week,
-            f.month,
-            f.is_weekend,
-
-            f.temperature_2m_mean,
-            f.wind_speed_10m_max,
-            f.precipitation_sum,
-
-            o.pm2_5 AS target_pm2_5
-
-        FROM features f
-        JOIN observations o
-          ON o.city = f.city
-         AND o.as_of = f.as_of + INTERVAL '1 day'
-
-        WHERE f.city = %s
-          AND f.pm2_5_lag_1 IS NOT NULL
-          AND o.pm2_5 IS NOT NULL
-
-        ORDER BY f.as_of;
-    """
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute(query, (CITY,))
+            cur.execute(DATASET_SQL, (CITY,))
             rows = cur.fetchall()
 
     if not rows:
@@ -122,19 +92,6 @@ def run_backtest():
     actuals = []
     evaluation_dates = []
 
-    params = {
-        "objective": "regression",
-        "metric": "mae",
-        "boosting_type": "gbdt",
-        "num_leaves": 31,
-        "learning_rate": 0.05,
-        "feature_fraction": 0.9,
-        "bagging_fraction": 0.8,
-        "bagging_freq": 5,
-        "verbose": -1,
-        "random_state": 42,
-    }
-
     total_predictions = len(X) - MIN_TRAIN_SIZE
 
     for i in range(MIN_TRAIN_SIZE, len(X)):
@@ -148,7 +105,7 @@ def run_backtest():
         # ----------------------------------------
         # Naive baseline
         # ----------------------------------------
-        naive_prediction = X_test[0][0]
+        naive_prediction = X_test[0][NAIVE_COL]
 
         # ----------------------------------------
         # LightGBM
@@ -159,7 +116,7 @@ def run_backtest():
         )
 
         model = lgb.train(
-            params,
+            PARAMS,
             train_data,
             num_boost_round=100,
         )

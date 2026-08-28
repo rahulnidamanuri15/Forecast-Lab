@@ -10,7 +10,7 @@ from vericast.pm25.train import FEATURE_COLUMNS
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-CITY = "Nagpur"
+CITY = os.getenv("CITY", "Nagpur")
 
 
 def load_lightgbm_model():

@@ -11,6 +11,7 @@ import lightgbm as lgb
 from dotenv import load_dotenv
 
 from vericast import MODEL_ELEC as MODEL_PATH
+from vericast.gate import challenger_ships
 
 load_dotenv()
 
@@ -40,6 +41,10 @@ PARAMS = {
     "verbose": -1,
     "random_state": 42,
 }
+
+NUM_BOOST_ROUND = 100
+
+UNIT = "MW"
 
 # The INTERVAL '1 day' join is what makes this a t -> t+1 dataset. Every feature
 # is computed from data at or before f.as_of; the label is the next day's actual.
@@ -95,8 +100,17 @@ def train_and_save():
         "The SQL column order and FEATURE_COLUMNS must match."
     )
 
+    # Retrain gate before anything is written. A refused retrain leaves the
+    # incumbent artifact untouched and exits 0 - see vericast/gate.py.
+    if not challenger_ships(X, y, PARAMS, NUM_BOOST_ROUND,
+                            FEATURE_COLUMNS.index("demand_lag_1"),
+                            incumbent_path=MODEL_PATH,
+                            feature_names=FEATURE_COLUMNS, unit=UNIT):
+        print(f"[SKIP] Keeping the existing model at {MODEL_PATH}.")
+        return None
+
     train_data = lgb.Dataset(X, label=y, feature_name=FEATURE_COLUMNS)
-    model = lgb.train(PARAMS, train_data, num_boost_round=100)
+    model = lgb.train(PARAMS, train_data, num_boost_round=NUM_BOOST_ROUND)
 
     model.save_model(MODEL_PATH)
     print(f"[OK] Saved production model to {MODEL_PATH}")
