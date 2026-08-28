@@ -12,6 +12,12 @@ CITY = os.getenv("CITY", "Nagpur")
 # report what changed. Deliberately not scoped to "yesterday": if a day's run
 # was missed, that row would otherwise stay pending forever. Driven purely off
 # forecast_date == observations.as_of, so there is no timezone decision here.
+#
+# predicted_pm2_5 IS NOT NULL because that column is nullable: scoring a NULL
+# prediction makes np.mean below return NaN, and a NaN mae in model_performance
+# 500s /leaderboard on JSON serialisation until the row is deleted by hand.
+# vericast/pm25/predict.py no longer writes one, but a row from before that
+# guard must not be scored either.
 SCORE_SQL = """
 UPDATE predictions p
 SET actual_pm2_5 = o.pm2_5
@@ -20,6 +26,7 @@ WHERE o.city = p.city
   AND o.as_of = p.forecast_date
   AND p.city = %s
   AND p.actual_pm2_5 IS NULL
+  AND p.predicted_pm2_5 IS NOT NULL
   AND o.pm2_5 IS NOT NULL
 RETURNING p.forecast_date, p.model, p.predicted_pm2_5, o.pm2_5;
 """

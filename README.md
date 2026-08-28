@@ -27,9 +27,8 @@ Open-Meteo  →  observations  →  vericast/pm25/features.py  →  features
 ```
 
 The electricity path mirrors it file for file under `vericast/elec/`, with
-`electricity_`-prefixed tables, except that features are built by **one idempotent
-`INSERT ... SELECT`** using Postgres date-addressed window frames rather than a
-Python row loop:
+`electricity_`-prefixed tables. Both feature stores are built the same way — **one
+idempotent `INSERT ... SELECT`** using Postgres date-addressed window frames:
 
 ```sql
 MAX(peak_demand_mw) OVER (ORDER BY as_of
@@ -41,6 +40,9 @@ and returns NULL across a date gap instead of silently reaching over it — so t
 leakage guarantee is a property of the query rather than a test that has to pass.
 `CASE WHEN COUNT(*) OVER w7 = 7` enforces minimum periods the same way, which is
 stricter than a row-index check because it also nulls out gap-shortened windows.
+CI asserts it anyway, against a real Postgres: `tests/test_feature_alignment.py`
+reproduces the 2025-05-21 → 05-24 Maharashtra gap and checks that `demand_lag_1`
+nulls across it.
 
 All application-level date decisions ("today", "yesterday", forecast date, scoring
 date) go through `vericast/local_time.py`, which is fixed to **Asia/Kolkata**. PostgreSQL
@@ -80,8 +82,9 @@ to state plainly rather than bury:
   after the newest observation", not real-world tomorrow, and its freshness thresholds
   are 5 days rather than PM2.5's 1. A 2–4 day lag is the normal case here, not an
   incident — `GET /electricity/health` reports `source_lag_expected` for exactly this.
-- **It is treated as untrusted input.** Blank demand values are skipped rather than
-  coerced, and `vericast/elec/diagnose.py` refuses to publish outside 15,000–40,000 MW.
+- **It is treated as untrusted input.** Blank *or unparseable* demand values are skipped
+  rather than coerced — one bad cell loses its day, not the rows already accepted — and
+  `vericast/elec/diagnose.py` refuses to publish outside 15,000–40,000 MW.
 
 If the mirror stops updating, the electricity job fails its own freshness gate and
 publishes nothing. It cannot affect the PM2.5 record.
@@ -91,9 +94,10 @@ across Mumbai, Pune and Nagpur for the state-level demand model.
 
 ## Model performance
 
-Live full-record numbers, served by `GET /evaluation` and `GET /electricity/evaluation`
-with no `days` parameter. Regenerate the tables below by calling those endpoints —
-same query, not a hand-maintained copy.
+The tables below are a **dated snapshot, taken 2026-08-28** — the counts and MAEs are
+frozen numbers checked into this file, not generated output. For current numbers call
+`GET /evaluation` and `GET /electricity/evaluation` with no `days` parameter; the record
+only grows, so the live figures move as days are scored.
 
 **PM2.5, Nagpur** (2023-09-02 → present):
 
@@ -134,6 +138,8 @@ Two results worth reading carefully:
 `GET /leaderboard` is a different question: it reports each model's *most recent
 scored day* from `model_performance`, so its `sample_size` is normally 1. Use
 `/evaluation` for accuracy claims and `/leaderboard` for "how did yesterday go".
+`/electricity/leaderboard` is the same question on the demand side, reading
+`electricity_model_performance` and carrying `mape` through.
 
 Reproduce the frozen walk-forward benchmark with `python experiments/compare_models.py`
 (n=1062, MAE 9.3567 vs 10.7975 — consistent with the live record above). Its sample
@@ -154,7 +160,7 @@ vericast/
 ├── schema.py                     idempotent DDL for all eight tables
 ├── pm25/                         Nagpur PM2.5 (μg/m³)
 │   ├── ingest.py                 Open-Meteo → observations
-│   ├── features.py               lag/rolling/calendar → features (Python row loop)
+│   ├── features.py               one INSERT ... SELECT; lag/rolling/calendar → features
 │   ├── leakage_test.py           assert no feature row sees data past its own as_of
 │   ├── train.py                  retrain → models/lightgbm_model.txt; owns FEATURE_COLUMNS
 │   ├── predict.py                write tomorrow's forecast for both models
@@ -201,6 +207,7 @@ Not on the production path: `experiments/` (`compare_models.py`,
 | `GET /electricity/health` | Latest demand observation + `source_lag_expected` (5-day threshold) |
 | `GET /electricity/forecast?model=lightgbm` | Latest stored demand forecast in MW |
 | `GET /electricity/history?days=30` | Recent peak demand, energy met and temperature |
+| `GET /electricity/leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
 | `GET /electricity/evaluation` | Full-record MAE/RMSE/**MAPE** per model |
 | `GET /electricity/predictions?model=lightgbm&limit=15` | Prediction log with `error` and `error_pct` |
 
