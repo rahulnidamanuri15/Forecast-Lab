@@ -274,19 +274,33 @@ async def get_evaluation(days: Optional[int] = None):
             with conn.cursor() as cur:
                 # Window is anchored to the app timezone (see vericast/local_time.py),
                 # not Postgres's CURRENT_DATE, which is GMT on Neon.
+                #
+                # MAE/RMSE are aggregated in SQL rather than fetched row-by-row:
+                # the full-record branch has no window to bound it, so pulling
+                # every prediction ever published grew unbounded with the record
+                # itself. COUNT/AVG return one row per model regardless of size.
+                # AVG(...) FILTER skips the pending rows without a second query.
+                metrics = """
+                    SELECT model,
+                           COUNT(*) FILTER (WHERE predicted_pm2_5 IS NOT NULL
+                                              AND actual_pm2_5 IS NOT NULL) AS scored,
+                           COUNT(*) FILTER (WHERE predicted_pm2_5 IS NULL
+                                               OR actual_pm2_5 IS NULL) AS pending,
+                           AVG(ABS(actual_pm2_5 - predicted_pm2_5)) AS mae,
+                           SQRT(AVG(POWER(actual_pm2_5 - predicted_pm2_5, 2))) AS rmse
+                    FROM predictions
+                    WHERE city = %s
+                """
                 if full_record:
-                    cur.execute("""
-                        SELECT model, predicted_pm2_5, actual_pm2_5
-                        FROM predictions
-                        WHERE city = %s
-                    """, (CITY,))
+                    cur.execute(metrics + " GROUP BY model", (CITY,))
                 else:
-                    cur.execute("""
-                        SELECT model, predicted_pm2_5, actual_pm2_5
-                        FROM predictions
-                        WHERE city = %s
+                    cur.execute(
+                        metrics + """
                           AND forecast_date >= %s - %s * INTERVAL '1 day'
-                    """, (CITY, local_time.today(), days))
+                        GROUP BY model
+                        """,
+                        (CITY, local_time.today(), days),
+                    )
 
                 rows = cur.fetchall()
 
@@ -299,32 +313,18 @@ async def get_evaluation(days: Optional[int] = None):
                 ),
             )
 
-        by_model = {}
-        for model_name, predicted, actual in rows:
-            by_model.setdefault(model_name, {"scored": [], "pending": 0})
-            if actual is not None and predicted is not None:
-                by_model[model_name]["scored"].append((predicted, actual))
-            else:
-                by_model[model_name]["pending"] += 1
-
-        evaluation = []
-        for model_name, data in by_model.items():
-            scored = data["scored"]
-            entry = {
+        evaluation = [
+            {
                 "model": model_name,
                 "window_days": None if full_record else days,
-                "scored_count": len(scored),
-                "pending_count": data["pending"],
+                "scored_count": scored,
+                "pending_count": pending,
+                "description": MODEL_DESCRIPTIONS.get(model_name, ""),
+                "mae": float(mae) if mae is not None else None,
+                "rmse": float(rmse) if rmse is not None else None,
             }
-            if scored:
-                errors = [abs(a - p) for p, a in scored]
-                squared_errors = [(a - p) ** 2 for p, a in scored]
-                entry["mae"] = sum(errors) / len(errors)
-                entry["rmse"] = (sum(squared_errors) / len(squared_errors)) ** 0.5
-            else:
-                entry["mae"] = None
-                entry["rmse"] = None
-            evaluation.append(entry)
+            for model_name, scored, pending, mae, rmse in rows
+        ]
 
         # Unscored models sort last. inf rather than a (is_none, mae) tuple:
         # two None maes would make that tuple compare None < None -> TypeError.
@@ -587,20 +587,34 @@ async def get_electricity_evaluation(days: Optional[int] = None):
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 # Window anchored to the app timezone, not Postgres CURRENT_DATE
-                # (which is GMT on Neon).
+                # (which is GMT on Neon). Aggregated in SQL for the same reason
+                # as /evaluation: the full-record branch has no window to bound
+                # it, so the row count grew with the published record. MAPE's
+                # FILTER drops actual = 0 rather than dividing by it.
+                metrics = """
+                    SELECT model,
+                           COUNT(*) FILTER (WHERE predicted_demand_mw IS NOT NULL
+                                              AND actual_demand_mw IS NOT NULL) AS scored,
+                           COUNT(*) FILTER (WHERE predicted_demand_mw IS NULL
+                                               OR actual_demand_mw IS NULL) AS pending,
+                           AVG(ABS(actual_demand_mw - predicted_demand_mw)) AS mae,
+                           SQRT(AVG(POWER(actual_demand_mw - predicted_demand_mw, 2))) AS rmse,
+                           AVG(ABS(actual_demand_mw - predicted_demand_mw)
+                               / actual_demand_mw * 100)
+                               FILTER (WHERE actual_demand_mw <> 0) AS mape
+                    FROM electricity_predictions
+                    WHERE state = %s
+                """
                 if full_record:
-                    cur.execute("""
-                        SELECT model, predicted_demand_mw, actual_demand_mw
-                        FROM electricity_predictions
-                        WHERE state = %s
-                    """, (STATE,))
+                    cur.execute(metrics + " GROUP BY model", (STATE,))
                 else:
-                    cur.execute("""
-                        SELECT model, predicted_demand_mw, actual_demand_mw
-                        FROM electricity_predictions
-                        WHERE state = %s
+                    cur.execute(
+                        metrics + """
                           AND forecast_date >= %s - %s * INTERVAL '1 day'
-                    """, (STATE, local_time.today(), days))
+                        GROUP BY model
+                        """,
+                        (STATE, local_time.today(), days),
+                    )
 
                 rows = cur.fetchall()
 
@@ -611,34 +625,19 @@ async def get_electricity_evaluation(days: Optional[int] = None):
                         else "No predictions found in that window"),
             )
 
-        by_model = {}
-        for model_name, predicted, actual in rows:
-            by_model.setdefault(model_name, {"scored": [], "pending": 0})
-            if actual is not None and predicted is not None:
-                by_model[model_name]["scored"].append((predicted, actual))
-            else:
-                by_model[model_name]["pending"] += 1
-
-        evaluation = []
-        for model_name, data in by_model.items():
-            scored = data["scored"]
-            entry = {
+        evaluation = [
+            {
                 "model": model_name,
                 "window_days": None if full_record else days,
-                "scored_count": len(scored),
-                "pending_count": data["pending"],
+                "scored_count": scored,
+                "pending_count": pending,
                 "description": ELEC_MODEL_DESCRIPTIONS.get(model_name, ""),
+                "mae": float(mae) if mae is not None else None,
+                "rmse": float(rmse) if rmse is not None else None,
+                "mape": float(mape) if mape is not None else None,
             }
-            if scored:
-                errors = [abs(a - p) for p, a in scored]
-                squared_errors = [(a - p) ** 2 for p, a in scored]
-                pct_errors = [abs(a - p) / a * 100 for p, a in scored if a]
-                entry["mae"] = sum(errors) / len(errors)
-                entry["rmse"] = (sum(squared_errors) / len(squared_errors)) ** 0.5
-                entry["mape"] = (sum(pct_errors) / len(pct_errors)) if pct_errors else None
-            else:
-                entry["mae"] = entry["rmse"] = entry["mape"] = None
-            evaluation.append(entry)
+            for model_name, scored, pending, mae, rmse, mape in rows
+        ]
 
         # Unscored models sort last; inf rather than a tuple, since two None maes
         # would compare None < None -> TypeError.

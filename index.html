@@ -4,9 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>VeriCast · Published-then-verified PM2.5 &amp; Electricity Demand Forecasts</title>
-<!-- Version-pinned: an unpinned jsDelivr tag means a silent major-version
-     bump can break every chart on this page without a commit here. -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<!-- Version-pinned AND hash-pinned: the tag stops a silent major-version bump,
+     the integrity hash stops a tampered CDN response from running as script on
+     a page whose whole claim is that its numbers are trustworthy. Bumping the
+     version means recomputing the hash:
+     curl -sSL <url> | openssl dgst -sha384 -binary | openssl base64 -A -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
+        integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4"
+        crossorigin="anonymous"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
