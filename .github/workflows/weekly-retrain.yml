@@ -12,7 +12,7 @@ name: Weekly Model Retrain
 # here, and a bad upstream week cannot replace a working model.
 on:
   schedule:
-    - cron: '0 4 * * 0'  # 04:00 UTC every Sunday, an hour before the daily pipeline
+    - cron: '0 4 * * 0'  # 04:00 UTC every Sunday, ahead of the daily pipeline's 05:17
   workflow_dispatch: {}   # allow manual runs from the Actions tab
 
 permissions:
