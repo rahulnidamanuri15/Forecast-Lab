@@ -242,7 +242,9 @@ self-heals on the next one instead of leaving a permanent NULL.
 ## Running it
 
 ```bash
-cp .env.example .env          # then fill in DATABASE_URL
+# DATABASE_URL is required; CITY=Nagpur, STATE=Maharashtra, FRONTEND_ORIGIN
+# and API_BASE=http://localhost:8000 all default, so a .env with just the DSN works.
+echo 'DATABASE_URL=' > .env    # then fill it in
 pip install -r requirements.txt
 python -m pytest tests -q
 uvicorn app:app --host 0.0.0.0 --port 8000
