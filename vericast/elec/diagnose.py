@@ -23,7 +23,7 @@ from vericast import MODEL_ELEC as MODEL_PATH, local_time
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-STATE = "Maharashtra"
+STATE = os.getenv("STATE", "Maharashtra")
 
 # Observed 2023-2026 Maharashtra range is 20,147-32,419 MW. Bounds are wide
 # enough for growth and a mild winter, tight enough that a unit error or a

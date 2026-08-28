@@ -1,3 +1,19 @@
+"""Verify the PM2.5 feature store is point-in-time correct.
+
+Checks three invariants against `observations`, deriving expectations from
+*calendar dates* rather than row positions:
+
+  1. same-day weather columns equal that day's observation exactly;
+  2. `*_lag_1` equals the previous calendar day, and is NULL when that day is
+     missing (a date gap) or when the row is the first in the series;
+  3. `*_roll_7` / `*_roll_30` are NULL unless every one of the preceding 6 / 29
+     calendar days is present, and equal the mean over that full window when it is.
+
+Check 3 used to re-implement features.py's old `if i >= 6:` row-index logic,
+which meant it ratified the bug it was supposed to catch. It now asserts the
+full-window property that vericast/pm25/features.py's `COUNT(*) OVER wN`
+guarantees, so the two disagree if either drifts.
+"""
 import os
 import psycopg
 from datetime import timedelta
@@ -6,231 +22,102 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+CITY = os.getenv("CITY", "Nagpur")
+
+TOLERANCE = 1e-9
+
+# (feature column, observation column, window length in days)
+ROLLING = [
+    ("pm2_5_roll_7", "pm2_5", 7),
+    ("pm2_5_roll_30", "pm2_5", 30),
+    ("pm10_roll_7", "pm10", 7),
+    ("pm10_roll_30", "pm10", 30),
+]
+
+# (feature column, observation column)
+LAGS = [
+    ("pm2_5_lag_1", "pm2_5"),
+    ("pm10_lag_1", "pm10"),
+    ("temperature_lag_1", "temperature_2m_mean"),
+    ("wind_speed_lag_1", "wind_speed_10m_max"),
+    ("precipitation_lag_1", "precipitation_sum"),
+]
+
+SAME_DAY = ["temperature_2m_mean", "wind_speed_10m_max", "precipitation_sum"]
+
+OBS_COLS = ["pm2_5", "pm10", "temperature_2m_mean", "wind_speed_10m_max", "precipitation_sum"]
+FEAT_COLS = [c for c, _ in LAGS] + [c for c, _, _ in ROLLING] + SAME_DAY
+
+
+def mismatch(a, b, tol=TOLERANCE):
+    """None-safe comparison. Both None -> match; one None -> mismatch."""
+    if a is None and b is None:
+        return False
+    if a is None or b is None:
+        return True
+    return abs(a - b) > tol
+
 
 def run_leakage_test():
-    """Run leakage test to ensure no future data leakage in features"""
-    try:
-        with psycopg.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                # 1. Get all observations for Nagpur, ordered by as_of
-                cur.execute("""
-                    SELECT as_of, pm2_5, pm10, temperature_2m_mean, wind_speed_10m_max, precipitation_sum
-                    FROM observations
-                    WHERE city = 'Nagpur'
-                    ORDER BY as_of
-                """)
-                obs_rows = cur.fetchall()
-                print(f"Fetched {len(obs_rows)} observation records")
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT as_of, {', '.join(OBS_COLS)} FROM observations "
+                f"WHERE city = %s ORDER BY as_of", (CITY,))
+            obs = {r[0]: dict(zip(OBS_COLS, r[1:])) for r in cur.fetchall()}
+            print(f"Fetched {len(obs)} observation records")
 
-                # Build a list of dates and a dict for quick lookup
-                obs_dates = [row[0] for row in obs_rows]
-                obs_dict = {}
-                for row in obs_rows:
-                    date = row[0]
-                    obs_dict[date] = {
-                        'pm2_5': row[1],
-                        'pm10': row[2],
-                        'temperature': row[3],
-                        'wind': row[4],
-                        'precip': row[5]
-                    }
+            cur.execute(
+                f"SELECT as_of, {', '.join(FEAT_COLS)} FROM features "
+                f"WHERE city = %s ORDER BY as_of", (CITY,))
+            feats = [(r[0], dict(zip(FEAT_COLS, r[1:]))) for r in cur.fetchall()]
+            print(f"Fetched {len(feats)} feature records")
 
-                # 2. Get all features for Nagpur, ordered by as_of
-                cur.execute("""
-                    SELECT as_of,
-                           pm2_5_lag_1, pm10_lag_1, temperature_lag_1, wind_speed_lag_1, precipitation_lag_1,
-                           pm2_5_roll_7, pm2_5_roll_30, pm10_roll_7, pm10_roll_30,
-                           day_of_week, month, is_weekend,
-                           temperature_2m_mean, wind_speed_10m_max, precipitation_sum
-                    FROM features
-                    WHERE city = 'Nagpur'
-                    ORDER BY as_of
-                """)
-                feat_rows = cur.fetchall()
-                print(f"Fetched {len(feat_rows)} feature records")
+    errors = []
+    for as_of, feat in feats:
+        today = obs.get(as_of)
+        if today is None:
+            errors.append(f"{as_of}: missing in observations")
+            continue
 
-                # 3. Check each feature row
-                tolerance = 1e-9  # for floating point comparison
-                errors = []
+        # 1. Same-day weather is copied straight through.
+        for col in SAME_DAY:
+            if mismatch(feat[col], today[col]):
+                errors.append(f"{as_of}: {col} {feat[col]} != observation {today[col]}")
 
-                def values_mismatch(a, b, tol=tolerance):
-                    """
-                    None-safe comparison. Returns True if the values disagree.
-                    Both None -> match. One None, other not -> mismatch.
-                    Otherwise compare numerically within tolerance.
-                    """
-                    if a is None and b is None:
-                        return False
-                    if a is None or b is None:
-                        return True
-                    return abs(a - b) > tol
+        # 2. Lags come from the previous *calendar* day, or are NULL if it is absent.
+        prev = obs.get(as_of - timedelta(days=1))
+        for fcol, ocol in LAGS:
+            expected = None if prev is None else prev[ocol]
+            if mismatch(feat[fcol], expected):
+                errors.append(
+                    f"{as_of}: {fcol} is {feat[fcol]}, expected {expected}"
+                    + ("" if prev else " (NULL - previous day absent)"))
 
-                for i, feat in enumerate(feat_rows):
-                    as_of = feat[0]
-                    # Same-day weather features (indices 13,14,15 in feat tuple)
-                    feat_temp = feat[13]
-                    feat_wind = feat[14]
-                    feat_precip = feat[15]
+        # 3. Rolling means need every day of the window, else NULL.
+        for fcol, ocol, days in ROLLING:
+            window = [obs.get(as_of - timedelta(days=d)) for d in range(days)]
+            values = [w[ocol] for w in window if w is not None and w[ocol] is not None]
+            complete = len(values) == days
+            expected = sum(values) / days if complete else None
+            if mismatch(feat[fcol], expected):
+                errors.append(
+                    f"{as_of}: {fcol} is {feat[fcol]}, expected {expected} "
+                    f"({len(values)}/{days} days present)")
 
-                    # Get corresponding observation
-                    obs = obs_dict.get(as_of)
-                    if obs is None:
-                        errors.append(f"Date {as_of}: missing in observations")
-                        continue
+    if errors:
+        print("Leakage test FAILED")
+        print(f"Found {len(errors)} error(s):")
+        for err in errors[:10]:
+            print(f"  - {err}")
+        if len(errors) > 10:
+            print(f"  ... and {len(errors) - 10} more")
+        return False
 
-                    # Check same-day weather
-                    if values_mismatch(feat_temp, obs['temperature']):
-                        errors.append(f"Date {as_of}: temperature mismatch: feature={feat_temp}, obs={obs['temperature']}")
-                    if values_mismatch(feat_wind, obs['wind']):
-                        errors.append(f"Date {as_of}: wind mismatch: feature={feat_wind}, obs={obs['wind']}")
-                    if values_mismatch(feat_precip, obs['precip']):
-                        errors.append(f"Date {as_of}: precipitation mismatch: feature={feat_precip}, obs={obs['precip']}")
+    print("Leakage test PASSED")
+    print(f"All {len(feats)} feature records checked successfully.")
+    return True
 
-                    # Check lagged features (indices 1-5 in feat tuple)
-                    if i > 0:
-                        prev_date = obs_dates[i-1]
-                        prev_obs = obs_dict[prev_date]
-                        # If there's a gap (prev_date is not literally the day
-                        # before as_of), vericast/pm25/features.py intentionally
-                        # leaves the lag features NULL for this row instead of
-                        # pulling in a stale value. Expect NULLs, not a match.
-                        is_gap = (as_of - prev_date) != timedelta(days=1)
-                        if is_gap:
-                            # A gap means the lag features SHOULD be NULL for
-                            # this row. Flag it only if they aren't.
-                            for label, val in [
-                                ("pm2_5_lag_1", feat[1]),
-                                ("pm10_lag_1", feat[2]),
-                                ("temperature_lag_1", feat[3]),
-                                ("wind_speed_lag_1", feat[4]),
-                                ("precipitation_lag_1", feat[5]),
-                            ]:
-                                if val is not None:
-                                    errors.append(
-                                        f"Date {as_of}: {label} should be None across a "
-                                        f"date gap ({prev_date} -> {as_of}), got {val}"
-                                    )
-                        else:
-                            # pm2_5_lag_1
-                            if values_mismatch(feat[1], prev_obs['pm2_5']):
-                                errors.append(f"Date {as_of}: pm2_5_lag_1 mismatch: feature={feat[1]}, obs_previous={prev_obs['pm2_5']}")
-                            elif feat[1] is None and prev_obs['pm2_5'] is not None:
-                                errors.append(f"Date {as_of}: pm2_5_lag_1 is None but previous day exists")
-                            # pm10_lag_1
-                            if values_mismatch(feat[2], prev_obs['pm10']):
-                                errors.append(f"Date {as_of}: pm10_lag_1 mismatch: feature={feat[2]}, obs_previous={prev_obs['pm10']}")
-                            elif feat[2] is None and prev_obs['pm10'] is not None:
-                                errors.append(f"Date {as_of}: pm10_lag_1 is None but previous day exists")
-                            # temperature_lag_1
-                            if values_mismatch(feat[3], prev_obs['temperature']):
-                                errors.append(f"Date {as_of}: temperature_lag_1 mismatch: feature={feat[3]}, obs_previous={prev_obs['temperature']}")
-                            elif feat[3] is None and prev_obs['temperature'] is not None:
-                                errors.append(f"Date {as_of}: temperature_lag_1 is None but previous day exists")
-                            # wind_speed_lag_1
-                            if values_mismatch(feat[4], prev_obs['wind']):
-                                errors.append(f"Date {as_of}: wind_speed_lag_1 mismatch: feature={feat[4]}, obs_previous={prev_obs['wind']}")
-                            elif feat[4] is None and prev_obs['wind'] is not None:
-                                errors.append(f"Date {as_of}: wind_speed_lag_1 is None but previous day exists")
-                            # precipitation_lag_1
-                            if values_mismatch(feat[5], prev_obs['precip']):
-                                errors.append(f"Date {as_of}: precipitation_lag_1 mismatch: feature={feat[5]}, obs_previous={prev_obs['precip']}")
-                            elif feat[5] is None and prev_obs['precip'] is not None:
-                                errors.append(f"Date {as_of}: precipitation_lag_1 is None but previous day exists")
-                    else:
-                        # First row should have null lagged features
-                        if feat[1] is not None or feat[2] is not None or feat[3] is not None or feat[4] is not None or feat[5] is not None:
-                            errors.append(f"Date {as_of}: first row should have null lagged features")
-
-                    # Check rolling averages for PM2.5 (indices 6,7)
-                    # 7-day rolling average (index 6)
-                    if i >= 6:
-                        # Get the last 7 days including current day: indices i-6 to i
-                        pm2_5_values = [obs_dict[obs_dates[j]]['pm2_5'] for j in range(i-6, i+1) if obs_dict[obs_dates[j]]['pm2_5'] is not None]
-                        if pm2_5_values:
-                            expected = sum(pm2_5_values) / len(pm2_5_values)
-                            if feat[6] is not None:
-                                if abs(feat[6] - expected) > tolerance:
-                                    errors.append(f"Date {as_of}: pm2_5_roll_7 mismatch: feature={feat[6]}, expected={expected}")
-                            else:
-                                errors.append(f"Date {as_of}: pm2_5_roll_7 is None but enough data")
-                        else:
-                            if feat[6] is not None:
-                                errors.append(f"Date {as_of}: pm2_5_roll_7 is not None but all values are None")
-                    else:
-                        # Should be None for first 6 days
-                        if feat[6] is not None:
-                            errors.append(f"Date {as_of}: pm2_5_roll_7 should be None for first 6 days")
-
-                    # 30-day rolling average (index 7)
-                    if i >= 29:
-                        pm2_5_values = [obs_dict[obs_dates[j]]['pm2_5'] for j in range(i-29, i+1) if obs_dict[obs_dates[j]]['pm2_5'] is not None]
-                        if pm2_5_values:
-                            expected = sum(pm2_5_values) / len(pm2_5_values)
-                            if feat[7] is not None:
-                                if abs(feat[7] - expected) > tolerance:
-                                    errors.append(f"Date {as_of}: pm2_5_roll_30 mismatch: feature={feat[7]}, expected={expected}")
-                            else:
-                                errors.append(f"Date {as_of}: pm2_5_roll_30 is None but enough data")
-                        else:
-                            if feat[7] is not None:
-                                errors.append(f"Date {as_of}: pm2_5_roll_30 is not None but all values are None")
-                    else:
-                        if feat[7] is not None:
-                            errors.append(f"Date {as_of}: pm2_5_roll_30 should be None for first 29 days")
-
-                    # Check rolling averages for PM10 (indices 8,9)
-                    # 7-day rolling average (index 8)
-                    if i >= 6:
-                        pm10_values = [obs_dict[obs_dates[j]]['pm10'] for j in range(i-6, i+1) if obs_dict[obs_dates[j]]['pm10'] is not None]
-                        if pm10_values:
-                            expected = sum(pm10_values) / len(pm10_values)
-                            if feat[8] is not None:
-                                if abs(feat[8] - expected) > tolerance:
-                                    errors.append(f"Date {as_of}: pm10_roll_7 mismatch: feature={feat[8]}, expected={expected}")
-                            else:
-                                errors.append(f"Date {as_of}: pm10_roll_7 is None but enough data")
-                        else:
-                            if feat[8] is not None:
-                                errors.append(f"Date {as_of}: pm10_roll_7 is not None but all values are None")
-                    else:
-                        if feat[8] is not None:
-                            errors.append(f"Date {as_of}: pm10_roll_7 should be None for first 6 days")
-
-                    # 30-day rolling average (index 9)
-                    if i >= 29:
-                        pm10_values = [obs_dict[obs_dates[j]]['pm10'] for j in range(i-29, i+1) if obs_dict[obs_dates[j]]['pm10'] is not None]
-                        if pm10_values:
-                            expected = sum(pm10_values) / len(pm10_values)
-                            if feat[9] is not None:
-                                if abs(feat[9] - expected) > tolerance:
-                                    errors.append(f"Date {as_of}: pm10_roll_30 mismatch: feature={feat[9]}, expected={expected}")
-                            else:
-                                errors.append(f"Date {as_of}: pm10_roll_30 is None but enough data")
-                        else:
-                            if feat[9] is not None:
-                                errors.append(f"Date {as_of}: pm10_roll_30 is not None but all values are None")
-                    else:
-                        if feat[9] is not None:
-                            errors.append(f"Date {as_of}: pm10_roll_30 should be None for first 29 days")
-
-                # 4. Report results
-                if errors:
-                    print("Leakage test FAILED")
-                    print(f"Found {len(errors)} error(s):")
-                    for err in errors[:10]:  # Show first 10 errors
-                        print(f"  - {err}")
-                    if len(errors) > 10:
-                        print(f"  ... and {len(errors) - 10} more")
-                    return False
-                else:
-                    print("Leakage test PASSED")
-                    print(f"All {len(feat_rows)} feature records checked successfully.")
-                    return True
-
-    except Exception as e:
-        print(f"Error running leakage test: {e}")
-        raise
 
 if __name__ == "__main__":
-    success = run_leakage_test()
-    exit(0 if success else 1)
+    exit(0 if run_leakage_test() else 1)

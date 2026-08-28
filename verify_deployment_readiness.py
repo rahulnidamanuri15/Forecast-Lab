@@ -13,6 +13,12 @@ load_dotenv()
 # Override to smoke-test a deployed instance instead of the local process.
 API_BASE = os.getenv("API_BASE", "http://localhost:8000").rstrip("/")
 
+# Same env read as app.py and every vericast module. Hardcoding the city here
+# meant the one gate that is supposed to catch a misconfiguration was the only
+# place that could not see it: point CITY somewhere with no rows and this file
+# still queried Nagpur and passed.
+CITY = os.getenv("CITY", "Nagpur")
+
 def check_database_url():
     """Check that DATABASE_URL exists"""
     database_url = os.getenv("DATABASE_URL")
@@ -54,7 +60,7 @@ def check_observations_freshness():
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", ("Nagpur",))
+                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", (CITY,))
                 latest_obs = cur.fetchone()[0]
 
                 if latest_obs is None:
@@ -89,11 +95,11 @@ def check_features_match_observations():
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
                 # Get latest observation date
-                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", ("Nagpur",))
+                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", (CITY,))
                 latest_obs = cur.fetchone()[0]
 
                 # Get latest features date
-                cur.execute("SELECT MAX(as_of) FROM features WHERE city = %s", ("Nagpur",))
+                cur.execute("SELECT MAX(as_of) FROM features WHERE city = %s", (CITY,))
                 latest_feat = cur.fetchone()[0]
 
                 if latest_obs is None or latest_feat is None:
@@ -130,7 +136,7 @@ def check_features_no_nulls():
                     WHERE city = %s
                     ORDER BY as_of DESC
                     LIMIT 1
-                """, ("Nagpur",))
+                """, (CITY,))
                 row = cur.fetchone()
 
                 if row is None:
@@ -211,7 +217,7 @@ def check_lightgbm_prediction_exists():
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
                 # Get latest observation date to determine what tomorrow should be
-                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", ("Nagpur",))
+                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", (CITY,))
                 latest_obs = cur.fetchone()[0]
 
                 if latest_obs is None:
@@ -227,7 +233,7 @@ def check_lightgbm_prediction_exists():
                     SELECT forecast_date, predicted_pm2_5
                     FROM predictions
                     WHERE city = %s AND model = %s AND forecast_date = %s
-                """, ("Nagpur", "lightgbm", expected_forecast_date))
+                """, (CITY, "lightgbm", expected_forecast_date))
 
                 row = cur.fetchone()
 
@@ -257,7 +263,7 @@ def check_naive_prediction_exists():
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
                 # Get latest observation date to determine what tomorrow should be
-                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", ("Nagpur",))
+                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", (CITY,))
                 latest_obs = cur.fetchone()[0]
 
                 if latest_obs is None:
@@ -273,7 +279,7 @@ def check_naive_prediction_exists():
                     SELECT forecast_date, predicted_pm2_5
                     FROM predictions
                     WHERE city = %s AND model = %s AND forecast_date = %s
-                """, ("Nagpur", "naive_baseline", expected_forecast_date))
+                """, (CITY, "naive_baseline", expected_forecast_date))
 
                 row = cur.fetchone()
 
@@ -303,7 +309,7 @@ def check_forecast_date_logic():
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
                 # Get latest observation date
-                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", ("Nagpur",))
+                cur.execute("SELECT MAX(as_of) FROM observations WHERE city = %s", (CITY,))
                 latest_obs = cur.fetchone()[0]
 
                 if latest_obs is None:
@@ -324,7 +330,7 @@ def check_forecast_date_logic():
                         WHERE city = %s AND model = %s
                         ORDER BY forecast_date DESC
                         LIMIT 1
-                    """, ("Nagpur", model))
+                    """, (CITY, model))
 
                     row = cur.fetchone()
 
@@ -523,7 +529,7 @@ def main():
         print("\nALL CHECKS PASSED - SYSTEM IS READY FOR DEPLOYMENT!")
         print("\nNext steps:")
         print("  1. Deploy to your chosen platform (Render, Fly.io, etc.)")
-        print("  2. Set environment variables: DATABASE_URL, CITY, FRONTEND_ORIGIN")
+        print("  2. Set environment variables: DATABASE_URL (required), CITY, STATE, FRONTEND_ORIGIN")
         print("  3. Verify GitHub Actions workflow runs successfully")
         print("  4. Monitor the system for 24-48 hours before marking as production")
         return True

@@ -1,9 +1,13 @@
 import os
+import sys
 import psycopg
 import numpy as np
 import lightgbm as lgb
 from dotenv import load_dotenv
 from datetime import timedelta
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from vericast.pm25.train import PARAMS, DATASET_SQL, CITY  # noqa: E402
 
 load_dotenv()
 
@@ -14,46 +18,7 @@ def train_lightgbm_walkforward():
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
-                # Get features and target
-                query = """
-                    SELECT
-                        f.as_of AS feature_date,
-                        o.as_of AS target_date,
-
-                        f.pm2_5_lag_1,
-                        f.pm10_lag_1,
-                        f.temperature_lag_1,
-                        f.wind_speed_lag_1,
-                        f.precipitation_lag_1,
-
-                        f.pm2_5_roll_7,
-                        f.pm2_5_roll_30,
-                        f.pm10_roll_7,
-                        f.pm10_roll_30,
-
-                        f.day_of_week,
-                        f.month,
-                        f.is_weekend,
-
-                        f.temperature_2m_mean,
-                        f.wind_speed_10m_max,
-                        f.precipitation_sum,
-
-                        o.pm2_5 AS target_pm2_5
-
-                    FROM features f
-                    JOIN observations o
-                    ON o.city = f.city
-                    AND o.as_of = f.as_of + INTERVAL '1 day'
-
-                    WHERE f.city = 'Nagpur'
-                    AND f.pm2_5_lag_1 IS NOT NULL
-                    AND o.pm2_5 IS NOT NULL
-
-                    ORDER BY f.as_of;
-                    """
-
-                cur.execute(query)
+                cur.execute(DATASET_SQL, (CITY,))
                 rows = cur.fetchall()
 
                 if not rows:
@@ -112,22 +77,8 @@ def train_lightgbm_walkforward():
                     # Create LightGBM dataset
                     train_data = lgb.Dataset(X_train, label=y_train)
 
-                    # Set parameters for LightGBM
-                    params = {
-                        'objective': 'regression',
-                        'metric': 'mae',
-                        'boosting_type': 'gbdt',
-                        'num_leaves': 31,
-                        'learning_rate': 0.05,
-                        'feature_fraction': 0.9,
-                        'bagging_fraction': 0.8,
-                        'bagging_freq': 5,
-                        'verbose': -1,
-                        'random_state': 42
-                    }
-
                     # Train model
-                    model = lgb.train(params, train_data, num_boost_round=100)
+                    model = lgb.train(PARAMS, train_data, num_boost_round=100)
 
                     # Predict
                     y_pred = model.predict(X_test)[0]
