@@ -12,7 +12,7 @@ numpy==2.4.6
 python-dotenv==1.2.3
 lightgbm==4.7.0
 fastapi==0.141.1
-uvicorn==0.34.0
+uvicorn==0.52.4
 # python:*-slim ships without a tz database; Asia/Kolkata (see vericast/local_time.py)
 # fails without this.
 tzdata==2026.3
