@@ -96,10 +96,23 @@ def make_daily_prediction():
             created_at = CURRENT_TIMESTAMP;
         """
 
-        cur.execute(upsert_sql, (CITY, forecast_date, pm2_5, "naive_baseline"))
-        conn.commit()
+        # A thin-hours day is stored as pm2_5 = NULL by vericast/pm25/ingest.py
+        # (under MIN_HOURS_PER_DAY = 18 real hours), so the naive baseline has
+        # nothing to carry forward. Warn and skip the model rather than raise -
+        # same shape as the per-model guards in vericast/elec/predict.py, and
+        # diagnose.py is the step that fails the job when nothing publishable
+        # was written. Publishing NULL instead would commit here and then crash
+        # on the format below, leaving a row that 500s /forecast and scores as a
+        # NaN MAE into model_performance.
+        if pm2_5 is None:
+            print(f"[WARN] Latest observation ({as_of}) has NULL pm2_5 (too few "
+                  f"hours ingested); skipping naive_baseline rather than "
+                  f"publishing a NULL forecast for {forecast_date}.")
+        else:
+            cur.execute(upsert_sql, (CITY, forecast_date, pm2_5, "naive_baseline"))
+            conn.commit()
 
-        print(f"[OK] Stored naive_baseline prediction for {forecast_date}: {pm2_5:.2f} PM2.5")
+            print(f"[OK] Stored naive_baseline prediction for {forecast_date}: {pm2_5:.2f} PM2.5")
 
         # LightGBM prediction, if a trained artifact is available.
         # Uses the latest features row (as_of == as_of of latest observation),

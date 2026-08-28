@@ -110,16 +110,22 @@ def fetch_demand(start_date, end_date):
 
         # peak_demand_mw is NOT NULL in the schema, so a blank one is a skip, not
         # a NULL row - a demand row without demand has nothing to score against.
+        # Unparseable is the same case as blank: this is a third-party mirror, so
+        # a stray 'N/A' or a thousands separator must skip the day rather than
+        # raise ValueError halfway through and abandon the rows already accepted.
         raw_mw = row["max_demand_met_mw"].strip()
         if not raw_mw:
             skipped += 1
             continue
 
         raw_mu = row["energy_met_mu"].strip()
-        demand[date_str] = (float(raw_mw), float(raw_mu) if raw_mu else None)
+        try:
+            demand[date_str] = (float(raw_mw), float(raw_mu) if raw_mu else None)
+        except ValueError:
+            skipped += 1
 
     print(f"{STATE} demand days in range: {len(demand)}"
-          + (f" ({skipped} skipped for missing MW)" if skipped else ""))
+          + (f" ({skipped} skipped for missing or unparseable MW)" if skipped else ""))
     return demand
 
 

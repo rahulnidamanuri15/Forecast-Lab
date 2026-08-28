@@ -19,6 +19,16 @@ on:
     - cron: "42 8 * * *"  # 08:42 UTC = 14:12 IST; retry net if the 05:17 run was dropped
   workflow_dispatch: {}
 
+# The two crons above can overlap once the scheduler drifts by hours, which would
+# run two full-recompute feature passes and two predict.py runs against the same
+# forecast_date at once. Every write upserts so the data still converges, but the
+# race is free to remove. cancel-in-progress: false deliberately - the second cron
+# is a catch-up, not a replacement, and cancelling mid-run could stop a job between
+# predict.py's commit and diagnose.py's gate. Same shape as static.yml.
+concurrency:
+  group: daily-pipeline
+  cancel-in-progress: false
+
 permissions:
   contents: read  # reads the checkout and the committed model; writes nothing back
 

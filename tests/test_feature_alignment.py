@@ -1,13 +1,17 @@
-"""Pipeline alignment invariants, checked against the live database.
+"""Pipeline alignment invariants, checked against a real Postgres.
 
 These are the invariants that silently break when a step is skipped or a
 timezone slips: features must be engineered up to the latest observation, and
 a forecast must be labelled for the day after the data it was built from.
-Skipped (not failed) when no database is *reachable*, so the API-only tests
-still run in a bare checkout and in CI - which must set a dummy DSN because
-app.py raises at import without one. Skipping on an unreachable DSN rather than
-an unset variable is what lets ci.yml stop excluding this file by name: it now
-runs the day a real DATABASE_URL is available and skips, stating why, until then.
+
+Two databases, one suite. Against the live database these assert on real
+pipeline output. Against CI's empty throwaway Postgres they seed themselves
+first (see `_seed` below) so the same SQL still runs - which is the point: these
+nine are the only tests that execute the window-frame queries the leakage
+guarantee rests on.
+
+Still skipped rather than failed when no database is *reachable* at all, so a
+bare checkout runs the API-only tests instead of erroring.
 """
 import os
 import sys
@@ -43,6 +47,7 @@ pytestmark = pytest.mark.skipif(_unreachable() is not None, reason=_unreachable(
 def cur():
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as c:
+            _seed(conn, c)
             yield c
 
 
@@ -50,6 +55,108 @@ def _scalar(cur, sql, params=()):
     cur.execute(sql, params)
     row = cur.fetchone()
     return row[0] if row else None
+
+
+# --------------------------------------------------------------------------
+# Seeding, for CI's empty throwaway Postgres. No-op against any database that
+# already has rows, so running with the live DSN still asserts on real pipeline
+# output rather than on fixtures.
+#
+# The dates are the real ones on purpose: 2025-05-21 -> 2025-05-24 is the actual
+# Maharashtra gap, and reproducing it is the whole point - without it
+# test_elec_lag_is_null_across_the_date_gap has nothing to check.
+#
+# Only the *observations* are synthetic. The features tables are built by calling
+# the production engineer_features(), so CI runs the real RANGE ... PRECEDING
+# frames and COUNT(*) OVER wN guards. Hand-writing feature rows here would make
+# the leakage tests assert against this file instead of against the query.
+# --------------------------------------------------------------------------
+
+# 40 consecutive days, so the newest features row has a full 30-day window and
+# test_latest_features_row_is_complete finds no NULLs.
+SEED_PM25 = """
+INSERT INTO observations
+    (city, as_of, pm2_5, pm10, temperature_2m_mean, wind_speed_10m_max, precipitation_sum)
+SELECT %s, d::date,
+       45 + 12 * sin(n::float8 / 4),
+       80 + 20 * sin(n::float8 / 4),
+       31 +  3 * cos(n::float8 / 5),
+       11 +  4 * cos(n::float8 / 3),
+       GREATEST(0, 5 * sin(n::float8 / 3))
+FROM generate_series(DATE '2025-05-02', DATE '2025-06-10', INTERVAL '1 day')
+     WITH ORDINALITY AS g(d, n)
+ON CONFLICT (city, as_of) DO NOTHING;
+"""
+
+# 2025-04-01 -> 2025-06-30 with 05-22 and 05-23 removed: 05-21 is the last day
+# before the hole and 05-24 the first day after it, exactly as upstream.
+#
+# Both ends are sized off the 30-day window. The leading run is >= 30 days so
+# test_elec_rolling_30_requires_a_full_window sees its first 29 rows null out on
+# window size rather than on the gap. The trailing run is >= 30 days *past* the
+# gap (06-30 - 29 days = 06-01) so the newest row's w30 counts 30 real days;
+# ending at 06-10 instead leaves demand_roll_30_mean NULL on the newest row,
+# because that window still straddles the hole.
+SEED_ELEC = """
+INSERT INTO electricity_observations
+    (state, as_of, peak_demand_mw, energy_met_mu, temperature_2m_mean, temperature_2m_max)
+SELECT %s, d::date,
+       24000 + 2500 * sin(n::float8 / 6),
+       480 + 40 * sin(n::float8 / 6),
+       30 + 4 * cos(n::float8 / 7),
+       36 + 4 * cos(n::float8 / 7)
+FROM generate_series(DATE '2025-04-01', DATE '2025-06-30', INTERVAL '1 day')
+     WITH ORDINALITY AS g(d, n)
+WHERE d::date NOT BETWEEN DATE '2025-05-22' AND DATE '2025-05-23'
+ON CONFLICT (state, as_of) DO NOTHING;
+"""
+
+# One published forecast per model at MAX(as_of) + 1 day - the t -> t+1 contract
+# the tests below assert. Written directly rather than by running predict.py,
+# which needs a trained artifact and a features row this seed cannot guarantee.
+# Left unscored: nothing may fill actual_* except the score.py files.
+SEED_PM25_PREDICTIONS = """
+INSERT INTO predictions (city, forecast_date, predicted_pm2_5, model)
+SELECT %s, MAX(as_of) + 1, 47.5, m
+FROM observations, unnest(ARRAY['lightgbm', 'naive_baseline']) AS t(m)
+WHERE city = %s
+GROUP BY m
+ON CONFLICT (city, forecast_date, model) DO NOTHING;
+"""
+
+SEED_ELEC_PREDICTIONS = """
+INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model)
+SELECT %s, MAX(as_of) + 1, 24500, m
+FROM electricity_observations,
+     unnest(ARRAY['lightgbm', 'naive_baseline', 'seasonal_naive']) AS t(m)
+WHERE state = %s
+GROUP BY m
+ON CONFLICT (state, forecast_date, model) DO NOTHING;
+"""
+
+
+def _seed(conn, c):
+    """Populate an empty database with the shape the tests below assert on."""
+    if (_scalar(c, "SELECT COUNT(*) FROM observations")
+            or _scalar(c, "SELECT COUNT(*) FROM electricity_observations")):
+        return
+
+    c.execute(SEED_PM25, (CITY,))
+    c.execute(SEED_ELEC, (STATE,))
+    c.execute(SEED_PM25_PREDICTIONS, (CITY, CITY))
+    c.execute(SEED_ELEC_PREDICTIONS, (STATE, STATE))
+    # Commit before engineering: both engineer_features() open their own
+    # connection and would not see uncommitted rows.
+    conn.commit()
+
+    # Imported here, not at module scope: a bare checkout with no reachable
+    # database skips this whole module and must not pay for the import.
+    from vericast.elec.features import engineer_features as engineer_elec
+    from vericast.pm25.features import engineer_features as engineer_pm25
+
+    engineer_pm25()
+    engineer_elec()
+    print("[seed] empty database populated with synthetic observations")
 
 
 def test_features_reach_latest_observation(cur):
