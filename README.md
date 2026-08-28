@@ -68,6 +68,20 @@ Swapping to real sensor readings (OpenAQ → CPCB) touches exactly one function,
 pipeline reads the AQ API. Deferred on purpose: the loop matters more than the
 sensor.
 
+One more thing to state plainly, because it defines the target: **a daily PM2.5
+mean is a UTC day, labelled with an IST-derived date.** The ingest call passes
+`"timezone": "UTC"` and buckets hourly values by their UTC date, while the date
+*range* requested comes from `local_time` (Asia/Kolkata). So `as_of = 2026-08-27`
+means 2026-08-27 00:00–23:00 UTC — 05:30 that day to 04:30 the next, in IST.
+
+That offset is consistent on both sides of the loop: features, training and
+scoring all read the same column, so no model gets an advantage from it. It is
+left as-is rather than corrected because switching to `Asia/Kolkata` would
+redefine every historical actual on the next full re-ingest — moving numbers
+already published and scored against, which is the retro-fitting this project
+exists to avoid. An IST-day series would be a new city key, not a rewrite of
+this one.
+
 ### Electricity demand
 
 Peak demand met comes from a **community GitHub mirror of Grid-India's daily state
@@ -144,7 +158,13 @@ scored day* from `model_performance`, so its `sample_size` is normally 1. Use
 Reproduce the frozen walk-forward benchmark with `python experiments/compare_models.py`
 (n=1062, MAE 9.3567 vs 10.7975 — consistent with the live record above). Its sample
 count is smaller than the 1,092-row dataset because the first 30 days seed the
-walk-forward window rather than being scored.
+walk-forward window rather than being scored. It is the only backtest script kept:
+the single-model ones it superseded (`naive_baseline_backtest.py`, `train_lightgbm.py`,
+`train_sarima.py`) each re-derived the same dataset with their own hardcoded city and
+their own baseline number to beat, so their printed comparisons drifted out of
+agreement with this table. `compare_models.py` scores both models on identical
+prediction dates in one pass, which is the only way the improvement percentage means
+anything.
 
 ## Layout
 
@@ -164,7 +184,7 @@ vericast/
 │   ├── leakage_test.py           assert no feature row sees data past its own as_of
 │   ├── train.py                  retrain → models/lightgbm_model.txt; owns FEATURE_COLUMNS
 │   ├── predict.py                write tomorrow's forecast for both models
-│   ├── score.py                  fill actual_pm2_5 for every pending row (only writer of actuals)
+│   ├── score.py                  fill actual_pm2_5 for every pending row (only daily-path writer of actuals)
 │   └── diagnose.py               refuse to publish an unfit forecast (non-zero exit)
 └── elec/                         Maharashtra peak demand (MW), same seven roles
     ├── ingest.py                 demand mirror + Open-Meteo temperature
@@ -190,8 +210,25 @@ python -m vericast.schema           # create any missing tables
 ```
 
 Not on the production path: `experiments/` (`compare_models.py`,
-`naive_baseline_backtest.py`, `train_lightgbm.py`, `train_sarima.py`,
 `save_backtest_results.py`, `save_elec_backtest_results.py`) and `tests/`.
+
+Two of those experiment scripts are the **one documented exception** to
+"`score.py` is the only writer of actuals": `save_backtest_results.py` and
+`save_elec_backtest_results.py` INSERT `actual_pm2_5` / `actual_demand_mw`
+directly, because a walk-forward backtest already knows both sides of every pair.
+They are how the launch record was seeded (see Setup below) and are run once, by
+hand, never from the daily job. Everything after launch is `score.py`'s.
+
+Those seeded rows are not otherwise marked: in `model_performance` /
+`electricity_model_performance`, a backtest row is distinguishable from a daily
+row only by `sample_size` — hundreds vs. the normal 1. No provenance column was
+added, because adding one to a live table the published record reads from is
+risk without a caller that needs it.
+
+`model_performance` also has no `city` column (its electricity counterpart has
+`state`), because it predates the second target. Consequence to know before
+changing `CITY`: the PM2.5 leaderboard would silently mix cities, so a second
+city needs a migration, not just a new env var.
 
 ## API
 
@@ -218,6 +255,15 @@ are peak demand met in MW and energy met in MU, as published upstream.
 The two `model=` allowlists are deliberately separate: `seasonal_naive` is valid on
 `/electricity/forecast` and a 400 on `/forecast`, because no such PM2.5 model is
 published.
+
+Connections come from a `psycopg_pool.ConnectionPool` (min 1, max 8) opened in the
+FastAPI lifespan, behind the same `get_db_connection()` every handler already
+called — Neon is a network hop away and a fresh connect + TLS handshake + auth per
+request was the largest slice of this API's latency. `check=check_connection` is
+not optional against Neon, which closes idle connections server-side; without it
+the pool eventually hands out a dead socket. Max 8 because this is a read-only GET
+API and Neon's free tier caps concurrent connections, so a bigger pool only holds
+server slots idle.
 
 ## Automation
 
@@ -260,7 +306,7 @@ self-heals on the next one instead of leaving a permanent NULL.
 # DATABASE_URL is required; CITY=Nagpur, STATE=Maharashtra, FRONTEND_ORIGIN
 # and API_BASE=http://localhost:8000 all default, so a .env with just the DSN works.
 echo 'DATABASE_URL=' > .env    # then fill it in
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt   # -dev is pytest only
 python -m pytest tests -q
 uvicorn app:app --host 0.0.0.0 --port 8000
 python verify_deployment_readiness.py   # must print ALL CHECKS PASSED

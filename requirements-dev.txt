@@ -1,0 +1,9 @@
+# Test-only deps. Split out of requirements.txt so the production image does not
+# ship a test runner: .dockerignore already excludes tests/, so pytest was
+# installed into the deployed container with nothing to run.
+#
+# Install both for local work and in CI:
+#   pip install -r requirements.txt -r requirements-dev.txt
+-r requirements.txt
+
+pytest==9.1.1

@@ -9,6 +9,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import app
+from vericast import local_time
+
+CITY = os.getenv("CITY", "Nagpur")
 
 client = TestClient(app)
 
@@ -60,11 +63,12 @@ def test_evaluation_endpoint_success():
         assert abs(naive_eval["mae"] - 0.2) < 0.001
         assert abs(naive_eval["rmse"] - 0.2) < 0.001
 
-        # The windowed query must be bounded by forecast_date, and must not
-        # fetch the rows themselves - one aggregate row per model only.
-        sql = mock_cursor.execute.call_args[0][0]
-        assert "forecast_date" in sql
-        assert "GROUP BY model" in sql
+        # The windowed branch must bind the app-timezone "today" and the day
+        # count. Asserted on the bound parameters rather than by grepping the SQL
+        # for "forecast_date": a substring check passes on any query that merely
+        # mentions the column, including one that selects it and never filters.
+        _, params = mock_cursor.execute.call_args[0]
+        assert params == (CITY, local_time.today(), 7)
 
 def test_evaluation_endpoint_no_data():
     """Test that the evaluation endpoint handles missing prediction data."""
@@ -121,9 +125,13 @@ def test_evaluation_full_record_omits_window():
         assert entry["window_days"] is None
         assert entry["scored_count"] == 2
 
-        # The full-record query must not filter on forecast_date at all.
-        sql = mock_cursor.execute.call_args[0][0]
-        assert "forecast_date" not in sql
+        # The full-record branch takes no window, so CITY is the only bound
+        # parameter. Same reason as above for asserting on params, not on the SQL
+        # text: `"forecast_date" not in sql` would break the moment the SELECT
+        # list mentions the column, while still passing a query that filtered on
+        # a different date expression.
+        _, params = mock_cursor.execute.call_args[0]
+        assert params == (CITY,)
 
 
 def test_evaluation_rejects_negative_days():
