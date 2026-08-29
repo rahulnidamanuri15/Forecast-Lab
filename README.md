@@ -219,22 +219,28 @@ directly, because a walk-forward backtest already knows both sides of every pair
 They are how the launch record was seeded (see Setup below) and are run once, by
 hand, never from the daily job. Everything after launch is `score.py`'s.
 
-Those seeded rows are not otherwise marked: in `model_performance` /
-`electricity_model_performance`, a backtest row is distinguishable from a daily
-row only by `sample_size` — hundreds vs. the normal 1. No provenance column was
-added, because adding one to a live table the published record reads from is
-risk without a caller that needs it.
+Those seeded rows carry `source = 'backtest'` in `model_performance` /
+`electricity_model_performance`; every row `score.py` writes is `'daily'`. Both
+leaderboard handlers filter on `source = 'daily'`, and that filter is not
+cosmetic: each backtest script upserts one aggregate row per model at its *last
+evaluated date*, so re-running one today would carry the newest `score_date`,
+win the `DISTINCT ON (model) ... ORDER BY score_date DESC`, and publish a
+hundreds-deep backtest average as "how yesterday went". The column was added by
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in `vericast/schema.py`, whose
+`MIGRATIONS` tuple also backfills the pre-existing rows — `DEFAULT 'daily'`
+would otherwise have labelled the launch backtest daily, leaving the hole open.
+`sample_size > 1` is what identifies them: a daily row scores one date against a
+`UNIQUE(city, forecast_date, model)` table, so its sample size is 1 by
+construction.
 
-`model_performance` also has no `city` column (its electricity counterpart has
-`state`), because it predates the second target. Consequence to know before
-changing `CITY`: the PM2.5 leaderboard would silently mix cities, so a second
-city needs a migration, not just a new env var.
+`model_performance` also has no `city` column, which is the one migration a second
+city would need — see Known limits below.
 
 ## API
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /health` | Latest observation date + staleness in days |
+| `GET /health` | Latest observation date, staleness in days + `source_lag_expected` (2-day threshold) |
 | `GET /forecast?model=lightgbm` | Latest stored forecast, with `status: pending\|verified` |
 | `GET /history?days=30` | Recent observations |
 | `GET /leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
@@ -263,13 +269,24 @@ request was the largest slice of this API's latency. `check=check_connection` is
 not optional against Neon, which closes idle connections server-side; without it
 the pool eventually hands out a dead socket. Max 8 because this is a read-only GET
 API and Neon's free tier caps concurrent connections, so a bigger pool only holds
-server slots idle.
+server slots idle. Every 200 on a GET carries `Cache-Control: public, max-age=300`,
+which is what stops a looping crawler from occupying those 8 slots — the record it
+would be re-reading only changes once a day.
 
 ## Automation
 
 - `.github/workflows/daily-pipeline.yml` — **two independent jobs, no `needs:`**:
   - `pipeline` (PM2.5): ingest → engineer features → leakage test → score pending → make forecast → verify.
   - `electricity`: ingest → engineer features → score pending → make forecast → verify.
+
+  Each job's last step is its `diagnose.py`, and both now gate on upstream freshness:
+  `vericast/pm25/diagnose.py` refuses at 2 days behind, `vericast/elec/diagnose.py` at 5
+  (a mirror's normal lag, not a stall). This is not a nicety — `predict.py` anchors
+  `forecast_date = latest_obs + 1 day` on both sides, so a stalled source slides the
+  anchor along with it and every other internal-consistency check still passes. The
+  electricity job also runs `verify_alignment()` inside its "Engineer features" step,
+  which is where the features(t) → target(t+1) join is asserted on the daily path
+  (the PM2.5 job has `leakage_test.py` as its own step instead).
 
   They run in parallel and neither gates the other. That is the point: the electricity
   source is a third-party mirror that can stall, and a stall there must not block a
@@ -334,6 +351,29 @@ Environment variables: `DATABASE_URL` (required), `CITY` (default `Nagpur`),
 empty means no browser origin is allowed — there is no `*` fallback). `API_BASE`
 optionally points `verify_deployment_readiness.py` at a deployed instance instead of
 localhost.
+
+## Known limits
+
+Deliberately not built. Each line names the ceiling and what would justify crossing it.
+
+- **No rate limiting.** `Cache-Control: public, max-age=300` plus a bounded 8-slot pool
+  is the whole defence. Add `slowapi` when the logs show a scraper that a shared cache
+  does not absorb. The absence of auth is separate and by design — see
+  [`.github/SECURITY.md`](.github/SECURITY.md); this is a read-only public record.
+- **Ingest never backfills a hole.** Both `resolve_date_range()`s resume monotonically
+  from `MAX(as_of)`, so a date the upstream skipped (Maharashtra's
+  2025-05-21 → 05-24) or served as NULL is never refetched. Tolerable because the
+  `RANGE ... PRECEDING` frames null out across a gap rather than reaching over it, so a
+  hole costs accuracy, never correctness. A bounded re-scan of the last 30 days is the
+  upgrade if coverage starts to matter.
+- **One city, one state.** `model_performance` has no `city` column (its electricity
+  counterpart has `state`), because it predates the second target. Changing `CITY`
+  without a migration would silently mix cities in the PM2.5 leaderboard.
+- **Housekeeping left open:** `print()` rather than `logging` in the pipeline scripts, no
+  Docker `HEALTHCHECK`, no `.dockerignore`, plain `uvicorn` rather than
+  `uvicorn[standard]`, an O(n²) scan in `verify_deployment_readiness.py`, and
+  `/electricity/leaderboard` coercing floats its sibling does not (the columns are
+  `FLOAT`, so nothing but style is at stake — the coercion should come out, not spread).
 
 ## Security
 

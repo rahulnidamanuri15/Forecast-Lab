@@ -77,6 +77,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def cache_control(request, call_next):
+    """Let caches absorb repeat reads, so the 8-slot pool is not the only limit.
+
+    Every endpoint here reads a record the daily pipeline rewrites once a day, so
+    5 minutes of staleness is invisible - including /health, whose staleness is
+    measured in days. Without this a crawler looping /evaluation and /predictions
+    exhausts the pool on connection count alone, however cheap each query is.
+
+    ponytail: one blanket max-age, no per-route tuning and no rate limiter. Add
+    slowapi when the logs show a scraper this does not cover; split the max-age
+    when an endpoint needs to be fresher than the pipeline that feeds it.
+    """
+    response = await call_next(request)
+    if request.method == "GET" and response.status_code == 200:
+        response.headers["Cache-Control"] = "public, max-age=300"
+    return response
+
+
 def get_db_connection():
     """A pooled connection, as a context manager.
 
@@ -198,9 +218,15 @@ async def get_leaderboard():
             with conn.cursor() as cur:
                 # For each model, grab the row with the most recent score_date.
                 # DISTINCT ON is Postgres-specific and exactly fits "latest per group".
+                #
+                # source = 'daily' is not optional: experiments/save_backtest_results.py
+                # writes one aggregate row per model at the last evaluated date, so a
+                # backtest re-run today would carry the most recent score_date and
+                # become the published leaderboard with a sample_size in the hundreds.
                 cur.execute("""
                     SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
                     FROM model_performance
+                    WHERE source = 'daily'
                     ORDER BY model, score_date DESC
                 """)
                 rows = cur.fetchall()
@@ -436,8 +462,23 @@ async def get_history(days: int = Query(30, ge=1, le=365)):
         raise db_error(e)
 
 
+# Open-Meteo publishes yesterday by ~05:00 UTC, so 1 stale day is the steady
+# state and 2 allows one dropped cron run. Kept equal to
+# vericast/pm25/diagnose.py's STALE_LIMIT_DAYS - the gate that stops the pipeline
+# and the flag the dashboard shows must agree on what "stale" means.
+PM25_STALE_LIMIT_DAYS = 2
+
+
 @app.get("/health")
 async def health():
+    """Freshness of PM2.5 observations.
+
+    `source_lag_expected` is the flag the dashboard's LIVE pill reads. Open-Meteo
+    publishes yesterday by ~05:00 UTC, so anything past PM25_STALE_LIMIT_DAYS
+    means the archive has stalled - and because vericast/pm25/predict.py anchors
+    forecast_date to the latest observation, a stalled source keeps producing a
+    plausible-looking forecast for a date that is no longer tomorrow.
+    """
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -448,9 +489,12 @@ async def health():
         # endpoint whose job is saying what is wrong reports the wrong thing.
         if latest is None:
             return {"status": "no_data", "latest_observation": None, "stale_days": None,
+                    "source_lag_expected": None,
                     "detail": f"no observations for {CITY}"}
         stale_days = (local_time.today() - latest).days
-        return {"status": "ok", "latest_observation": latest.isoformat(), "stale_days": stale_days}
+        return {"status": "ok", "latest_observation": latest.isoformat(),
+                "stale_days": stale_days,
+                "source_lag_expected": stale_days <= PM25_STALE_LIMIT_DAYS}
     except Exception as e:
         print(f"[error] health check failed: {type(e).__name__}: {e}")
         raise HTTPException(status_code=503, detail="Service unavailable")
@@ -714,12 +758,14 @@ async def get_electricity_leaderboard():
             with conn.cursor() as cur:
                 # DISTINCT ON is Postgres-specific and exactly fits "latest per
                 # group", as in /leaderboard. Unlike model_performance this table
-                # has a state column, so it filters on STATE.
+                # has a state column, so it filters on STATE as well as on the
+                # provenance column that keeps a backtest re-run out of the
+                # published leaderboard.
                 cur.execute("""
                     SELECT DISTINCT ON (model)
                            model, mae, rmse, mape, sample_size, score_date
                     FROM electricity_model_performance
-                    WHERE state = %s
+                    WHERE state = %s AND source = 'daily'
                     ORDER BY model, score_date DESC
                 """, (STATE,))
                 rows = cur.fetchall()
