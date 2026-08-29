@@ -88,11 +88,18 @@ def make_daily_prediction():
         # Note: the unique constraint is (city, forecast_date, model), so
         # naive and lightgbm rows for the same date coexist rather than
         # overwriting each other.
+        #
+        # `source` omitted from the INSERT (schema.py declares DEFAULT 'daily')
+        # and forced in the DO UPDATE, same reason as score.py's UPSERT_PERF_SQL:
+        # a DEFAULT applies to inserts only, so a real forecast landing on a date
+        # the launch backtest seeded would keep source='backtest' and stay out of
+        # the published-then-verified half of /evaluation forever.
         upsert_sql = """
         INSERT INTO predictions (city, forecast_date, predicted_pm2_5, model)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (city, forecast_date, model) DO UPDATE SET
             predicted_pm2_5 = EXCLUDED.predicted_pm2_5,
+            source = 'daily',
             created_at = CURRENT_TIMESTAMP;
         """
 

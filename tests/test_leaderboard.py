@@ -103,17 +103,66 @@ def test_leaderboard_endpoint_database_error():
 # filtered out of the leaderboard permanently. String assertions rather than a DB
 # round-trip: the omission is in the SQL text, so that is where it is caught, and
 # these run in CI with or without a database.
-@pytest.mark.parametrize("module_path", [
-    "vericast.pm25.score",
-    "vericast.elec.score",
+@pytest.mark.parametrize("module_path,attr", [
+    ("vericast.pm25.score", "UPSERT_PERF_SQL"),
+    ("vericast.elec.score", "UPSERT_PERF_SQL"),
+    # The prediction writers need the same line for the same reason, one table
+    # down: /evaluation splits `predictions` on source, so a real forecast landing
+    # on a date the launch backtest seeded would keep source = 'backtest' and never
+    # count towards the published-then-verified record.
+    ("vericast.elec.predict", "UPSERT_SQL"),
 ])
-def test_score_upsert_relabels_source_on_conflict(module_path):
+def test_upsert_relabels_source_on_conflict(module_path, attr):
     import importlib
 
-    sql = importlib.import_module(module_path).UPSERT_PERF_SQL
+    sql = getattr(importlib.import_module(module_path), attr)
+    _assert_forces_daily(sql, f"{module_path}.{attr}")
+
+
+def test_pm25_predict_upsert_relabels_source_on_conflict():
+    """vericast/pm25/predict.py builds its upsert inside make_daily_prediction(),
+    so there is no module-level constant to import - read the source instead."""
+    import inspect
+
+    from vericast.pm25 import predict
+
+    source = inspect.getsource(predict.make_daily_prediction)
+    assert "INSERT INTO predictions" in source, (
+        "pm25 predict no longer inserts into predictions here; this test needs "
+        "repointing at wherever the upsert moved to")
+    _assert_forces_daily(source, "vericast.pm25.predict.make_daily_prediction")
+
+
+def _assert_forces_daily(sql, label):
     on_conflict = sql.split("DO UPDATE SET", 1)
-    assert len(on_conflict) == 2, f"{module_path} upsert has no DO UPDATE branch"
+    assert len(on_conflict) == 2, f"{label} has no DO UPDATE branch"
     assert "source = 'daily'" in on_conflict[1], (
-        f"{module_path}.UPSERT_PERF_SQL does not reset source on conflict; a daily "
-        f"score overwriting a backtest row would stay labelled 'backtest'"
+        f"{label} does not reset source on conflict; a daily write overwriting a "
+        f"backtest row would stay labelled 'backtest'"
     )
+
+
+# The mirror of the above: the backtest seeders must NOT be able to overwrite a
+# verified actual. Their DO UPDATE is guarded by a WHERE on the existing row's
+# source, so a re-run refreshes its own rows and skips every daily one. Without
+# it, a second run recomputes actual_pm2_5 from the backtest's own data on every
+# overlapping date - silently replacing a genuinely verified observation.
+@pytest.mark.parametrize("script,table,actual_col", [
+    ("experiments/save_backtest_results.py", "predictions", "actual_pm2_5"),
+    ("experiments/save_elec_backtest_results.py", "electricity_predictions",
+     "actual_demand_mw"),
+])
+def test_backtest_seeder_cannot_overwrite_a_daily_row(script, table, actual_col):
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), script)
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
+
+    assert "VALUES (%s, %s, %s, %s, %s, 'backtest')" in source, (
+        f"{script} no longer writes the 'backtest' literal; its rows would default "
+        f"to 'daily' and be counted as published-then-verified")
+    assert f"WHERE {table}.source = 'backtest'" in source, (
+        f"{script}'s DO UPDATE has no source guard; a re-run would overwrite a "
+        f"verified actual with a backtest-computed one")
+    assert f"{actual_col} = EXCLUDED" not in source, (
+        f"{script} updates the actual on conflict; that is the data loss the "
+        f"guard above exists to prevent")

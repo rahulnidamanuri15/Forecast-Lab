@@ -3,6 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- The page is served as a static file (GitHub Pages), so there is no server to
+     set a CSP header and the meta form is the only one available. It is weaker -
+     frame-ancestors and report-uri are ignored in meta - but the part that matters
+     here works: script-src pins executable code to this file plus the one pinned
+     CDN entry, so an injected <script src> from anywhere else does not run.
+     'unsafe-inline' is unavoidable while the styles, the script and the tab
+     onclick= handlers are inline; esc() is what guards the interpolated rows.
+     connect-src lists the deployed API and the two local dev origins, because
+     window.API_BASE is the documented way to point this page at a local uvicorn. -->
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'none';
+  script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+  font-src https://fonts.gstatic.com;
+  img-src 'self' data:;
+  connect-src https://forecast-lab-2l0q.onrender.com http://localhost:8000 http://127.0.0.1:8000;
+  base-uri 'none';
+  form-action 'none'">
 <title>VeriCast · Published-then-verified PM2.5 &amp; Electricity Demand Forecasts</title>
 <!-- Version-pinned AND hash-pinned: the tag stops a silent major-version bump,
      the integrity hash stops a tampered CDN response from running as script on
@@ -198,6 +216,21 @@
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.4; transform: scale(0.85); }
   }
+
+  /* Shown only when a panel's fetches throw. role="alert" is on the element, so
+     a screen reader announces it without the user having to find it. */
+  .error-banner {
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 10px;
+    color: #FCA5A5;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 12px 16px;
+    margin-bottom: 20px;
+  }
+
+  .error-banner b { color: var(--brand-red); }
 
   .api-link-btn {
     background: var(--bg-card);
@@ -689,6 +722,8 @@
   <!-- ===================== PM2.5 PANEL ===================== -->
   <div id="panel-pm25">
 
+  <div class="error-banner" id="pm25-error" role="alert" hidden></div>
+
   <!-- TOP 4 KPI CARDS -->
   <div class="kpi-grid">
     <div class="kpi-card">
@@ -892,6 +927,8 @@
   <!-- ===================== ELECTRICITY PANEL ===================== -->
   <div id="panel-electricity" hidden>
 
+    <div class="error-banner" id="el-error" role="alert" hidden></div>
+
     <div class="kpi-grid">
       <div class="kpi-card">
         <div class="kpi-label">Latest Peak Demand</div>
@@ -1084,6 +1121,13 @@
   // change. Override for local work with `window.API_BASE = 'http://localhost:8000'`
   // before this script runs; same env-override shape as
   // verify_deployment_readiness.py's API_BASE.
+  //
+  // The host still reads `forecast-lab` because that is the live Render service
+  // name and the GitHub repo it deploys from; the project was renamed to VeriCast
+  // afterwards. Left as-is deliberately - rewriting a working hostname to match a
+  // README breaks the page. Renaming the Render service and the repo is the fix,
+  // and it has to happen there first; the CSP connect-src above pins this same
+  // host, so both change together.
   const API_BASE = window.API_BASE || 'https://forecast-lab-2l0q.onrender.com';
 
   document.getElementById('api-docs-link').href = `${API_BASE}/docs`;
@@ -1145,6 +1189,42 @@
     `).join('');
   }
 
+  // Both panels share the one header pill, so both write it through here. The
+  // gate is source_lag_expected, not status alone: a stalled upstream still
+  // answers status: 'ok' with a stale latest_observation, and showing that as
+  // LIVE is the one way this page can publish a number that is quietly wrong.
+  // The staleness threshold differs per target (2 days for PM2.5, 5 for the
+  // demand mirror, both in vericast/__init__.py) - the API has already applied
+  // its own, which is exactly why this reads the flag rather than stale_days.
+  function setStatusPill(health, label) {
+    const pill = document.getElementById('status-pill');
+    const statusText = document.getElementById('status-text');
+    const behind = health && health.stale_days ? ` · ${health.stale_days}d behind` : '';
+    if (health && health.status === 'ok' && health.source_lag_expected) {
+      pill.className = 'live-pill';
+      statusText.textContent = `LIVE · ${label} ${health.latest_observation}${behind}`;
+    } else if (health && health.status === 'ok') {
+      pill.className = 'live-pill stale';
+      statusText.textContent = `STALE · ${label} ${health.latest_observation}${behind}`;
+    } else {
+      pill.className = 'live-pill offline';
+      statusText.textContent = 'OFFLINE / WAKING UP';
+    }
+  }
+
+  // A thrown init is otherwise invisible: the panel just sits on its em-dash
+  // placeholders and reads as "no data yet" rather than "this failed".
+  function showPanelError(elementId, err) {
+    const el = document.getElementById(elementId);
+    el.innerHTML = `<b>Could not load this panel.</b> ${esc(err && err.message || err)}
+      — the API may be waking up on a cold start. Retry in a few seconds.`;
+    el.hidden = false;
+  }
+
+  // Last /health payload per panel, so switchTab can repoint the shared pill
+  // without a second request. undefined = that panel has not fetched yet.
+  let pm25Health, elHealth;
+
   let predChartInstance = null;
   let accChartInstance = null;
 
@@ -1165,22 +1245,9 @@
 
       renderLeaderboard('leaderboard-table-body', leaderboard, 2, false);
 
-      // 1. Status Pill. Gated on source_lag_expected, not status alone: a
-      //    stalled Open-Meteo still answers status: 'ok' with a stale
-      //    latest_observation, and showing that as LIVE is the one way this page
-      //    can publish a number that is quietly wrong.
-      const pill = document.getElementById('status-pill');
-      const statusText = document.getElementById('status-text');
-      if (health && health.status === 'ok' && health.source_lag_expected) {
-        pill.className = 'live-pill';
-        statusText.textContent = `LIVE · ${health.latest_observation}`;
-      } else if (health && health.status === 'ok') {
-        pill.className = 'live-pill stale';
-        statusText.textContent = `STALE · ${health.latest_observation}`;
-      } else {
-        pill.className = 'live-pill offline';
-        statusText.textContent = 'OFFLINE / WAKING UP';
-      }
+      // 1. Status Pill.
+      pm25Health = health;
+      setStatusPill(health, 'NAGPUR');
 
       // 2. Latest Observed PM2.5
       let latestObsVal = null;
@@ -1203,7 +1270,11 @@
         pill.textContent = band.label;
         pill.className = `category-pill ${band.cls}`;
 
-        if (latestObsVal) {
+        // Explicit, not `if (latestObsVal)`: a genuine 0 μg/m³ observation is
+        // falsy and silently dropped the whole comparison. Zero is also the one
+        // value the division cannot take, so it is excluded on its own line
+        // rather than folded back into a truthiness test.
+        if (latestObsVal !== null && latestObsVal !== undefined && latestObsVal !== 0) {
           const diff = fVal - latestObsVal;
           const pctDiff = ((diff / latestObsVal) * 100).toFixed(1);
           const sign = diff >= 0 ? '+' : '';
@@ -1276,7 +1347,7 @@
 
           return `
             <tr>
-              <td>${r.forecast_date}</td>
+              <td>${esc(r.forecast_date)}</td>
               <td><span style="color: var(--brand-teal); font-weight: 600;">${esc(r.model)}</span></td>
               <td class="mono pred-highlight">${fmt(r.predicted_pm2_5, 2)}</td>
               <td class="mono">${r.actual_pm2_5 !== null ? fmt(r.actual_pm2_5, 2) : '<span style="color: var(--text-faint)">—</span>'}</td>
@@ -1407,6 +1478,7 @@
 
     } catch (err) {
       console.error('Failed to initialize dashboard:', err);
+      showPanelError('pm25-error', err);
     }
   }
 
@@ -1439,7 +1511,13 @@
 
       renderLeaderboard('el-leaderboard-table-body', leaderboard, 0, true);
 
-      // 1. Latest observation. The mirror lags 2-4 days, so say how stale it is
+      // 1. Status pill, same shared writer the PM2.5 panel uses. Without this the
+      // header still read LIVE · <a Nagpur date> while this panel was open, which
+      // is a freshness claim about the wrong series.
+      elHealth = health;
+      setStatusPill(health, 'MAHARASHTRA');
+
+      // 2. Latest observation. The mirror lags 2-4 days, so say how stale it is
       // rather than implying it is today's number.
       let latestObs = null;
       if (history && history.historical_data && history.historical_data.length) {
@@ -1452,7 +1530,7 @@
           `Observed ${latestObs.date}${staleNote}`;
       }
 
-      // 2. Forecast hero.
+      // 3. Forecast hero.
       if (forecast) {
         const fVal = forecast.forecast_demand_mw;
         document.getElementById('el-kpi-forecast-val').innerHTML =
@@ -1469,7 +1547,7 @@
         }
       }
 
-      // 3. Full-record accuracy across all three models.
+      // 4. Full-record accuracy across all three models.
       if (evaluation && evaluation.evaluation) {
         const models = evaluation.evaluation;
         const lgb = models.find(m => m.model === 'lightgbm');
@@ -1506,7 +1584,7 @@
           document.getElementById('el-bar-group').innerHTML = scoredModels.map((m, i) => `
             <div class="bar-item">
               <div class="bar-label-row">
-                <span class="bar-model-name">${m.model}</span>
+                <span class="bar-model-name">${esc(m.model)}</span>
                 <span class="bar-score" style="color: ${i === 0 ? 'var(--brand-teal)' : '#94A3B8'};">${fmt(m.mae, 0)}</span>
               </div>
               <div class="bar-track">
@@ -1517,7 +1595,7 @@
         }
       }
 
-      // 4. History table + error chart, both off the same scored rows.
+      // 5. History table + error chart, both off the same scored rows.
       if (predictions && predictions.predictions && predictions.predictions.length) {
         const rows = predictions.predictions;
         let within3 = 0, totalScored = 0, accSum = 0;
@@ -1540,7 +1618,7 @@
 
           return `
             <tr>
-              <td>${r.forecast_date}</td>
+              <td>${esc(r.forecast_date)}</td>
               <td><span style="color: var(--brand-teal); font-weight: 600;">${esc(r.model)}</span></td>
               <td class="mono pred-highlight">${fmt(r.predicted_demand_mw, 0)}</td>
               <td class="mono">${r.actual_demand_mw !== null ? fmt(r.actual_demand_mw, 0) : '<span style="color: var(--text-faint)">—</span>'}</td>
@@ -1588,7 +1666,7 @@
         });
       }
 
-      // 5. Demand vs temperature, dual axis - the thermal driver is the whole
+      // 6. Demand vs temperature, dual axis - the thermal driver is the whole
       // reason cooling_degree_days is a feature, so show it next to the load.
       if (history && history.historical_data && history.historical_data.length) {
         const data = history.historical_data;
@@ -1629,6 +1707,7 @@
       }
     } catch (err) {
       console.error('Failed to initialize electricity panel:', err);
+      showPanelError('el-error', err);
     }
   }
 
@@ -1643,6 +1722,14 @@
     if (name === 'electricity' && !elLoaded) {
       elLoaded = true;
       initElectricity();
+      return;   // initElectricity sets the pill itself once its /health lands
+    }
+    // Repoint the one header pill at whichever series is now on screen. The
+    // cached health is what each init already fetched; re-reading it here is
+    // cheaper than a request and cannot disagree with the panel below it.
+    const cached = name === 'electricity' ? elHealth : pm25Health;
+    if (cached !== undefined) {
+      setStatusPill(cached, name === 'electricity' ? 'MAHARASHTRA' : 'NAGPUR');
     }
   }
 

@@ -152,20 +152,27 @@ def save_results(
 ):
     """Save all individual predictions to PostgreSQL."""
 
+    # source = 'backtest': these rows have their actual at write time, so they are
+    # not published-then-verified and /evaluation reports them separately. The
+    # DO UPDATE deliberately does NOT touch actual_pm2_5 or source. This script is
+    # documented as run-once, but a re-run against the live database would
+    # otherwise overwrite a genuinely verified actual with a backtest-computed one
+    # on every overlapping date, and relabel a daily row as a backtest.
     insert_sql = """
         INSERT INTO predictions (
             city,
             forecast_date,
             predicted_pm2_5,
             actual_pm2_5,
-            model
+            model,
+            source
         )
-        VALUES (%s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, 'backtest')
         ON CONFLICT (city, forecast_date, model)
         DO UPDATE SET
             predicted_pm2_5 = EXCLUDED.predicted_pm2_5,
-            actual_pm2_5 = EXCLUDED.actual_pm2_5,
-            created_at = CURRENT_TIMESTAMP;
+            created_at = CURRENT_TIMESTAMP
+        WHERE predictions.source = 'backtest';
     """
 
     records = []

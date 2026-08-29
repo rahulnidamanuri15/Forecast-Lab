@@ -416,17 +416,28 @@ def check_api_leaderboard_endpoint():
         return False
 
 def check_api_evaluation_endpoint():
-    """Check that /evaluation endpoint returns 200"""
+    """Check that /evaluation returns 200 with metrics nested under a provenance key.
+
+    The count alone is not enough any more: the payload used to carry a flat `mae`
+    per model that averaged the launch backtest into the published record, and the
+    fix was to nest each figure under `verified` / `backtest`. A deploy serving the
+    old flat shape would still return 200 with the right number of models, so this
+    asserts the nesting rather than just the status code.
+    """
     try:
         response = httpx.get(f'{API_BASE}/evaluation?days=7', timeout=10.0)
-        if response.status_code == 200:
-            data = response.json()
-            evaluation_count = len(data.get('evaluation', []))
-            print(f"PASS: /evaluation endpoint returns 200 ({evaluation_count} models)")
-            return True
-        else:
+        if response.status_code != 200:
             print(f"FAIL: /evaluation endpoint returns status {response.status_code}")
             return False
+        entries = response.json().get('evaluation', [])
+        flat = [e['model'] for e in entries if 'mae' in e]
+        if flat:
+            print(f"FAIL: /evaluation still reports a combined mae for {flat} - "
+                  "verified and backtest rows are being averaged together")
+            return False
+        print(f"PASS: /evaluation endpoint returns 200 ({len(entries)} models, "
+              "metrics split by provenance)")
+        return True
     except Exception as e:
         print(f"FAIL: Error checking /evaluation endpoint: {e}")
         return False
@@ -448,19 +459,21 @@ def check_api_predictions_endpoint():
         return False
 
 def check_api_electricity_endpoints():
-    """Check that all five /electricity/* endpoints return 200.
+    """Check that all seven /electricity/* endpoints return 200.
 
-    One function rather than five: they either all work or the router is broken.
+    One function rather than seven: they either all work or the router is broken.
     Deliberately no DB-freshness equivalent of check_observations_freshness here -
-    that check requires <=1 day stale, and the demand mirror normally runs 2-4 days
-    behind, so it would fail a correct deployment every day. vericast/elec/diagnose.py
-    owns electricity freshness, with the right 5-day threshold.
+    that check allows PM25_STALE_LIMIT_DAYS, and the demand mirror normally runs
+    2-4 days behind, so it would fail a correct deployment every day.
+    vericast/elec/diagnose.py owns electricity freshness, with the right
+    ELEC_STALE_LIMIT_DAYS threshold.
     """
     endpoints = [
         ('/electricity/health', 'latest_observation'),
         ('/electricity/forecast?model=lightgbm', 'forecast_demand_mw'),
         ('/electricity/forecast?model=seasonal_naive', 'forecast_demand_mw'),
         ('/electricity/history?days=7', 'days_returned'),
+        ('/electricity/leaderboard', 'leaderboard'),
         ('/electricity/evaluation', 'evaluation'),
         ('/electricity/predictions?model=lightgbm&limit=5', 'count'),
     ]
@@ -487,7 +500,11 @@ def main():
     checks = [
         ("DATABASE_URL exists", check_database_url),
         ("PostgreSQL connectivity", check_postgres_connectivity),
-        ("Observations freshness (<=1 day stale)", check_observations_freshness),
+        # Interpolated, not spelled out: this label read "<=1 day stale" while the
+        # check itself used PM25_STALE_LIMIT_DAYS, so the one gate whose job is
+        # catching that class of confusion was printing the wrong threshold.
+        (f"Observations freshness (<={PM25_STALE_LIMIT_DAYS} days stale)",
+         check_observations_freshness),
         ("Features match observations date", check_features_match_observations),
         ("Latest features have no NULLs", check_features_no_nulls),
         ("Leakage test passes", check_leakage_test),
