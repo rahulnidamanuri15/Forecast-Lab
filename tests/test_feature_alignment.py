@@ -251,24 +251,15 @@ def test_scored_predictions_match_observations(cur):
 def test_elec_every_feature_row_has_a_next_day_target(cur):
     """The features(t) -> target(t+1) contract, as an orphan count.
 
-    Rows at the very end of the series and on the far side of the gap legitimately
-    have no t+1 observation yet, so those are excluded rather than asserted away.
+    Delegates to the production verify_alignment(), which the daily job also runs
+    at the end of engineer_features() - one definition of the contract, exercised
+    both here against the seeded 2025-05-22..23 hole and daily against live data.
+    It derives the expected orphan count from the observed gaps rather than
+    tolerating a hardcoded 1, so a new gap fails instead of being pre-forgiven.
     """
-    orphans = _scalar(cur, """
-        SELECT COUNT(*)
-        FROM electricity_features f
-        WHERE f.state = %s
-          AND f.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
-                         FROM electricity_observations WHERE state = f.state)
-          AND NOT EXISTS (
-              SELECT 1 FROM electricity_observations o
-              WHERE o.state = f.state
-                AND o.as_of = f.as_of + INTERVAL '1 day'
-          )
-    """, (STATE,))
-    # The 2025-05-21 -> 2025-05-24 gap accounts for the only expected orphan:
-    # 2025-05-21's features have no 2025-05-22 observation to predict.
-    assert orphans <= 1, f"{orphans} feature rows have no next-day target"
+    from vericast.elec.features import verify_alignment
+
+    verify_alignment(cur)
 
 
 def test_elec_lag_is_null_across_the_date_gap(cur):

@@ -167,6 +167,33 @@
     animation: livePulse 2s infinite;
   }
 
+  /* Upstream has stalled: the record is still readable but the "forecast for
+     tomorrow" is anchored to an old observation. Amber, and the dot stops
+     pulsing - a stalled feed must not look alive. */
+  .live-pill.stale {
+    background: rgba(245, 158, 11, 0.08);
+    border-color: rgba(245, 158, 11, 0.25);
+    color: var(--warn);
+  }
+
+  .live-pill.stale .pulse-dot {
+    background: var(--warn);
+    box-shadow: 0 0 8px var(--warn);
+    animation: none;
+  }
+
+  .live-pill.offline {
+    background: rgba(148, 163, 184, 0.08);
+    border-color: rgba(148, 163, 184, 0.25);
+    color: var(--text-dim);
+  }
+
+  .live-pill.offline .pulse-dot {
+    background: var(--text-dim);
+    box-shadow: none;
+    animation: none;
+  }
+
   @keyframes livePulse {
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.4; transform: scale(0.85); }
@@ -1054,11 +1081,21 @@
         fetchJSON('/predictions?model=lightgbm&limit=15').catch(() => null),
       ]);
 
-      // 1. Status Pill
-      if (health && health.status === 'ok') {
-        document.getElementById('status-text').textContent = `LIVE · ${health.latest_observation}`;
+      // 1. Status Pill. Gated on source_lag_expected, not status alone: a
+      //    stalled Open-Meteo still answers status: 'ok' with a stale
+      //    latest_observation, and showing that as LIVE is the one way this page
+      //    can publish a number that is quietly wrong.
+      const pill = document.getElementById('status-pill');
+      const statusText = document.getElementById('status-text');
+      if (health && health.status === 'ok' && health.source_lag_expected) {
+        pill.className = 'live-pill';
+        statusText.textContent = `LIVE · ${health.latest_observation}`;
+      } else if (health && health.status === 'ok') {
+        pill.className = 'live-pill stale';
+        statusText.textContent = `STALE · ${health.latest_observation}`;
       } else {
-        document.getElementById('status-text').textContent = 'OFFLINE / WAKING UP';
+        pill.className = 'live-pill offline';
+        statusText.textContent = 'OFFLINE / WAKING UP';
       }
 
       // 2. Latest Observed PM2.5

@@ -47,6 +47,11 @@ def resolve_date_range():
       archive APIs are historical and may not have a complete record
       for the current day yet.
     """
+    # ponytail: monotonic resume off MAX(as_of), so a day the archive served as
+    # NULL is never refetched - the row exists, the value stays missing, and the
+    # window frames null out around it. Correct for the steady state and it never
+    # re-reads 700 days. Upgrade path if coverage matters: start from the earliest
+    # date in the last 30 days that has a NULL pm2_5, else last_date + 1 day.
     last_date = get_last_observed_date()
     yesterday = local_time.yesterday()
 

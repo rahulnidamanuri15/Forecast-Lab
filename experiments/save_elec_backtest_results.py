@@ -150,13 +150,14 @@ def save_model_performance(evaluation_dates, predictions, actuals):
     """One aggregate row per model at the last evaluated date - the launch record."""
     insert_sql = """
         INSERT INTO electricity_model_performance
-            (state, score_date, model, mae, rmse, mape, sample_size)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (state, score_date, model, mae, rmse, mape, sample_size, source)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'backtest')
         ON CONFLICT (state, score_date, model) DO UPDATE SET
             mae = EXCLUDED.mae,
             rmse = EXCLUDED.rmse,
             mape = EXCLUDED.mape,
             sample_size = EXCLUDED.sample_size,
+            source = EXCLUDED.source,
             created_at = CURRENT_TIMESTAMP;
     """
 
