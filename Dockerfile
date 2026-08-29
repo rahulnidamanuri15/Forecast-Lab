@@ -1,7 +1,7 @@
 # Digest-pinned so a rebuild is reproducible. Dependabot (docker ecosystem in
 # .github/dependabot.yml) bumps the digest weekly; the 3.11-slim tag stays as
 # the human-readable label.
-FROM python:3.11-slim@sha256:00f89b7f96f13d42900483da3253f8fb2e763eed7a0aa5f0358fec9d15d9f10c
+FROM python:3.14-slim@sha256:cae66f2ef0ec51a9891263eeee7f987dacf0a9879e8aa9353d5606e0530619a5
 
 WORKDIR /app
 
