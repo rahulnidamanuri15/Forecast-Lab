@@ -200,6 +200,12 @@ MIGRATIONS = (
 
 
 def create_tables():
+    # Same guard as app.py:16. This runs unattended in ci.yml; without it a
+    # missing DSN reaches psycopg as None and surfaces as a connection-string
+    # parse error rather than the actual problem.
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL environment variable is not set")
+
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             for name, ddl in TABLES.items():

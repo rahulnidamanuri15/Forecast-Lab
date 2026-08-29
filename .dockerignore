@@ -7,5 +7,7 @@ myenv/
 .env
 tests/
 experiments/
+# Local/CI go-live gate, not part of the served API - same reason tests/ is out.
+verify_deployment_readiness.py
 *.md
 index.html

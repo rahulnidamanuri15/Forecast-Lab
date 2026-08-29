@@ -85,6 +85,63 @@ ON CONFLICT (city, as_of) DO UPDATE SET
 """
 
 
+# Ported from vericast/elec/features.py so both feature stores check the same
+# contract on the daily path. leakage_test.py (step 3 of daily-pipeline.yml) is not
+# a substitute: it checks feature *values* - lag_1 equals the previous calendar day,
+# roll_7/30 NULL unless the window is complete - and never asks whether each
+# feature row has a next-day target to be scored against.
+#
+# Row existence, not `pm2_5 IS NOT NULL`: a low-coverage day is stored as a row
+# with a NULL value (ingest.py's MIN_HOURS_PER_DAY), and train.py filters those.
+# What is broken-join territory is a *missing row*, which is what these count.
+ORPHAN_ROWS_SQL = """
+SELECT COUNT(*)
+FROM features f
+WHERE f.city = %s
+  AND f.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
+                 FROM observations WHERE city = f.city)
+  AND NOT EXISTS (
+      SELECT 1 FROM observations o
+      WHERE o.city = f.city
+        AND o.as_of = f.as_of + INTERVAL '1 day'
+  )
+"""
+
+GAP_DAYS_SQL = """
+SELECT COUNT(*)
+FROM observations o
+WHERE o.city = %s
+  AND o.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
+                 FROM observations WHERE city = o.city)
+  AND NOT EXISTS (
+      SELECT 1 FROM observations n
+      WHERE n.city = o.city
+        AND n.as_of = o.as_of + INTERVAL '1 day'
+  )
+"""
+
+
+def verify_alignment(cur):
+    """Assert the features(t) -> target(t+1) contract, gaps accounted for.
+
+    Equality against the observed gap count rather than a tolerance, for the
+    reason vericast/elec/features.py gives: a hardcoded "<= 1" pre-forgives the
+    next gap, and forgives a genuinely broken join just as quietly.
+    """
+    cur.execute(GAP_DAYS_SQL, (CITY,))
+    gaps = cur.fetchone()[0]
+    cur.execute(ORPHAN_ROWS_SQL, (CITY,))
+    orphans = cur.fetchone()[0]
+
+    assert orphans == gaps, (
+        f"{orphans} feature rows have no next-day target but only {gaps} "
+        f"observation gap(s) explain it - the features(t) -> target(t+1) "
+        f"contract is broken"
+    )
+    print(f"  Alignment OK: {orphans} orphan row(s), all explained by "
+          f"{gaps} observation gap(s)")
+
+
 def engineer_features():
     try:
         with psycopg.connect(DATABASE_URL) as conn:
@@ -109,6 +166,8 @@ def engineer_features():
                 print(f"  NULL pm2_5_lag_1: {no_lag1} (series start + day after each gap)")
                 print(f"  NULL pm2_5_roll_7: {no_roll7} (first 6 days + gap-spanning windows)")
                 print(f"  NULL pm2_5_roll_30: {no_roll30} (first 29 days + gap-spanning windows)")
+
+                verify_alignment(cur)
     except Exception as e:
         print(f"Error engineering features: {e}")
         raise

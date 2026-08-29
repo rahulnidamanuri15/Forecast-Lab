@@ -830,6 +830,35 @@
     </div>
   </div>
 
+  <!-- LATEST SCORED DAY (/leaderboard) -->
+  <!-- The subtitle is the point of this block, not decoration: /leaderboard is
+       DISTINCT ON (model) over the newest score_date, so sample_size is normally
+       1. Presented next to the record-wide numbers above without that caveat, a
+       good or bad single day reads as the model's accuracy. -->
+  <div class="history-section">
+    <div class="history-header">
+      <div class="history-title">Latest Scored Day</div>
+      <div class="history-subtitle">Most recent day scored per model (n≈1) — the full record is above</div>
+    </div>
+
+    <div style="overflow-x: auto;">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>MAE (μg/m³)</th>
+            <th>RMSE</th>
+            <th>Samples</th>
+            <th>Scored</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-table-body">
+          <tr><td colspan="5" style="text-align: center; color: var(--text-faint); padding: 30px;">Loading latest scored day…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- PREDICTION HISTORY TABLE -->
   <div class="history-section">
     <div class="history-header">
@@ -985,6 +1014,33 @@
       </div>
     </div>
 
+    <!-- Same caveat as the PM2.5 block above, plus a MAPE column: only
+         /electricity/model_performance carries mape. -->
+    <div class="history-section">
+      <div class="history-header">
+        <div class="history-title">Latest Scored Day</div>
+        <div class="history-subtitle">Most recent day scored per model (n≈1) — the full record is above</div>
+      </div>
+
+      <div style="overflow-x: auto;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>MAE (MW)</th>
+              <th>RMSE</th>
+              <th>MAPE</th>
+              <th>Samples</th>
+              <th>Scored</th>
+            </tr>
+          </thead>
+          <tbody id="el-leaderboard-table-body">
+            <tr><td colspan="6" style="text-align: center; color: var(--text-faint); padding: 30px;">Loading latest scored day…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="history-section">
       <div class="history-header">
         <div class="history-title">Prediction History</div>
@@ -1066,12 +1122,35 @@
     return Math.max(0, 100 - Math.abs(actual - predicted) / actual * 100);
   }
 
+  // Both leaderboard tables, one renderer: the payloads differ only by a mape
+  // column and by how many decimals the unit deserves (μg/m³ to 2, MW to 0).
+  // `description` goes in title= rather than its own column - the API ships it,
+  // and the row is already five columns wide on a phone.
+  function renderLeaderboard(tbodyId, board, decimals, withMape) {
+    const tbody = document.getElementById(tbodyId);
+    const cols = withMape ? 6 : 5;
+    if (!board || !board.leaderboard || !board.leaderboard.length) {
+      tbody.innerHTML = `<tr><td colspan="${cols}" style="text-align: center; color: var(--text-faint); padding: 30px;">No scored day on record yet.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = board.leaderboard.map((m, i) => `
+      <tr>
+        <td title="${esc(m.description)}"><span style="color: ${i === 0 ? 'var(--brand-teal)' : 'var(--text-main)'}; font-weight: 600;">${esc(m.model)}</span></td>
+        <td class="mono pred-highlight">${fmt(m.mae, decimals)}</td>
+        <td class="mono">${fmt(m.rmse, decimals)}</td>
+        ${withMape ? `<td class="mono">${m.mape === null || m.mape === undefined ? '—' : `${fmt(m.mape, 2)}%`}</td>` : ''}
+        <td class="mono">${m.sample_size ?? '—'}</td>
+        <td>${esc(m.as_of)}</td>
+      </tr>
+    `).join('');
+  }
+
   let predChartInstance = null;
   let accChartInstance = null;
 
   async function initDashboard() {
     try {
-      const [health, forecast, history, evaluation, predictions] = await Promise.all([
+      const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
         fetchJSON('/health').catch(() => null),
         fetchJSON('/forecast?model=lightgbm').catch(() => null),
         fetchJSON('/history?days=30').catch(() => null),
@@ -1079,7 +1158,12 @@
         // scored day (n=1), which is not the headline accuracy claim.
         fetchJSON('/evaluation').catch(() => null),
         fetchJSON('/predictions?model=lightgbm&limit=15').catch(() => null),
+        // 404s until score.py has written its first daily row, which fetchJSON
+        // turns into null and renderLeaderboard shows as "no scored day yet".
+        fetchJSON('/leaderboard').catch(() => null),
       ]);
+
+      renderLeaderboard('leaderboard-table-body', leaderboard, 2, false);
 
       // 1. Status Pill. Gated on source_lag_expected, not status alone: a
       //    stalled Open-Meteo still answers status: 'ok' with a stale
@@ -1344,13 +1428,16 @@
 
   async function initElectricity() {
     try {
-      const [health, forecast, history, evaluation, predictions] = await Promise.all([
+      const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
         fetchJSON('/electricity/health').catch(() => null),
         fetchJSON('/electricity/forecast?model=lightgbm').catch(() => null),
         fetchJSON('/electricity/history?days=30').catch(() => null),
         fetchJSON('/electricity/evaluation').catch(() => null),
         fetchJSON('/electricity/predictions?model=lightgbm&limit=15').catch(() => null),
+        fetchJSON('/electricity/leaderboard').catch(() => null),
       ]);
+
+      renderLeaderboard('el-leaderboard-table-body', leaderboard, 0, true);
 
       // 1. Latest observation. The mirror lags 2-4 days, so say how stale it is
       // rather than implying it is today's number.

@@ -7,7 +7,7 @@ a forecast must be labelled for the day after the data it was built from.
 Two databases, one suite. Against the live database these assert on real
 pipeline output. Against CI's empty throwaway Postgres they seed themselves
 first (see `_seed` below) so the same SQL still runs - which is the point: these
-nine are the only tests that execute the window-frame queries the leakage
+are the only tests that execute the window-frame queries the leakage
 guarantee rests on.
 
 Still skipped rather than failed when no database is *reachable* at all, so a
@@ -239,6 +239,20 @@ def test_scored_predictions_match_observations(cur):
           AND ABS(p.actual_pm2_5 - o.pm2_5) > 1e-6
     """, (CITY,))
     assert mismatches == 0, f"{mismatches} scored prediction(s) disagree with observations"
+
+
+def test_pm25_every_feature_row_has_a_next_day_target(cur):
+    """The features(t) -> target(t+1) contract for PM2.5, as an orphan count.
+
+    Delegates to the production verify_alignment(), same as its electricity
+    counterpart below, so the daily job and this test share one definition. The
+    PM2.5 seed has no date gap, so here it asserts 0 == 0 - the regression it
+    guards is a *future* orphan appearing, which is what the equality catches and
+    a hardcoded tolerance would not.
+    """
+    from vericast.pm25.features import verify_alignment
+
+    verify_alignment(cur)
 
 
 # --------------------------------------------------------------------------

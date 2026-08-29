@@ -19,7 +19,7 @@ from datetime import timedelta
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import MODEL_ELEC as MODEL_PATH, local_time
+from vericast import ELEC_STALE_LIMIT_DAYS, MODEL_ELEC as MODEL_PATH, local_time
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -30,7 +30,7 @@ STATE = os.getenv("STATE", "Maharashtra")
 # mis-parsed column fails instead of publishing.
 MIN_MW, MAX_MW = 15_000.0, 40_000.0
 
-STALE_LIMIT_DAYS = 5   # mirror normally lags 2-4 days; past this it has stalled
+STALE_LIMIT_DAYS = ELEC_STALE_LIMIT_DAYS  # defined in vericast/__init__.py
 SIGMA_LIMIT = 3.0      # forecast must sit within 3 sd of the trailing 30-day mean
 
 EXPECTED_MODELS = {"naive_baseline", "seasonal_naive", "lightgbm"}
