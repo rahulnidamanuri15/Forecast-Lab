@@ -8,7 +8,8 @@ Two databases, one suite. Against the live database these assert on real
 pipeline output. Against CI's empty throwaway Postgres they seed themselves
 first (see `_seed` below) so the same SQL still runs - which is the point: these
 are the only tests that execute the window-frame queries the leakage
-guarantee rests on.
+guarantee rests on. `_seed` refuses any non-local host, so pointing
+DATABASE_URL at the managed instance can never fabricate observations there.
 
 Still skipped rather than failed when no database is *reachable* at all, so a
 bare checkout runs the API-only tests instead of erroring.
@@ -20,6 +21,7 @@ from datetime import timedelta
 import psycopg
 import pytest
 from dotenv import load_dotenv
+from psycopg.conninfo import conninfo_to_dict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -148,6 +150,20 @@ def _seed(conn, c):
     if (_scalar(c, "SELECT COUNT(*) FROM observations")
             or _scalar(c, "SELECT COUNT(*) FROM electricity_observations")):
         return
+
+    # An empty table is normally CI's throwaway Postgres - but it is also what a
+    # fresh managed instance looks like, and the seed below writes 40 synthetic
+    # days plus unscored forecasts. Writing those into anything but a local
+    # database would contaminate the published record with fabricated
+    # observations, so refuse rather than seed. Skip, not fail: the live DSN
+    # having no rows yet is a legitimate state, it just isn't one these tests can
+    # bootstrap themselves out of.
+    host = conninfo_to_dict(DATABASE_URL).get("host", "")
+    if host not in ("localhost", "127.0.0.1", "::1", ""):
+        pytest.skip(
+            f"refusing to seed synthetic observations into a remote database "
+            f"(host {host!r}); run the pipeline against it instead, or point "
+            f"DATABASE_URL at a local throwaway Postgres")
 
     c.execute(SEED_PM25, (CITY,))
     c.execute(SEED_ELEC, (STATE,))

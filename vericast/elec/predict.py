@@ -26,11 +26,16 @@ STATE = os.getenv("STATE", "Maharashtra")
 # Same limit the diagnostic gate enforces (vericast/__init__.py); this one only warns.
 STALE_WARN_DAYS = ELEC_STALE_LIMIT_DAYS
 
+# `source` omitted from the INSERT (schema.py declares DEFAULT 'daily') and forced
+# in the DO UPDATE, as in vericast/pm25/predict.py: a DEFAULT applies to inserts
+# only, so a real forecast landing on a date the launch backtest seeded would keep
+# source='backtest' and never count towards the published-then-verified record.
 UPSERT_SQL = """
 INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model)
 VALUES (%s, %s, %s, %s)
 ON CONFLICT (state, forecast_date, model) DO UPDATE SET
     predicted_demand_mw = EXCLUDED.predicted_demand_mw,
+    source = 'daily',
     created_at = CURRENT_TIMESTAMP;
 """
 

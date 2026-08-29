@@ -102,7 +102,12 @@ def main():
                 f"All {len(EXPECTED_MODELS)} models published for {expected_date}",
                 not missing,
                 f"missing: {sorted(missing)}" if missing else
-                ", ".join(f"{m}={published[m]:.0f} MW" for m in sorted(published)),
+                # `is not None` for the same reason as the `v is None or` below,
+                # and matching vericast/pm25/diagnose.py: a NULL forecast has to be
+                # reported by the out-of-range check underneath, not crash this
+                # format string on the way there.
+                ", ".join(f"{m}={published[m]:.0f} MW" for m in sorted(published)
+                          if published[m] is not None),
             )
 
             # `v is None or` matches vericast/pm25/diagnose.py: predicted_demand_mw
@@ -126,9 +131,8 @@ def main():
             mean_mw, sd_mw = cur.fetchone()
 
             if published.get("lightgbm") is None:
-                check("LightGBM forecast within trend", False,
-                      "no lightgbm row to check")
-                all_ok = False
+                all_ok &= check("LightGBM forecast within trend", False,
+                                "no lightgbm row to check")
             elif not sd_mw:
                 check("LightGBM forecast within trend", True,
                       "not enough history for a sd; skipped")

@@ -9,6 +9,11 @@ backported release branches.
 
 Report privately — do **not** open a public issue.
 
+<!-- The URL says Forecast-Lab, not VeriCast, because that is still the repository
+     slug; the project was renamed after the remote was created. This link has to
+     match the remote or private reporting 404s, so it stays until the repo itself
+     is renamed. -->
+
 - Preferred: [GitHub private vulnerability reporting](https://github.com/rahulnidamanuri15/Forecast-Lab/security/advisories/new)
 - Alternative: email rahuln152006@gmail.com with `SECURITY` in the subject.
 

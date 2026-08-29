@@ -206,6 +206,53 @@ MODEL_DESCRIPTIONS = {
     "lightgbm": "LightGBM with lagged and rolling features",
 }
 
+# Provenance buckets, in the order they are reported. 'daily' is renamed
+# `verified` in the payload because that is what it means to a reader: the row
+# was published before its actual existed. See vericast/schema.py's predictions
+# comment for why the column exists at all.
+PROVENANCE = {"daily": "verified", "backtest": "backtest"}
+
+
+def _by_provenance(rows, metric_names, descriptions, window_days):
+    """Fold (model, source, scored, pending, *metrics) rows into one entry per
+    model with a separate block per provenance.
+
+    Shared by /evaluation and /electricity/evaluation: the two differ only in
+    which metrics they select (electricity adds MAPE) and which descriptions they
+    label with, so `metric_names` and `descriptions` are the whole difference.
+    Averaging a backtest row into a verified one is the bug this replaces, so the
+    two never merge here - there is deliberately no combined figure to quote.
+    """
+    by_model = {}
+    for model_name, source, scored, pending, *metrics in rows:
+        entry = by_model.setdefault(model_name, {
+            "model": model_name,
+            "window_days": window_days,
+            "description": descriptions.get(model_name, ""),
+        })
+        # An unrecognised source is reported under its own raw name rather than
+        # dropped: a row that reached the database has to appear somewhere, or the
+        # counts silently stop adding up.
+        entry[PROVENANCE.get(source, source)] = {
+            "scored_count": scored,
+            "pending_count": pending,
+            **{name: float(v) if v is not None else None
+               for name, v in zip(metric_names, metrics)},
+        }
+
+    # Sort on the verified MAE, since that is the figure that matters; a model with
+    # only backtest rows falls back to that, and one with neither sorts last. inf
+    # rather than a tuple, as elsewhere: two Nones would compare None < None.
+    def key(entry):
+        for bucket in ("verified", "backtest"):
+            mae = entry.get(bucket, {}).get("mae")
+            if mae is not None:
+                return mae
+        return float("inf")
+
+    return sorted(by_model.values(), key=key)
+
+
 @app.get("/leaderboard")
 async def get_leaderboard():
     """
@@ -329,17 +376,25 @@ async def get_predictions(
 
 
 @app.get("/evaluation")
-async def get_evaluation(days: Optional[int] = None):
+async def get_evaluation(days: Optional[int] = Query(None, ge=0)):
     """
-    Accuracy over published predictions, grouped by model.
+    Accuracy over published predictions, grouped by model and split by provenance.
 
-    Default (no `days`) is the full record - every prediction ever published.
-    That is the headline MAE the README quotes, and the only figure that should
-    be used for accuracy claims. Pass `days=N` for a rolling window instead
-    (`days=0` is also the full record).
+    `verified` is the number the project's name is about: rows written by
+    vericast/pm25/predict.py before the actual existed, then scored when the
+    observation arrived. `backtest` is the launch record seeded by
+    experiments/save_backtest_results.py, whose rows had their actual at write
+    time. Both are reported; neither is hidden and neither is averaged into the
+    other, because they answer different questions.
+
+    Default (no `days`) is the full record. Pass `days=N` for a rolling window
+    instead (`days=0` is also the full record).
     """
-    if days is not None and days < 0:
-        raise HTTPException(status_code=400, detail="days must be >= 0")
+    # ge=0 on the Query rather than a hand-rolled 400 below: /history already
+    # rejects its out-of-range days with FastAPI's own 422, and two different
+    # status codes for the same class of bad input is a contract the client has
+    # to special-case. No upper bound - the full-record branch is unbounded by
+    # design, so a large `days` asks for nothing a bare /evaluation doesn't.
 
     full_record = not days  # None or 0
 
@@ -354,8 +409,13 @@ async def get_evaluation(days: Optional[int] = None):
                 # every prediction ever published grew unbounded with the record
                 # itself. COUNT/AVG return one row per model regardless of size.
                 # AVG(...) FILTER skips the pending rows without a second query.
+                #
+                # GROUP BY model, source rather than a second query per provenance:
+                # one scan, and a model with only one kind of row simply returns
+                # one group. `source = 'daily'` is the published-then-verified
+                # half; see vericast/schema.py's predictions comment.
                 metrics = """
-                    SELECT model,
+                    SELECT model, source,
                            COUNT(*) FILTER (WHERE predicted_pm2_5 IS NOT NULL
                                               AND actual_pm2_5 IS NOT NULL) AS scored,
                            COUNT(*) FILTER (WHERE predicted_pm2_5 IS NULL
@@ -366,12 +426,12 @@ async def get_evaluation(days: Optional[int] = None):
                     WHERE city = %s
                 """
                 if full_record:
-                    cur.execute(metrics + " GROUP BY model", (CITY,))
+                    cur.execute(metrics + " GROUP BY model, source", (CITY,))
                 else:
                     cur.execute(
                         metrics + """
                           AND forecast_date >= %s - %s * INTERVAL '1 day'
-                        GROUP BY model
+                        GROUP BY model, source
                         """,
                         (CITY, local_time.today(), days),
                     )
@@ -387,24 +447,20 @@ async def get_evaluation(days: Optional[int] = None):
                 ),
             )
 
-        evaluation = [
-            {
-                "model": model_name,
-                "window_days": None if full_record else days,
-                "scored_count": scored,
-                "pending_count": pending,
-                "description": MODEL_DESCRIPTIONS.get(model_name, ""),
-                "mae": float(mae) if mae is not None else None,
-                "rmse": float(rmse) if rmse is not None else None,
-            }
-            for model_name, scored, pending, mae, rmse in rows
-        ]
+        evaluation = _by_provenance(
+            rows,
+            metric_names=("mae", "rmse"),
+            descriptions=MODEL_DESCRIPTIONS,
+            window_days=None if full_record else days,
+        )
 
-        # Unscored models sort last. inf rather than a (is_none, mae) tuple:
-        # two None maes would make that tuple compare None < None -> TypeError.
-        evaluation.sort(key=lambda x: float("inf") if x["mae"] is None else x["mae"])
-
-        return {"evaluation": evaluation}
+        return {
+            "evaluation": evaluation,
+            "note": ("`verified` covers forecasts published before the actual was "
+                     "knowable - the record this project exists to keep. `backtest` "
+                     "is the walk-forward launch record, measured with the actual "
+                     "already in hand. Quote them separately."),
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -659,15 +715,16 @@ async def get_electricity_predictions(
 
 
 @app.get("/electricity/evaluation")
-async def get_electricity_evaluation(days: Optional[int] = None):
-    """Accuracy over published electricity predictions, grouped by model.
+async def get_electricity_evaluation(days: Optional[int] = Query(None, ge=0)):
+    """Accuracy over published electricity predictions, by model and provenance.
 
-    Default (no `days`) is the full record - every prediction ever published, and
-    the only figure to quote for accuracy claims. Adds MAPE alongside MAE/RMSE,
-    since a fixed MW error means different things at 20 GW and 32 GW.
+    Same split as /evaluation: `verified` rows were published before the actual
+    existed, `backtest` rows are the walk-forward launch record. Adds MAPE
+    alongside MAE/RMSE, since a fixed MW error means different things at 20 GW
+    and 32 GW.
     """
-    if days is not None and days < 0:
-        raise HTTPException(status_code=400, detail="days must be >= 0")
+    # ge=0 for the same reason as /evaluation: one status code for a bad `days`
+    # across every endpoint that takes one.
 
     full_record = not days  # None or 0
 
@@ -680,7 +737,7 @@ async def get_electricity_evaluation(days: Optional[int] = None):
                 # it, so the row count grew with the published record. MAPE's
                 # FILTER drops actual = 0 rather than dividing by it.
                 metrics = """
-                    SELECT model,
+                    SELECT model, source,
                            COUNT(*) FILTER (WHERE predicted_demand_mw IS NOT NULL
                                               AND actual_demand_mw IS NOT NULL) AS scored,
                            COUNT(*) FILTER (WHERE predicted_demand_mw IS NULL
@@ -694,12 +751,12 @@ async def get_electricity_evaluation(days: Optional[int] = None):
                     WHERE state = %s
                 """
                 if full_record:
-                    cur.execute(metrics + " GROUP BY model", (STATE,))
+                    cur.execute(metrics + " GROUP BY model, source", (STATE,))
                 else:
                     cur.execute(
                         metrics + """
                           AND forecast_date >= %s - %s * INTERVAL '1 day'
-                        GROUP BY model
+                        GROUP BY model, source
                         """,
                         (STATE, local_time.today(), days),
                     )
@@ -713,25 +770,20 @@ async def get_electricity_evaluation(days: Optional[int] = None):
                         else "No predictions found in that window"),
             )
 
-        evaluation = [
-            {
-                "model": model_name,
-                "window_days": None if full_record else days,
-                "scored_count": scored,
-                "pending_count": pending,
-                "description": ELEC_MODEL_DESCRIPTIONS.get(model_name, ""),
-                "mae": float(mae) if mae is not None else None,
-                "rmse": float(rmse) if rmse is not None else None,
-                "mape": float(mape) if mape is not None else None,
-            }
-            for model_name, scored, pending, mae, rmse, mape in rows
-        ]
+        evaluation = _by_provenance(
+            rows,
+            metric_names=("mae", "rmse", "mape"),
+            descriptions=ELEC_MODEL_DESCRIPTIONS,
+            window_days=None if full_record else days,
+        )
 
-        # Unscored models sort last; inf rather than a tuple, since two None maes
-        # would compare None < None -> TypeError.
-        evaluation.sort(key=lambda x: float("inf") if x["mae"] is None else x["mae"])
-
-        return {"state": STATE, "evaluation": evaluation}
+        return {
+            "state": STATE,
+            "evaluation": evaluation,
+            "note": ("`verified` covers forecasts published before the actual was "
+                     "knowable. `backtest` is the walk-forward launch record. "
+                     "Quote them separately."),
+        }
     except HTTPException:
         raise
     except Exception as e:

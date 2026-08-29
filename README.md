@@ -113,6 +113,14 @@ frozen numbers checked into this file, not generated output. For current numbers
 `GET /evaluation` and `GET /electricity/evaluation` with no `days` parameter; the record
 only grows, so the live figures move as days are scored.
 
+Both endpoints now return **two separate blocks per model**, `verified` and `backtest`,
+and no combined figure at all. `verified` is the published-then-verified record: rows
+written before the actual was knowable. `backtest` is the walk-forward launch record,
+computed with the actual already in hand. They are never averaged, because averaging
+them is exactly the retro-fitting this project exists to avoid — a 1,239-day backtest
+would swamp a few dozen verified days and the headline number would silently become a
+backtest average. The columns below say which block each figure came from.
+
 **PM2.5, Nagpur** (2023-09-02 → present):
 
 | Model | Scored | MAE (μg/m³) | RMSE (μg/m³) | Description |
@@ -123,6 +131,12 @@ only grows, so the live figures move as days are scored.
 LightGBM beats the naive baseline by **~13.7% MAE**. That margin is the whole point:
 persistence is a genuinely hard baseline for daily air quality, and a model that
 can't beat it isn't worth deploying.
+
+Those counts are the **union of both blocks** as of the snapshot date — the launch
+backtest seeded most of them and the daily job has been adding verified days since.
+`GET /evaluation` splits them; this table does not, because the split moves every day
+and a frozen number for it would be wrong within a week. Read the endpoint for the
+verified-only figure.
 
 **Peak demand, Maharashtra** (2023-03-02 → present, seeded by a walk-forward backtest):
 
@@ -163,16 +177,17 @@ DEFAULT — a DEFAULT applies to inserts only, so a daily score landing on a
 `score_date` a backtest already wrote would otherwise stay labelled `'backtest'`
 and be filtered out permanently.
 
-Reproduce the frozen walk-forward benchmark with `python experiments/compare_models.py`
-(n=1062, MAE 9.3567 vs 10.7975 — consistent with the live record above). Its sample
-count is smaller than the 1,092-row dataset because the first 30 days seed the
-walk-forward window rather than being scored. It is the only backtest script kept:
-the single-model ones it superseded (`naive_baseline_backtest.py`, `train_lightgbm.py`,
-`train_sarima.py`) each re-derived the same dataset with their own hardcoded city and
-their own baseline number to beat, so their printed comparisons drifted out of
-agreement with this table. `compare_models.py` scores both models on identical
-prediction dates in one pass, which is the only way the improvement percentage means
-anything.
+The frozen walk-forward benchmark above (n=1062, MAE 9.3567 vs 10.7975) is reproduced by
+`python experiments/save_backtest_results.py`, which runs the walk-forward loop *and*
+persists it. Its sample count is smaller than the 1,092-row dataset because the first 30
+days seed the walk-forward window rather than being scored. A console-only twin of that
+loop (`compare_models.py`) used to live beside it and was deleted: it re-derived the same
+dataset with the same 30-day warmup and printed the same comparison without writing
+anything, so the two could drift apart while both looked authoritative. The single-model
+scripts they superseded (`naive_baseline_backtest.py`, `train_lightgbm.py`,
+`train_sarima.py`) each hardcoded their own city and their own baseline to beat, which is
+how the drift started. Scoring both models on identical prediction dates in one pass is
+the only way the improvement percentage means anything.
 
 ## Layout
 
@@ -217,18 +232,19 @@ python -m vericast.elec.ingest      # …same names under elec
 python -m vericast.schema           # create any missing tables
 ```
 
-Not on the production path: `experiments/` (`compare_models.py`,
-`save_backtest_results.py`, `save_elec_backtest_results.py`) and `tests/`.
+Not on the production path: `experiments/` (`save_backtest_results.py`,
+`save_elec_backtest_results.py`) and `tests/`.
 
-Two of those experiment scripts are the **one documented exception** to
+Both of those experiment scripts are the **one documented exception** to
 "`score.py` is the only writer of actuals": `save_backtest_results.py` and
 `save_elec_backtest_results.py` INSERT `actual_pm2_5` / `actual_demand_mw`
 directly, because a walk-forward backtest already knows both sides of every pair.
 They are how the launch record was seeded (see Setup below) and are run once, by
 hand, never from the daily job. Everything after launch is `score.py`'s.
 
-Those seeded rows carry `source = 'backtest'` in `model_performance` /
-`electricity_model_performance`; every row `score.py` writes is `'daily'`. Both
+Those seeded rows carry `source = 'backtest'` in all four tables that have the column
+(`predictions`, `electricity_predictions`, `model_performance`,
+`electricity_model_performance`); every row the daily path writes is `'daily'`. Both
 leaderboard handlers filter on `source = 'daily'`, and that filter is not
 cosmetic: each backtest script upserts one aggregate row per model at its *last
 evaluated date*, so re-running one today would carry the newest `score_date`,
@@ -237,8 +253,22 @@ hundreds-deep backtest average as "how yesterday went". The column was added by
 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in `vericast/schema.py`, whose
 `MIGRATIONS` tuple also backfills the pre-existing rows — `DEFAULT 'daily'`
 would otherwise have labelled the launch backtest daily, leaving the hole open.
-`sample_size > 1` is what identifies them: a daily row scores one date against a
-`UNIQUE(city, forecast_date, model)` table, so its sample size is 1 by
+
+The label has to be forced in both directions, and `tests/test_leaderboard.py` asserts
+both on the SQL text:
+
+- **Every `DO UPDATE` branch on the daily path sets `source = 'daily'` explicitly.** A
+  column DEFAULT applies to INSERT only, so a real forecast or score landing on a date
+  the launch backtest already seeded would keep `source = 'backtest'` and never count
+  towards the published record. Four writers need the line: both `score.py` upserts and
+  both `predict.py` upserts.
+- **Neither backtest seeder can overwrite a verified row.** Their `DO UPDATE` is guarded
+  by `WHERE <table>.source = 'backtest'` and never assigns `actual_*`, so a re-run
+  refreshes its own rows and skips every daily one instead of replacing a genuinely
+  verified observation with a backtest-computed one.
+
+`sample_size > 1` is the other tell on the performance tables: a daily row scores one
+date against a `UNIQUE(city, forecast_date, model)` table, so its sample size is 1 by
 construction.
 
 `model_performance` also has no `city` column, which is the one migration a second
@@ -252,15 +282,36 @@ city would need — see Known limits below.
 | `GET /forecast?model=lightgbm` | Latest stored forecast, with `status: pending\|verified` |
 | `GET /history?days=30` | Recent observations |
 | `GET /leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
-| `GET /evaluation` | Full-record MAE/RMSE over every prediction ever published |
-| `GET /evaluation?days=30` | Same, restricted to a rolling window |
+| `GET /evaluation` | Full record per model, split into `verified` and `backtest` blocks |
+| `GET /evaluation?days=30` | Same, restricted to a rolling window (`days` is `ge=0`; a bad one is 422) |
 | `GET /predictions?model=lightgbm&limit=12` | Prediction log with errors |
 | `GET /electricity/health` | Latest demand observation + `source_lag_expected` (5-day threshold) |
 | `GET /electricity/forecast?model=lightgbm` | Latest stored demand forecast in MW |
 | `GET /electricity/history?days=30` | Recent peak demand, energy met and temperature |
 | `GET /electricity/leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
-| `GET /electricity/evaluation` | Full-record MAE/RMSE/**MAPE** per model |
+| `GET /electricity/evaluation` | Same split, with **MAPE** alongside MAE/RMSE in each block |
 | `GET /electricity/predictions?model=lightgbm&limit=15` | Prediction log with `error` and `error_pct` |
+
+Every `days` parameter is validated by FastAPI rather than by a hand-rolled check, so
+out-of-range values answer **422** across all four endpoints that take one — `/evaluation`
+used to answer 400 for the same class of input, which made the contract something a
+client had to special-case per route.
+
+Both evaluation endpoints nest their metrics under a provenance key and publish **no
+combined figure**:
+
+```json
+{"model": "lightgbm",
+ "window_days": null,
+ "verified": {"scored_count": 41, "pending_count": 1, "mae": 9.8, "rmse": 12.6},
+ "backtest": {"scored_count": 1062, "pending_count": 0, "mae": 9.36, "rmse": 12.1}}
+```
+
+A model with no rows of one provenance simply has no block for it, rather than a
+zero-filled one that would read as "measured, and it was 0". A `source` value nobody
+planned for is reported under its own raw name instead of being dropped, so the counts
+still add up. Sorting follows `verified` MAE, falling back to `backtest` MAE, with
+unscored models last.
 
 Interactive docs at `/docs`. PM2.5 values are raw concentration in μg/m³ —
 **not** AQI; no AQI transform is computed anywhere in this system. Electricity values
@@ -348,6 +399,18 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 python verify_deployment_readiness.py   # must print ALL CHECKS PASSED
 ```
 
+Python 3.11, pinned in `.python-version` — which is committed rather than ignored, so
+`pyenv`/`uv` pick locally the same interpreter that `ci.yml`, `daily-pipeline.yml`,
+`weekly-retrain.yml` and the `Dockerfile` all pin independently. Changing it means
+changing all five.
+
+`tests/test_feature_alignment.py` is the only module that touches a real database. With
+no reachable `DATABASE_URL` it skips; against a database that already has rows it asserts
+on real pipeline output; against an *empty* one it seeds 40 synthetic days first so CI's
+throwaway Postgres still runs the window-frame queries. That seeding refuses any
+non-local host, because writing fabricated observations into the managed instance would
+contaminate the published record.
+
 First-time electricity setup (one-off, then the daily job takes over):
 
 ```bash
@@ -388,6 +451,22 @@ Deliberately not built. Each line names the ceiling and what would justify cross
 - **One city, one state.** `model_performance` has no `city` column (its electricity
   counterpart has `state`), because it predates the second target. Changing `CITY`
   without a migration would silently mix cities in the PM2.5 leaderboard.
+- **The dashboard's CSP is a `<meta http-equiv>`, not a header.** `index.html` is served
+  as a static GitHub Pages file, so there is no server to set one. The meta form is
+  weaker — `frame-ancestors` and `report-uri` are ignored in it — and `'unsafe-inline'`
+  stays unavoidable while the styles, the script and the tab `onclick=` handlers are
+  inline. The part that matters still holds: `script-src` pins executable code to this
+  file plus the one pinned CDN entry, so an injected `<script src>` from anywhere else
+  does not run, and `esc()` guards every interpolated row. Serving the page from
+  somewhere with real headers is the upgrade.
+- **The deployed hostname and repo slug still say `forecast-lab`.** The Render service is
+  `forecast-lab-2l0q.onrender.com` and the remote is `Forecast-Lab`; the rename to
+  VeriCast happened in the docs only. Left alone deliberately — rewriting a working
+  hostname to match a README breaks the dashboard, and the private-reporting link in
+  [`.github/SECURITY.md`](.github/SECURITY.md) 404s if it stops matching the remote. The
+  fix is to rename the Render service and the GitHub repo first; the dashboard's
+  `API_BASE`, its CSP `connect-src` and that security link all pin the same host and
+  move together.
 - **Housekeeping left open:** `print()` rather than `logging` in the pipeline scripts, no
   Docker `HEALTHCHECK`, plain `uvicorn` rather than `uvicorn[standard]`, an O(n²) scan in
   `vericast/pm25/ingest.py` (`wx_times.index(date_str)` re-scans the weather array once

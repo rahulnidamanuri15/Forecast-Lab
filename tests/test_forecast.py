@@ -188,37 +188,42 @@ def test_electricity_forecast_invalid_model():
 def test_electricity_evaluation_metrics():
     """Payload shape, MAPE passthrough, and the MAE sort putting the best first.
 
-    /electricity/evaluation aggregates in SQL, so one mocked row per model:
-    (model, scored, pending, mae, rmse, mape).
+    /electricity/evaluation aggregates in SQL and groups by (model, source), so
+    one mocked row per model per provenance:
+    (model, source, scored, pending, mae, rmse, mape). 'daily' surfaces as
+    `verified`; the metrics live inside that block rather than at the top level,
+    so a backtest row can never be averaged into the published record.
     """
     with patch('app.get_db_connection') as mock_get_db:
         cur = _mock_cursor(mock_get_db)
         cur.fetchall.return_value = [
-            ('lightgbm', 2, 0, 100.0, 100.0, 10.0),
-            ('naive_baseline', 2, 0, 100.0, 141.4213562, 10.0),
-            ('seasonal_naive', 0, 1, None, None, None),
+            ('lightgbm', 'daily', 2, 0, 100.0, 100.0, 10.0),
+            ('naive_baseline', 'daily', 2, 0, 100.0, 141.4213562, 10.0),
+            ('seasonal_naive', 'daily', 0, 1, None, None, None),
         ]
 
         response = client.get("/electricity/evaluation")
 
         assert response.status_code == 200
-        models = {m["model"]: m for m in response.json()["evaluation"]}
+        payload = response.json()
+        assert payload["state"] == "Maharashtra"
+        models = {m["model"]: m for m in payload["evaluation"]}
 
-        lgb = models["lightgbm"]
+        lgb = models["lightgbm"]["verified"]
         assert lgb["scored_count"] == 2
         assert lgb["mae"] == pytest.approx(100.0)
         assert lgb["rmse"] == pytest.approx(100.0)
         assert lgb["mape"] == pytest.approx(10.0)
 
-        naive = models["naive_baseline"]
+        naive = models["naive_baseline"]["verified"]
         assert naive["mae"] == pytest.approx(100.0)
         # RMSE punishes the single large error: sqrt((200^2 + 0)/2) > MAE
         assert naive["rmse"] == pytest.approx(141.4213562, rel=1e-6)
 
         # Unscored model sorts last rather than raising on a None comparison.
-        assert models["seasonal_naive"]["mae"] is None
-        assert models["seasonal_naive"]["pending_count"] == 1
-        assert response.json()["evaluation"][-1]["model"] == "seasonal_naive"
+        assert models["seasonal_naive"]["verified"]["mae"] is None
+        assert models["seasonal_naive"]["verified"]["pending_count"] == 1
+        assert payload["evaluation"][-1]["model"] == "seasonal_naive"
 
         # Full record takes no window, so STATE is the only bound parameter.
         # Asserted on params rather than by grepping the SQL for "forecast_date":
@@ -226,6 +231,30 @@ def test_electricity_evaluation_metrics():
         # and breaks as soon as the SELECT list names it.
         _, params = cur.execute.call_args[0]
         assert params == (STATE,)
+
+
+def test_electricity_evaluation_splits_provenance():
+    """MAPE too, not just MAE/RMSE, stays inside its own provenance block."""
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        cur.fetchall.return_value = [
+            ('lightgbm', 'daily', 3, 0, 500.0, 600.0, 2.0),
+            ('lightgbm', 'backtest', 700, 0, 300.0, 400.0, 1.1),
+        ]
+
+        response = client.get("/electricity/evaluation")
+
+        assert response.status_code == 200
+        entries = response.json()["evaluation"]
+        assert len(entries) == 1
+        assert entries[0]["verified"]["mape"] == pytest.approx(2.0)
+        assert entries[0]["backtest"]["mape"] == pytest.approx(1.1)
+        assert "mape" not in entries[0]
+
+
+def test_electricity_evaluation_rejects_negative_days():
+    """Same 422 as /evaluation and /history - one contract for a bad `days`."""
+    assert client.get("/electricity/evaluation?days=-1").status_code == 422
 
 
 def test_electricity_evaluation_no_data():
@@ -236,6 +265,92 @@ def test_electricity_evaluation_no_data():
         response = client.get("/electricity/evaluation")
 
         assert response.status_code == 404
+
+
+def test_electricity_leaderboard_sorts_and_filters_daily():
+    """Mirror of tests/test_leaderboard.py for the demand target.
+
+    Two things can silently go wrong here and neither is visible in the payload:
+    the source filter (a backtest re-run carries the newest score_date, so
+    without it the seeded rows become the published leaderboard) and the None
+    handling in the MAE sort. The mock returns whatever it is given, so the
+    filter is asserted on the SQL text.
+    """
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        cur.fetchall.return_value = [
+            ('naive_baseline', 900.0, 1100.0, 3.4, 1, date(2026, 8, 23)),
+            ('seasonal_naive', None, None, None, 1, date(2026, 8, 23)),
+            ('lightgbm', 400.0, 520.0, 1.6, 1, date(2026, 8, 23)),
+        ]
+
+        response = client.get("/electricity/leaderboard")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["state"] == "Maharashtra"
+        # Best MAE first, unscored last rather than raising on None < float.
+        assert [r["model"] for r in payload["leaderboard"]] == [
+            "lightgbm", "naive_baseline", "seasonal_naive"]
+        assert payload["leaderboard"][0]["mape"] == pytest.approx(1.6)
+        assert payload["leaderboard"][0]["as_of"] == "2026-08-23"
+        assert payload["leaderboard"][0]["description"]
+
+        sql, params = cur.execute.call_args[0]
+        assert "source = 'daily'" in sql
+        assert params == (STATE,)
+
+
+def test_electricity_leaderboard_empty_is_404():
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        cur.fetchall.return_value = []
+
+        response = client.get("/electricity/leaderboard")
+
+        assert response.status_code == 404
+        assert "No model performance data found" in response.json()["detail"]
+
+
+def test_electricity_history_returns_oldest_first_and_binds_the_limit():
+    """Same contract as /history: DESC in SQL, reversed for charting, bound LIMIT."""
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        cur.fetchall.return_value = [
+            (date(2026, 8, 23), 27000.0, 480.0, 29.5, 34.0),
+            (date(2026, 8, 22), 26500.0, 471.0, 28.9, 33.2),
+        ]
+
+        response = client.get("/electricity/history?days=2")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [r["date"] for r in data["historical_data"]] == \
+            ["2026-08-22", "2026-08-23"]
+        assert data["days_returned"] == 2
+        assert data["state"] == "Maharashtra"
+
+        _, params = cur.execute.call_args[0]
+        assert params == (STATE, 2)
+
+
+def test_electricity_history_empty_is_404_not_500():
+    """The 404 is raised inside the try, so this holds `except HTTPException: raise`
+    in place - without it db_error() turns an empty table into a 500."""
+    with patch('app.get_db_connection') as mock_get_db:
+        cur = _mock_cursor(mock_get_db)
+        cur.fetchall.return_value = []
+
+        response = client.get("/electricity/history?days=30")
+
+        assert response.status_code == 404
+        assert "No historical data found" in response.json()["detail"]
+
+
+def test_electricity_history_rejects_zero_days():
+    """days is ge=1 here too - one contract across both targets."""
+    assert client.get("/electricity/history?days=0").status_code == 422
+    assert client.get("/electricity/history?days=366").status_code == 422
 
 
 def test_electricity_predictions_error_pct():

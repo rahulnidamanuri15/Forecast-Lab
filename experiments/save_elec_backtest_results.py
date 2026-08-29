@@ -120,15 +120,21 @@ def run_backtest():
 
 def save_results(evaluation_dates, predictions, actuals):
     """Store every individual prediction *with* its actual - these are verified
-    historical results, not pending forecasts."""
+    historical results, not pending forecasts.
+
+    source = 'backtest' so /electricity/evaluation can separate them from rows
+    published before their actual existed. The DO UPDATE deliberately does not
+    touch actual_demand_mw or source, and the WHERE keeps a re-run from
+    overwriting a real daily forecast on an overlapping date.
+    """
     insert_sql = """
         INSERT INTO electricity_predictions
-            (state, forecast_date, predicted_demand_mw, actual_demand_mw, model)
-        VALUES (%s, %s, %s, %s, %s)
+            (state, forecast_date, predicted_demand_mw, actual_demand_mw, model, source)
+        VALUES (%s, %s, %s, %s, %s, 'backtest')
         ON CONFLICT (state, forecast_date, model) DO UPDATE SET
             predicted_demand_mw = EXCLUDED.predicted_demand_mw,
-            actual_demand_mw = EXCLUDED.actual_demand_mw,
-            created_at = CURRENT_TIMESTAMP;
+            created_at = CURRENT_TIMESTAMP
+        WHERE electricity_predictions.source = 'backtest';
     """
 
     records = [

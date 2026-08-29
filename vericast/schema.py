@@ -64,6 +64,14 @@ TABLES = {
             UNIQUE(city, as_of)
         );
     """,
+    # `source` here is the same column, and the same DEFAULT, as on
+    # model_performance below - but it matters more, because /evaluation is the
+    # headline accuracy claim and it aggregates these rows directly. A 'daily'
+    # row was published before its actual_pm2_5 existed; a 'backtest' row was
+    # written by experiments/save_backtest_results.py with the actual already in
+    # hand. Averaging them together answers a different question than the one
+    # this project exists to answer, and before this column there was no way to
+    # tell them apart after the fact.
     "predictions": """
         CREATE TABLE IF NOT EXISTS predictions (
             id SERIAL PRIMARY KEY,
@@ -72,6 +80,7 @@ TABLES = {
             predicted_pm2_5 FLOAT,
             actual_pm2_5 FLOAT,
             model VARCHAR(50) DEFAULT 'naive_baseline',
+            source TEXT NOT NULL DEFAULT 'daily',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(city, forecast_date, model)
         );
@@ -144,6 +153,8 @@ TABLES = {
             UNIQUE(state, as_of)
         );
     """,
+    # `source` as on predictions above: 'daily' means published before the actual
+    # existed, 'backtest' means seeded by experiments/save_elec_backtest_results.py.
     "electricity_predictions": """
         CREATE TABLE IF NOT EXISTS electricity_predictions (
             id SERIAL PRIMARY KEY,
@@ -152,6 +163,7 @@ TABLES = {
             predicted_demand_mw FLOAT NOT NULL,
             actual_demand_mw FLOAT,
             model VARCHAR(50) NOT NULL,
+            source TEXT NOT NULL DEFAULT 'daily',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(state, forecast_date, model)
         );
@@ -183,19 +195,51 @@ TABLES = {
 # than a psql snippet in the README that only one machine ever ran.
 #
 # The backfill is the half that is easy to miss: ADD COLUMN ... DEFAULT 'daily'
-# marks the existing backtest rows 'daily' too, so /leaderboard would still be
-# hijackable by the rows that are already there. A daily row is one scored day
-# against a UNIQUE(city, forecast_date, model) predictions table, so its
-# sample_size is 1 by construction - anything larger came from a backtest.
+# marks the existing backtest rows 'daily' too, so /leaderboard and /evaluation
+# would still be reading them as published-then-verified.
+#
+# Both backfills are bounded, because an unbounded one is a standing rule rather
+# than a migration. Every writer now labels its own rows - score.py and predict.py
+# force 'daily', the two experiments/save_*_backtest_results.py scripts write the
+# 'backtest' literal - so only rows that predate the column ever need fixing, and
+# those are exactly the rows the bounds select. Without the bounds these would
+# keep firing forever on rules that are only true of the launch data: a legitimate
+# multi-day daily score would be relabelled 'backtest' and drop off /leaderboard
+# permanently, and this file has no down-migration to undo that.
+MIGRATION_CUTOFF = "2026-08-30"  # day after `source` landed; nothing older is self-labelled
+
 MIGRATIONS = (
     "ALTER TABLE model_performance "
     "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
     "ALTER TABLE electricity_model_performance "
     "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
+    # Aggregate tables. A daily row scores one date against a UNIQUE(city,
+    # forecast_date, model) predictions table, so its sample_size is 1 by
+    # construction - anything larger came from a backtest.
     "UPDATE model_performance SET source = 'backtest' "
-    "WHERE sample_size > 1 AND source = 'daily';",
+    f"WHERE sample_size > 1 AND source = 'daily' AND created_at < '{MIGRATION_CUTOFF}';",
     "UPDATE electricity_model_performance SET source = 'backtest' "
-    "WHERE sample_size > 1 AND source = 'daily';",
+    f"WHERE sample_size > 1 AND source = 'daily' AND created_at < '{MIGRATION_CUTOFF}';",
+
+    # Row-level tables. /evaluation aggregates these directly and is the headline
+    # accuracy claim, so it needs the same column - see the predictions comment above.
+    "ALTER TABLE predictions "
+    "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
+    "ALTER TABLE electricity_predictions "
+    "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
+    # The bound is derived from the data rather than guessed: the backtest's own
+    # aggregate row records score_date = its last evaluated date, and it is already
+    # correctly labelled, so every prediction row it wrote has
+    # forecast_date <= that date and every row published afterwards is past it.
+    # NULL subquery (no backtest seeded) makes the comparison NULL and updates
+    # nothing, which is the right answer on a fresh database.
+    "UPDATE predictions SET source = 'backtest' "
+    "WHERE source = 'daily' AND forecast_date <= "
+    "(SELECT MAX(score_date) FROM model_performance WHERE source = 'backtest');",
+    "UPDATE electricity_predictions p SET source = 'backtest' "
+    "WHERE p.source = 'daily' AND p.forecast_date <= "
+    "(SELECT MAX(score_date) FROM electricity_model_performance "
+    " WHERE source = 'backtest' AND state = p.state);",
 )
 
 

@@ -81,7 +81,11 @@ profile_default/
 ipython_config.py
 
 # pyenv
-.python-version
+#   .python-version is deliberately NOT ignored (the stock template ignores it).
+#   It is the only thing that makes `pyenv`/`uv` pick the same 3.11 locally that
+#   ci.yml, daily-pipeline.yml, weekly-retrain.yml and the Dockerfile all pin.
+#   Ignored, a contributor on 3.13 gets a silently different interpreter.
+#   Changing the version means changing it here and in those four places.
 
 # pipenv
 #   According to pypa.io/pipenv/ it is not recommended to include Pipfile.lock in version control.
