@@ -1299,8 +1299,16 @@
 
       // 4. Full-record accuracy & model comparison
       if (evaluation && evaluation.evaluation) {
-        const lgb = evaluation.evaluation.find(m => m.model === 'lightgbm');
-        const naive = evaluation.evaluation.find(m => m.model === 'naive_baseline');
+        // /evaluation nests its metrics under `verified` / `backtest` and ships no
+        // combined figure on purpose: averaging a 700-day launch backtest into a
+        // few dozen verified days is the retro-fitting this project exists to
+        // avoid. Spreading `verified` up leaves every read below unchanged and
+        // makes this page quote the published-then-verified record only - a model
+        // that exists solely in the backtest has no mae here and renders as an
+        // honest dash rather than a backtest number wearing a verified label.
+        const models = evaluation.evaluation.map(m => ({ ...m, ...(m.verified || {}) }));
+        const lgb = models.find(m => m.model === 'lightgbm');
+        const naive = models.find(m => m.model === 'naive_baseline');
 
         if (lgb && naive && lgb.mae != null && naive.mae != null) {
           const lgbMae = lgb.mae;
@@ -1310,6 +1318,16 @@
           document.getElementById('kpi-mae-val').innerHTML = `${fmt(lgbMae, 2)} <span class="unit">vs ${fmt(naiveMae, 2)}</span>`;
           document.getElementById('kpi-record-val').textContent = lgb.scored_count;
           document.getElementById('metric-total-scored').textContent = lgb.scored_count;
+
+          // The launch backtest stays discoverable without becoming the headline.
+          // Without this the number silently changed meaning when the split
+          // landed - same label, a different and much smaller sample behind it.
+          const bt = lgb.backtest;
+          document.getElementById('kpi-mae-val').title =
+            `Verified over ${lgb.scored_count} published day(s).`
+            + (bt && bt.mae != null
+                ? ` Launch backtest: MAE ${fmt(bt.mae, 2)} over ${bt.scored_count} days, never averaged in.`
+                : '');
 
           document.getElementById('metric-lgb-mae').textContent = fmt(lgbMae, 2);
           document.getElementById('metric-lgb-rmse').textContent = fmt(lgb.rmse, 2);
@@ -1563,7 +1581,9 @@
 
       // 4. Full-record accuracy across all three models.
       if (evaluation && evaluation.evaluation) {
-        const models = evaluation.evaluation;
+        // Same verified-only spread as the PM2.5 panel above - see the comment
+        // there for why the backtest block is never folded in.
+        const models = evaluation.evaluation.map(m => ({ ...m, ...(m.verified || {}) }));
         const lgb = models.find(m => m.model === 'lightgbm');
         const naive = models.find(m => m.model === 'naive_baseline');
         const seasonal = models.find(m => m.model === 'seasonal_naive');
@@ -1578,6 +1598,13 @@
           document.getElementById('el-metric-total-scored').textContent = lgb.scored_count;
           document.getElementById('el-metric-lgb-mae').textContent = fmt(lgb.mae, 0);
           document.getElementById('el-metric-lgb-rmse').textContent = fmt(lgb.rmse, 0);
+
+          const bt = lgb.backtest;
+          document.getElementById('el-kpi-mape-val').title =
+            `Verified over ${lgb.scored_count} published day(s).`
+            + (bt && bt.mape != null
+                ? ` Launch backtest: MAPE ${fmt(bt.mape, 2)}% over ${bt.scored_count} days, never averaged in.`
+                : '');
         }
         if (seasonal) {
           document.getElementById('el-metric-seasonal-mae').textContent = fmt(seasonal.mae, 0);
