@@ -153,7 +153,15 @@ Two results worth reading carefully:
 scored day* from `model_performance`, so its `sample_size` is normally 1. Use
 `/evaluation` for accuracy claims and `/leaderboard` for "how did yesterday go".
 `/electricity/leaderboard` is the same question on the demand side, reading
-`electricity_model_performance` and carrying `mape` through.
+`electricity_model_performance` and carrying `mape` through. Both feed the
+dashboard's "Latest Scored Day" table, which carries that n≈1 caveat in its
+subtitle so the single-day number cannot be read as the record.
+
+Both endpoints filter `source = 'daily'`, and both `score.py` upserts force
+`source = 'daily'` in their `DO UPDATE` branch rather than leaning on the column
+DEFAULT — a DEFAULT applies to inserts only, so a daily score landing on a
+`score_date` a backtest already wrote would otherwise stay labelled `'backtest'`
+and be filtered out permanently.
 
 Reproduce the frozen walk-forward benchmark with `python experiments/compare_models.py`
 (n=1062, MAE 9.3567 vs 10.7975 — consistent with the live record above). Its sample
@@ -281,12 +289,16 @@ would be re-reading only changes once a day.
 
   Each job's last step is its `diagnose.py`, and both now gate on upstream freshness:
   `vericast/pm25/diagnose.py` refuses at 2 days behind, `vericast/elec/diagnose.py` at 5
-  (a mirror's normal lag, not a stall). This is not a nicety — `predict.py` anchors
+  (a mirror's normal lag, not a stall). Both numbers live in `vericast/__init__.py` as
+  `PM25_STALE_LIMIT_DAYS` / `ELEC_STALE_LIMIT_DAYS`, imported by the gates, `/health`
+  and `verify_deployment_readiness.py` — they used to be copied per file, and the
+  go-live check's hardcoded `<= 1` failed on data the pipeline passed and `/health`
+  called fresh. This is not a nicety — `predict.py` anchors
   `forecast_date = latest_obs + 1 day` on both sides, so a stalled source slides the
-  anchor along with it and every other internal-consistency check still passes. The
-  electricity job also runs `verify_alignment()` inside its "Engineer features" step,
-  which is where the features(t) → target(t+1) join is asserted on the daily path
-  (the PM2.5 job has `leakage_test.py` as its own step instead).
+  anchor along with it and every other internal-consistency check still passes. Both
+  jobs run `verify_alignment()` inside their "Engineer features" step, which is where
+  the features(t) → target(t+1) join is asserted on the daily path; the PM2.5 job also
+  has `leakage_test.py` as its own step.
 
   They run in parallel and neither gates the other. That is the point: the electricity
   source is a third-party mirror that can stall, and a stall there must not block a
@@ -313,6 +325,13 @@ would be re-reading only changes once a day.
   that artifact was trained on the held-out rows, which on live data makes it look
   1.5x (PM2.5) to 2.0x (electricity) better than an honest challenger and would freeze
   the incumbent forever. Its score is printed for drift, not compared.
+
+  Both retrain steps and the commit step carry `if: always()`, for the same reason the
+  daily pipeline splits into two jobs: a raising PM2.5 retrain used to abort the
+  electricity retrain *and* throw away whichever artifact had already been written. The
+  push is a rebase-and-retry loop rather than a bare `git push` — `concurrency:` stops
+  this workflow racing itself but not an unrelated push to `main` landing during the
+  minutes of training, and a rejected push would discard the retrain.
 
 Both scoring scripts score *every* pending row, not just yesterday's, so a missed run
 self-heals on the next one instead of leaving a permanent NULL.
@@ -370,8 +389,10 @@ Deliberately not built. Each line names the ceiling and what would justify cross
   counterpart has `state`), because it predates the second target. Changing `CITY`
   without a migration would silently mix cities in the PM2.5 leaderboard.
 - **Housekeeping left open:** `print()` rather than `logging` in the pipeline scripts, no
-  Docker `HEALTHCHECK`, no `.dockerignore`, plain `uvicorn` rather than
-  `uvicorn[standard]`, an O(n²) scan in `verify_deployment_readiness.py`, and
+  Docker `HEALTHCHECK`, plain `uvicorn` rather than `uvicorn[standard]`, an O(n²) scan in
+  `vericast/pm25/ingest.py` (`wx_times.index(date_str)` re-scans the weather array once
+  per day inside the ingest loop — a dict keyed on the date string is the fix, worth
+  doing when a backfill makes the range long enough to notice), and
   `/electricity/leaderboard` coercing floats its sibling does not (the columns are
   `FLOAT`, so nothing but style is at stake — the coercion should come out, not spread).
 

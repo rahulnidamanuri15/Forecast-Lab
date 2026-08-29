@@ -8,7 +8,7 @@ from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
 from typing import Optional
 
-from vericast import local_time
+from vericast import ELEC_STALE_LIMIT_DAYS, PM25_STALE_LIMIT_DAYS, local_time
 
 load_dotenv()
 
@@ -462,11 +462,9 @@ async def get_history(days: int = Query(30, ge=1, le=365)):
         raise db_error(e)
 
 
-# Open-Meteo publishes yesterday by ~05:00 UTC, so 1 stale day is the steady
-# state and 2 allows one dropped cron run. Kept equal to
-# vericast/pm25/diagnose.py's STALE_LIMIT_DAYS - the gate that stops the pipeline
-# and the flag the dashboard shows must agree on what "stale" means.
-PM25_STALE_LIMIT_DAYS = 2
+# PM25_STALE_LIMIT_DAYS / ELEC_STALE_LIMIT_DAYS both live in vericast/__init__.py
+# now - see the comment there for why the two numbers differ and why the gate,
+# this flag and the go-live check have to read the same one.
 
 
 @app.get("/health")
@@ -518,10 +516,6 @@ ELEC_MODEL_DESCRIPTIONS = {
     "seasonal_naive": "Predict tomorrow's peak demand as the same weekday last week",
     "lightgbm": "LightGBM with lagged demand, rolling aggregates, thermal and calendar features",
 }
-
-# The demand mirror publishes a few days behind real time, so 2-4 stale days is
-# normal here and only past this is it a stalled source (see vericast/elec/ingest.py).
-ELEC_STALE_LIMIT_DAYS = 5
 
 
 @app.get("/electricity/health")

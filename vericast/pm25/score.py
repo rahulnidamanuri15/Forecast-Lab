@@ -31,6 +31,11 @@ WHERE o.city = p.city
 RETURNING p.forecast_date, p.model, p.predicted_pm2_5, o.pm2_5;
 """
 
+# The INSERT does not name `source`: vericast/schema.py declares
+# DEFAULT 'daily', so the honest writer never has to. The DO UPDATE branch does
+# have to - a DEFAULT applies to inserts only, so a daily score landing on a
+# score_date a backtest already wrote would keep source='backtest' and stay
+# filtered out of /leaderboard forever.
 UPSERT_PERF_SQL = """
 INSERT INTO model_performance (score_date, model, mae, rmse, sample_size)
 VALUES (%s, %s, %s, %s, %s)
@@ -38,6 +43,7 @@ ON CONFLICT (score_date, model) DO UPDATE SET
     mae = EXCLUDED.mae,
     rmse = EXCLUDED.rmse,
     sample_size = EXCLUDED.sample_size,
+    source = 'daily',
     created_at = CURRENT_TIMESTAMP;
 """
 

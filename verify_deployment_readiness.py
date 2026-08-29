@@ -6,7 +6,7 @@ from datetime import timedelta
 from dotenv import load_dotenv
 import httpx
 
-from vericast import MODEL_PM25, local_time
+from vericast import MODEL_PM25, PM25_STALE_LIMIT_DAYS, local_time
 
 load_dotenv()
 
@@ -51,7 +51,12 @@ def check_postgres_connectivity():
         return False
 
 def check_observations_freshness():
-    """Check that observations latest date <= 1 day stale"""
+    """Check that observations are within the shared PM2.5 staleness limit.
+
+    Was a hardcoded `<= 1`, which is stricter than vericast/pm25/diagnose.py's
+    gate: this go-live check FAILed on data the daily pipeline passed and /health
+    reported fresh. One definition now, in vericast/__init__.py.
+    """
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         print("FAIL: DATABASE_URL not set, skipping observations freshness check")
@@ -74,11 +79,12 @@ def check_observations_freshness():
 
                 days_stale = (today - latest_obs_date).days
 
-                if days_stale <= 1:
+                if days_stale <= PM25_STALE_LIMIT_DAYS:
                     print(f"PASS: Observations are fresh (latest: {latest_obs_date}, stale days: {days_stale})")
                     return True
                 else:
-                    print(f"FAIL: Observations are stale (latest: {latest_obs_date}, stale days: {days_stale})")
+                    print(f"FAIL: Observations are stale (latest: {latest_obs_date}, "
+                          f"stale days: {days_stale}, limit: {PM25_STALE_LIMIT_DAYS})")
                     return False
     except Exception as e:
         print(f"FAIL: Error checking observations freshness: {e}")

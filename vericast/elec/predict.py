@@ -15,7 +15,7 @@ import lightgbm as lgb
 from datetime import timedelta
 from dotenv import load_dotenv
 
-from vericast import MODEL_ELEC as MODEL_PATH, local_time
+from vericast import ELEC_STALE_LIMIT_DAYS, MODEL_ELEC as MODEL_PATH, local_time
 from vericast.elec.train import FEATURE_COLUMNS
 
 load_dotenv()
@@ -23,8 +23,8 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 STATE = os.getenv("STATE", "Maharashtra")
 
-# The mirror is typically 2-4 days behind; only warn past that.
-STALE_WARN_DAYS = 5
+# Same limit the diagnostic gate enforces (vericast/__init__.py); this one only warns.
+STALE_WARN_DAYS = ELEC_STALE_LIMIT_DAYS
 
 UPSERT_SQL = """
 INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model)

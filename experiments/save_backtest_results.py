@@ -44,7 +44,7 @@ def validate_alignment(feature_dates, target_dates):
                 f"{feature_date} -> {target_date}"
             )
 
-    print("✅ Target alignment verified: features(t) -> target(t+1)")
+    print("[OK] Target alignment verified: features(t) -> target(t+1)")
 
 
 def calculate_metrics(predictions, actuals):
@@ -202,9 +202,9 @@ def save_results(
 
         conn.commit()
 
-    print(f"✅ Saved {len(records)} prediction records")
+    print(f"[OK] Saved {len(records)} prediction records")
     print(
-        f"   {len(evaluation_dates)} target dates × 2 models"
+        f"   {len(evaluation_dates)} target dates x 2 models"
     )
 
 
@@ -272,7 +272,7 @@ def save_model_performance(
 
         conn.commit()
 
-    print("\n✅ Model performance saved")
+    print("\n[OK] Model performance saved")
 
     print(
         f"   Naive:    MAE={naive_mae:.4f}, "
@@ -345,7 +345,7 @@ def main():
 
     verify_saved_results()
 
-    print("\n✅ VeriCast backtest results successfully persisted.")
+    print("\n[OK] VeriCast backtest results successfully persisted.")
 
 
 if __name__ == "__main__":

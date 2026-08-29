@@ -11,7 +11,7 @@ from datetime import timedelta
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import MODEL_PM25 as MODEL_PATH, local_time
+from vericast import MODEL_PM25 as MODEL_PATH, PM25_STALE_LIMIT_DAYS, local_time
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -26,13 +26,9 @@ MIN_PM25, MAX_PM25 = 1.0, 500.0
 
 SIGMA_LIMIT = 3.0   # forecast must sit within 3 sd of the trailing 30-day mean
 
-# Open-Meteo has yesterday by ~05:00 UTC, so 1 stale day is the steady state and
-# 2 allows one dropped cron run. Past that the archive itself has stalled - and
-# because vericast/pm25/predict.py anchors forecast_date to latest_obs + 1 day,
-# a stalled source slides the anchor with it and every other check here still
-# passes. Deliberately not vericast/elec/diagnose.py's 5: that number is a
-# third-party mirror's normal lag, not this source's.
-STALE_LIMIT_DAYS = 2
+# Imported, not defined here: /health and verify_deployment_readiness.py read the
+# same number, and when this file owned it they drifted. See vericast/__init__.py.
+STALE_LIMIT_DAYS = PM25_STALE_LIMIT_DAYS
 
 # Both models vericast/pm25/predict.py publishes. Same role as
 # vericast/elec/diagnose.py:36: predict.py warns and skips a model rather than
@@ -142,14 +138,12 @@ def main():
                 pred_row is not None,
                 "no lightgbm rows found at all" if pred_row is None else str(pred_row),
             )
-            if pred_row:
-                fdate = pred_row[0]
-                stale = fdate < latest_obs if fdate else True
-                all_ok &= check(
-                    "Latest lightgbm forecast_date is current",
-                    not stale,
-                    f"forecast_date={fdate}, latest_obs={latest_obs}" if stale else "",
-                )
+            # No staleness sub-check on MAX(forecast_date) here. `fdate < latest_obs`
+            # passed at fdate == latest_obs - a forecast published for today rather
+            # than tomorrow, which is exactly the failure it looked like it caught.
+            # Check 6 below tests the real contract (forecast_date == latest_obs + 1)
+            # against the *expected* date, so the weak version was redundant when it
+            # was right and wrong when it disagreed. elec/diagnose.py never had one.
 
             # 6. Is every value published for that date physically plausible?
             #    Ported from vericast/elec/diagnose.py:91-117. Anchored to

@@ -27,6 +27,8 @@ WHERE o.state = p.state
 RETURNING p.forecast_date, p.model, p.predicted_demand_mw, o.peak_demand_mw;
 """
 
+# `source` omitted from the INSERT and forced in the DO UPDATE, for the reason
+# spelled out in vericast/pm25/score.py's copy of this comment.
 UPSERT_PERF_SQL = """
 INSERT INTO electricity_model_performance
     (state, score_date, model, mae, rmse, mape, sample_size)
@@ -36,6 +38,7 @@ ON CONFLICT (state, score_date, model) DO UPDATE SET
     rmse = EXCLUDED.rmse,
     mape = EXCLUDED.mape,
     sample_size = EXCLUDED.sample_size,
+    source = 'daily',
     created_at = CURRENT_TIMESTAMP;
 """
 

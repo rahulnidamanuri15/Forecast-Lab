@@ -94,3 +94,26 @@ def test_leaderboard_endpoint_database_error():
         assert response.status_code == 500
         data = response.json()
         assert "detail" in data
+
+
+# The other half of the provenance contract. The tests above assert the *reader*
+# filters on source = 'daily'; these assert the *writers* label. A DEFAULT applies
+# to inserts only, so without this line in the DO UPDATE branch a daily score
+# landing on a score_date a backtest already wrote keeps source = 'backtest' and is
+# filtered out of the leaderboard permanently. String assertions rather than a DB
+# round-trip: the omission is in the SQL text, so that is where it is caught, and
+# these run in CI with or without a database.
+@pytest.mark.parametrize("module_path", [
+    "vericast.pm25.score",
+    "vericast.elec.score",
+])
+def test_score_upsert_relabels_source_on_conflict(module_path):
+    import importlib
+
+    sql = importlib.import_module(module_path).UPSERT_PERF_SQL
+    on_conflict = sql.split("DO UPDATE SET", 1)
+    assert len(on_conflict) == 2, f"{module_path} upsert has no DO UPDATE branch"
+    assert "source = 'daily'" in on_conflict[1], (
+        f"{module_path}.UPSERT_PERF_SQL does not reset source on conflict; a daily "
+        f"score overwriting a backtest row would stay labelled 'backtest'"
+    )
