@@ -66,6 +66,11 @@ def resolve_date_range():
     """First run backfills from INITIAL_START; later runs resume the day after
     the latest stored observation. End is capped at yesterday - the demand mirror
     is historical and typically 2-4 days behind, so most runs find nothing new."""
+    # ponytail: monotonic resume off MAX(as_of) - a day the mirror skipped is never
+    # refetched, which is exactly how the 2025-05-21 -> 2025-05-24 hole became
+    # permanent. Left as is because the RANGE ... PRECEDING frames null out across
+    # it rather than reaching over it, so a hole costs accuracy, never correctness.
+    # Upgrade path if coverage matters: re-scan the last 30 days for missing dates.
     last_date = get_last_observed_date()
 
     if last_date is None:

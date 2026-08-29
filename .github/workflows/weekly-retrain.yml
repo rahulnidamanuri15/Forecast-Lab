@@ -46,6 +46,7 @@ jobs:
       - name: Retrain production model
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CITY: Nagpur
         run: python -m vericast.pm25.train
 
       - name: Retrain electricity model

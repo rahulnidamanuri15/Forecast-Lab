@@ -14,8 +14,9 @@ Postgres window frames give guarantees a loop cannot:
   * Look-ahead leakage is structurally unexpressible - a `RANGE ... PRECEDING`
     frame cannot reference a future row. That is why this package has no
     leakage_test.py mirroring vericast/pm25/leakage_test.py; what does need
-    asserting is the features(t) -> target(t+1) *join*, which lives in
-    tests/test_feature_alignment.py.
+    asserting is the features(t) -> target(t+1) *join*, which verify_alignment()
+    below runs at the end of every engineer_features() call - so it fires on the
+    daily cron, not only in tests/test_feature_alignment.py on push.
 
 Full recompute every run, so changing a feature definition needs no backfill.
 """
@@ -92,6 +93,65 @@ ON CONFLICT (state, as_of) DO UPDATE SET
 """
 
 
+# Every feature row must have a next-day observation to be the target of, except
+# where the observation series itself has a hole. Both counts come from the same
+# shape so they can be compared directly: an orphan is only excusable if a gap
+# explains it.
+#
+# This is the electricity half of the daily leakage gate - the pm25 job runs
+# vericast/pm25/leakage_test.py as its own step, while this contract had no
+# runnable check on the daily path at all (only tests/test_feature_alignment.py,
+# which runs on push, not on the 05:17 cron).
+ORPHAN_ROWS_SQL = """
+SELECT COUNT(*)
+FROM electricity_features f
+WHERE f.state = %s
+  AND f.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
+                 FROM electricity_observations WHERE state = f.state)
+  AND NOT EXISTS (
+      SELECT 1 FROM electricity_observations o
+      WHERE o.state = f.state
+        AND o.as_of = f.as_of + INTERVAL '1 day'
+  )
+"""
+
+GAP_DAYS_SQL = """
+SELECT COUNT(*)
+FROM electricity_observations o
+WHERE o.state = %s
+  AND o.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
+                 FROM electricity_observations WHERE state = o.state)
+  AND NOT EXISTS (
+      SELECT 1 FROM electricity_observations n
+      WHERE n.state = o.state
+        AND n.as_of = o.as_of + INTERVAL '1 day'
+  )
+"""
+
+
+def verify_alignment(cur):
+    """Assert the features(t) -> target(t+1) contract, gaps accounted for.
+
+    Equality, not a tolerance: hardcoding "<= 1" for Maharashtra's known
+    2025-05-21 -> 2025-05-24 hole absorbs the next gap silently, and absorbs a
+    genuinely broken join just as quietly. Deriving the expected count from the
+    observations means a NEW gap fails here - loudly, on the day it appears -
+    rather than being pre-forgiven.
+    """
+    cur.execute(GAP_DAYS_SQL, (STATE,))
+    gaps = cur.fetchone()[0]
+    cur.execute(ORPHAN_ROWS_SQL, (STATE,))
+    orphans = cur.fetchone()[0]
+
+    assert orphans == gaps, (
+        f"{orphans} feature rows have no next-day target but only {gaps} "
+        f"observation gap(s) explain it - the features(t) -> target(t+1) "
+        f"contract is broken"
+    )
+    print(f"  Alignment OK: {orphans} orphan row(s), all explained by "
+          f"{gaps} observation gap(s)")
+
+
 def engineer_features():
     try:
         with psycopg.connect(DATABASE_URL) as conn:
@@ -116,6 +176,12 @@ def engineer_features():
                 print(f"  NULL demand_lag_1: {no_lag1} (series start + day after each gap)")
                 print(f"  NULL demand_roll_7_mean: {no_roll7} (first 6 days + gap-spanning windows)")
                 print(f"  NULL demand_roll_30_mean: {no_roll30} (first 29 days + gap-spanning windows)")
+
+                # Runs inside the daily job's "Engineer features" step, right
+                # after the SQL that could break it. An AssertionError here exits
+                # non-zero, so the pipeline stops before predict.py publishes a
+                # forecast built on a broken join.
+                verify_alignment(cur)
     except Exception as e:
         print(f"Error engineering electricity features: {e}")
         raise
