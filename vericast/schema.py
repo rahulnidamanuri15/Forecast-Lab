@@ -1,11 +1,13 @@
 """DDL for every table in both targets. Idempotent: CREATE TABLE IF NOT EXISTS
-only, so running it against the live database cannot touch the published record.
+plus ADD COLUMN IF NOT EXISTS only, so running it against the live database
+cannot touch the published record.
 
     python -m vericast.schema
 
 Replaces the four one-table-per-file create_*_table.py scripts. ponytail: no
-migration tool - these tables are created once and columns are added by hand;
-add Alembic when a column actually needs to change on a live table.
+migration tool - MIGRATIONS below is an idempotent tuple of statements, not a
+versioned history, so it has no down-migration and no ordering guarantees beyond
+"top to bottom". Add Alembic when a column needs to change rather than be added.
 """
 import os
 import psycopg
@@ -82,9 +84,11 @@ TABLES = {
     #
     # Rows here come from vericast/pm25/score.py (one scored day, sample_size
     # normally 1) and, once at launch, from experiments/save_backtest_results.py
-    # (a whole backtest, sample_size in the hundreds). sample_size is the only
-    # thing that tells them apart; a provenance column would mean altering a live
-    # table the published record reads from, for no caller that needs it.
+    # (a whole backtest, sample_size in the hundreds). `source` is what tells them
+    # apart, because /leaderboard needs it: it reads the latest score_date per
+    # model, so a backtest re-run today would become the published leaderboard
+    # with a sample_size of several hundred. The DEFAULT is 'daily' so the honest
+    # writer (score.py) never has to name the column - only the backtests do.
     "model_performance": """
         CREATE TABLE IF NOT EXISTS model_performance (
             id SERIAL PRIMARY KEY,
@@ -93,6 +97,7 @@ TABLES = {
             mae FLOAT,
             rmse FLOAT,
             sample_size INTEGER,
+            source TEXT NOT NULL DEFAULT 'daily',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(score_date, model)
         );
@@ -153,6 +158,8 @@ TABLES = {
     """,
     # mape lives here and not on the existing model_performance table: adding a
     # column to a live table the published record reads from is unrequested risk.
+    # `source` is the one exception, and it went on both tables together - see the
+    # model_performance comment above for why /leaderboard needs it.
     "electricity_model_performance": """
         CREATE TABLE IF NOT EXISTS electricity_model_performance (
             id SERIAL PRIMARY KEY,
@@ -163,11 +170,33 @@ TABLES = {
             rmse FLOAT NOT NULL,
             mape FLOAT,
             sample_size INT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'daily',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(state, score_date, model)
         );
     """,
 }
+
+# Columns added after the tables were already live. ADD COLUMN IF NOT EXISTS keeps
+# this as idempotent as the CREATEs above, so `python -m vericast.schema` is still
+# safe to run against production - which is what makes this the migration rather
+# than a psql snippet in the README that only one machine ever ran.
+#
+# The backfill is the half that is easy to miss: ADD COLUMN ... DEFAULT 'daily'
+# marks the existing backtest rows 'daily' too, so /leaderboard would still be
+# hijackable by the rows that are already there. A daily row is one scored day
+# against a UNIQUE(city, forecast_date, model) predictions table, so its
+# sample_size is 1 by construction - anything larger came from a backtest.
+MIGRATIONS = (
+    "ALTER TABLE model_performance "
+    "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
+    "ALTER TABLE electricity_model_performance "
+    "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
+    "UPDATE model_performance SET source = 'backtest' "
+    "WHERE sample_size > 1 AND source = 'daily';",
+    "UPDATE electricity_model_performance SET source = 'backtest' "
+    "WHERE sample_size > 1 AND source = 'daily';",
+)
 
 
 def create_tables():
@@ -176,6 +205,11 @@ def create_tables():
             for name, ddl in TABLES.items():
                 cur.execute(ddl)
                 print(f"[OK] {name}")
+            conn.commit()
+
+            for sql in MIGRATIONS:
+                cur.execute(sql)
+                print(f"[OK] {sql[:58]}... ({cur.rowcount} rows)")
             conn.commit()
 
             for name in TABLES:

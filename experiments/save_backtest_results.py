@@ -236,14 +236,16 @@ def save_model_performance(
             model,
             mae,
             rmse,
-            sample_size
+            sample_size,
+            source
         )
-        VALUES (%s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, 'backtest')
         ON CONFLICT (score_date, model)
         DO UPDATE SET
             mae = EXCLUDED.mae,
             rmse = EXCLUDED.rmse,
             sample_size = EXCLUDED.sample_size,
+            source = EXCLUDED.source,
             created_at = CURRENT_TIMESTAMP;
     """
 

@@ -11,3 +11,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # The Dockerfile pins its base image by digest, which never moves on its own.
+  # This is what makes that pin get security updates instead of freezing.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"

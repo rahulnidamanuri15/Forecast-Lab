@@ -11,7 +11,7 @@ from datetime import timedelta
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import MODEL_PM25 as MODEL_PATH
+from vericast import MODEL_PM25 as MODEL_PATH, local_time
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -25,6 +25,14 @@ CITY = os.getenv("CITY", "Nagpur")
 MIN_PM25, MAX_PM25 = 1.0, 500.0
 
 SIGMA_LIMIT = 3.0   # forecast must sit within 3 sd of the trailing 30-day mean
+
+# Open-Meteo has yesterday by ~05:00 UTC, so 1 stale day is the steady state and
+# 2 allows one dropped cron run. Past that the archive itself has stalled - and
+# because vericast/pm25/predict.py anchors forecast_date to latest_obs + 1 day,
+# a stalled source slides the anchor with it and every other check here still
+# passes. Deliberately not vericast/elec/diagnose.py's 5: that number is a
+# third-party mirror's normal lag, not this source's.
+STALE_LIMIT_DAYS = 2
 
 # Both models vericast/pm25/predict.py publishes. Same role as
 # vericast/elec/diagnose.py:36: predict.py warns and skips a model rather than
@@ -62,6 +70,29 @@ def main():
             )
             latest_obs = cur.fetchone()[0]
             print(f"  Latest observation date: {latest_obs}")
+
+            # 2b. Is the upstream source still moving? Ported from
+            #     vericast/elec/diagnose.py:63-75. Everything below this point
+            #     is an internal-consistency check anchored on latest_obs, so
+            #     all of them pass while Open-Meteo is a week stale - the anchor
+            #     just slides. This is the only check that looks at the clock.
+            #     Early return rather than `all_ok &=`: with no observations at
+            #     all, expected_date is None and the checks below compare
+            #     against nothing.
+            if latest_obs is None:
+                check("Observations exist", False, f"no observations for {CITY}")
+                print("=" * 60)
+                return False
+
+            stale_days = (local_time.today() - latest_obs).days
+            all_ok &= check(
+                f"Source freshness within {STALE_LIMIT_DAYS} days",
+                stale_days <= STALE_LIMIT_DAYS,
+                f"latest observation is {stale_days} days old; Open-Meteo has "
+                f"stalled and forecast_date is sliding with it"
+                if stale_days > STALE_LIMIT_DAYS
+                else f"{stale_days} day(s) behind",
+            )
 
             # 3. Latest features row date
             cur.execute(
@@ -113,7 +144,7 @@ def main():
             )
             if pred_row:
                 fdate = pred_row[0]
-                stale = (latest_obs and (fdate < latest_obs)) if fdate else True
+                stale = fdate < latest_obs if fdate else True
                 all_ok &= check(
                     "Latest lightgbm forecast_date is current",
                     not stale,
@@ -125,7 +156,7 @@ def main():
             #    latest_obs + 1 day, not MAX(forecast_date): if predict.py failed
             #    today, MAX() silently falls back to yesterday's already-published
             #    row, which passes every check below and clears the pipeline.
-            expected_date = latest_obs + timedelta(days=1) if latest_obs else None
+            expected_date = latest_obs + timedelta(days=1)
             cur.execute(
                 """
                 SELECT model, predicted_pm2_5 FROM predictions
