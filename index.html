@@ -11,7 +11,16 @@
      'unsafe-inline' is unavoidable while the styles, the script and the tab
      onclick= handlers are inline; esc() is what guards the interpolated rows.
      connect-src lists the deployed API and the two local dev origins, because
-     window.API_BASE is the documented way to point this page at a local uvicorn. -->
+     window.API_BASE is the documented way to point this page at a local uvicorn.
+
+     With DevTools open you will see connect-src block
+     cdn.jsdelivr.net/.../chart.umd.js.map. That is DevTools fetching the
+     sourcemap named in the minified bundle's trailing comment, not the page
+     doing anything - the chart renders fine and no visitor without DevTools
+     ever makes the request. It is deliberately NOT fixed by adding jsdelivr to
+     connect-src: connect-src is the one directive stopping injected script from
+     posting the page's data somewhere else, and widening it for a devtools
+     convenience trades a real guarantee for a console line. -->
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'none';
   script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
@@ -22,6 +31,11 @@
   base-uri 'none';
   form-action 'none'">
 <title>VeriCast · Published-then-verified PM2.5 &amp; Electricity Demand Forecasts</title>
+<!-- Inline data: URI, not a file: a static host answers a missing /favicon.ico
+     with the 404 the browser logs on every load, and img-src already allows
+     data:. ponytail: a real .ico would need a binary asset in the repo for one
+     16px glyph - add one only if the tab icon needs to be more than a mark. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230B0E14'/><path d='M7 11l5.5 12h2L21 9' fill='none' stroke='%2300E5A3' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <!-- Version-pinned AND hash-pinned: the tag stops a silent major-version bump,
      the integrity hash stops a tampered CDN response from running as script on
      a page whose whole claim is that its numbers are trustworthy. Bumping the
