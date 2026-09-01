@@ -83,9 +83,13 @@ def run_backtest():
 
     print(f"Retrieved {len(rows)} samples")
     print(f"Feature matrix shape: {X.shape}")
-    assert X.shape[1] == len(FEATURE_COLUMNS), (
-        f"Feature count mismatch: got {X.shape[1]}, expected {len(FEATURE_COLUMNS)}."
-    )
+    # Raised, not asserted: this script writes actuals straight into the published
+    # record, so it gets the same -O-proof gate as vericast/elec/train.py.
+    if X.shape[1] != len(FEATURE_COLUMNS):
+        raise AssertionError(
+            f"Feature count mismatch: got {X.shape[1]}, expected "
+            f"{len(FEATURE_COLUMNS)}."
+        )
 
     validate_alignment(feature_dates, target_dates)
 

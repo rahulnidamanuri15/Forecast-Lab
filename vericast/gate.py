@@ -143,7 +143,15 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
 
 def demo():
     """Self-check: the six broken models the bars were calibrated against must
-    all be refused, and a fit on real signal must pass."""
+    all be refused, and a fit on real signal must pass.
+
+    ponytail: bare `assert` is right here and wrong in the pipeline gates. This is
+    a __main__ self-check whose whole job is to fail loudly under CI's plain
+    `python -m vericast.gate`; being erased by python -O costs nothing, because
+    under -O it simply is not the check anymore. The gates that guard *data* -
+    verify_alignment(), the train.py feature-count checks - raise instead, since
+    there -O would silently turn them into no-ops that still exit 0.
+    """
     rng = np.random.default_rng(0)
     n = 300
     # Mean-reverting with an exogenous driver, like both live targets (weather

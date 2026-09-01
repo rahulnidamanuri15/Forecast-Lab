@@ -152,11 +152,14 @@ def check_features_no_nulls():
                 # Get column names
                 colnames = [desc[0] for desc in cur.description]
 
-                # Check for NULLs (skip city and as_of as they're identifiers)
+                # Skip the identifiers, not just the two obvious ones. `id` is a
+                # SERIAL and never NULL, so including it only risks the day it is
+                # dropped or renamed; tests/test_feature_alignment.py already
+                # excludes the same three.
                 null_cols = []
                 for i, val in enumerate(row):
                     colname = colnames[i]
-                    if colname not in ['city', 'as_of'] and val is None:
+                    if colname not in ['city', 'as_of', 'id'] and val is None:
                         null_cols.append(colname)
 
                 if not null_cols:
@@ -169,12 +172,18 @@ def check_features_no_nulls():
         print(f"FAIL: Error checking features for NULLs: {e}")
         return False
 
-def check_leakage_test():
-    """Run the leakage test to ensure it passes"""
-    print("Running leakage test:")
+def check_leakage_test(module='vericast.pm25.leakage_test'):
+    """Run one target's leakage test and require it to pass.
+
+    Parameterised rather than duplicated now that vericast/elec/leakage_test.py
+    exists: the two run identically, differing only in the module name, and a
+    copy-pasted twin is the kind that drifts. Default keeps the PM2.5 call site
+    unchanged.
+    """
+    print(f"Running leakage test ({module}):")
     try:
         result = subprocess.run([
-            sys.executable, '-m', 'vericast.pm25.leakage_test'
+            sys.executable, '-m', module
         ], capture_output=True, text=True, cwd=os.getcwd(), timeout=180)
 
         if result.returncode == 0:
@@ -234,11 +243,15 @@ def check_lightgbm_prediction_exists():
                 latest_obs_date = latest_obs.date() if hasattr(latest_obs, 'date') else latest_obs
                 expected_forecast_date = latest_obs_date + timedelta(days=1)
 
-                # Check for LightGBM prediction for this date
+                # Check for LightGBM prediction for this date. source = 'daily' or
+                # a launch-backtest row on that date satisfies the gate: the
+                # backtest seeded rows with the actual already in hand, so it
+                # proves nothing about today's pipeline having published.
                 cur.execute("""
                     SELECT forecast_date, predicted_pm2_5
                     FROM predictions
                     WHERE city = %s AND model = %s AND forecast_date = %s
+                      AND source = 'daily'
                 """, (CITY, "lightgbm", expected_forecast_date))
 
                 row = cur.fetchone()
@@ -280,11 +293,12 @@ def check_naive_prediction_exists():
                 latest_obs_date = latest_obs.date() if hasattr(latest_obs, 'date') else latest_obs
                 expected_forecast_date = latest_obs_date + timedelta(days=1)
 
-                # Check for naive prediction for this date
+                # Check for naive prediction for this date - daily rows only, as above.
                 cur.execute("""
                     SELECT forecast_date, predicted_pm2_5
                     FROM predictions
                     WHERE city = %s AND model = %s AND forecast_date = %s
+                      AND source = 'daily'
                 """, (CITY, "naive_baseline", expected_forecast_date))
 
                 row = cur.fetchone()
@@ -333,7 +347,7 @@ def check_forecast_date_logic():
                     cur.execute("""
                         SELECT forecast_date
                         FROM predictions
-                        WHERE city = %s AND model = %s
+                        WHERE city = %s AND model = %s AND source = 'daily'
                         ORDER BY forecast_date DESC
                         LIMIT 1
                     """, (CITY, model))
@@ -459,9 +473,13 @@ def check_api_predictions_endpoint():
         return False
 
 def check_api_electricity_endpoints():
-    """Check that all seven /electricity/* endpoints return 200.
+    """Check that all six /electricity/* endpoints return 200.
 
-    One function rather than seven: they either all work or the router is broken.
+    Six paths, seven requests: /electricity/forecast is called once per published
+    model, because a missing artifact or an unseeded model 404s on that model
+    alone and a single lightgbm call would pass while seasonal_naive was broken.
+
+    One function rather than six: they either all work or the router is broken.
     Deliberately no DB-freshness equivalent of check_observations_freshness here -
     that check allows PM25_STALE_LIMIT_DAYS, and the demand mirror normally runs
     2-4 days behind, so it would fail a correct deployment every day.
@@ -507,7 +525,11 @@ def main():
          check_observations_freshness),
         ("Features match observations date", check_features_match_observations),
         ("Latest features have no NULLs", check_features_no_nulls),
-        ("Leakage test passes", check_leakage_test),
+        ("Leakage test passes (PM2.5)", check_leakage_test),
+        # The elec store has its own feature values to get wrong - and its own
+        # calendar columns, which the PM2.5 twin has none of.
+        ("Leakage test passes (electricity)",
+         lambda: check_leakage_test('vericast.elec.leakage_test')),
         ("LightGBM model artifact exists", check_model_artifact),
         ("LightGBM prediction exists", check_lightgbm_prediction_exists),
         ("Naive baseline prediction exists", check_naive_prediction_exists),

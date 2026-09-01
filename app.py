@@ -1,16 +1,28 @@
+import logging
 import os
 from contextlib import asynccontextmanager
+from time import monotonic
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import psycopg
 from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
 from typing import Optional
 
-from vericast import ELEC_STALE_LIMIT_DAYS, PM25_STALE_LIMIT_DAYS, local_time
+from vericast import (
+    ELEC_STALE_LIMIT_DAYS,
+    PM25_CITY_OF_RECORD,
+    PM25_STALE_LIMIT_DAYS,
+    local_time,
+)
 
 load_dotenv()
+
+# uvicorn owns the handlers and format; this module only needs a named logger so
+# its records carry the level and timestamp the platform log viewer filters on.
+log = logging.getLogger("vericast.api")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -19,6 +31,17 @@ if not DATABASE_URL:
 CITY = os.getenv("CITY", "Nagpur")
 STATE = os.getenv("STATE", "Maharashtra")  # target #2: regional electricity demand
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
+
+# model_performance has no city column (see vericast/__init__.py), so /leaderboard
+# and /evaluation would serve Nagpur's accuracy record under another city's name.
+# Refuse at import rather than serve a mislabelled record: this is a published
+# accuracy claim, and a wrong label on one is worse than a dead deployment.
+if CITY != PM25_CITY_OF_RECORD:
+    raise RuntimeError(
+        f"CITY={CITY!r} but model_performance is keyed without a city and holds "
+        f"{PM25_CITY_OF_RECORD!r}'s record; /leaderboard would mislabel it. "
+        f"Adding a city column plus UNIQUE(city, score_date, model) is the fix."
+    )
 
 # One TCP connect + TLS handshake + Postgres auth per request is the single
 # largest slice of this API's latency, and Neon is a network hop away. The pool
@@ -87,14 +110,84 @@ async def cache_control(request, call_next):
     measured in days. Without this a crawler looping /evaluation and /predictions
     exhausts the pool on connection count alone, however cheap each query is.
 
-    ponytail: one blanket max-age, no per-route tuning and no rate limiter. Add
-    slowapi when the logs show a scraper this does not cover; split the max-age
-    when an endpoint needs to be fresher than the pipeline that feeds it.
+    ponytail: one blanket max-age, no per-route tuning. Split the max-age when an
+    endpoint needs to be fresher than the pipeline that feeds it.
     """
     response = await call_next(request)
     if request.method == "GET" and response.status_code == 200:
         response.headers["Cache-Control"] = "public, max-age=300"
     return response
+
+
+# A fixed-window request cap, in stdlib, because the real exposure is the 8-slot
+# pool: a single client looping /evaluation with a cache-busting query string
+# bypasses the Cache-Control above and can hold every slot until requests start
+# timing out at 10s. 120/min is far above any dashboard's usage (it makes ~6 calls
+# per load) and far below what saturates the pool.
+#
+# ponytail: in-process, so the budget is per instance and resets on deploy - fine
+# at one Render instance, and slowapi + Redis is the upgrade at two. Not a security
+# control: X-Forwarded-For is client-supplied, so a distributed or header-rotating
+# caller is not covered, and nothing here needs it to be - the API is public and
+# read-only, and this exists to keep one noisy client from taking the record
+# offline for everyone else.
+RATE_LIMIT_WINDOW_SECONDS = 60
+RATE_LIMIT_MAX_REQUESTS = 120
+# Bounds the counter dict: without a cap, a caller rotating the forwarded header
+# turns a rate limiter into a memory leak. Past it, new keys share one bucket, so
+# a flood degrades into throttling itself rather than into unbounded growth.
+RATE_LIMIT_MAX_CLIENTS = 10_000
+
+_rate_window_start = 0.0
+_rate_hits: dict = {}
+
+
+def over_rate_limit(key, now):
+    """Count one request for `key` and report whether it exceeded the window.
+
+    Fixed window rather than a sliding one: the whole dict is dropped on rollover,
+    which is what keeps memory bounded by one window's traffic instead of growing
+    with every client ever seen. The cost is that a caller can spend two windows'
+    budget across a boundary, which for a read-only cache-fronted API is not worth
+    a deque per client to prevent.
+
+    No lock: the event loop is single-threaded and there is no await between the
+    read and the write below, so this is atomic with respect to other requests.
+    """
+    global _rate_window_start, _rate_hits
+    if now - _rate_window_start >= RATE_LIMIT_WINDOW_SECONDS:
+        _rate_window_start, _rate_hits = now, {}
+    if key not in _rate_hits and len(_rate_hits) >= RATE_LIMIT_MAX_CLIENTS:
+        key = ""  # shared overflow bucket; "" is not a reachable client key
+    _rate_hits[key] = hits = _rate_hits.get(key, 0) + 1
+    return hits > RATE_LIMIT_MAX_REQUESTS
+
+
+def client_key(request):
+    """Best available caller identity. Render terminates TLS at its proxy, so
+    request.client.host is the proxy and would throttle every caller as one; the
+    leftmost X-Forwarded-For entry is the originating client as that proxy saw
+    it. Client-supplied and therefore spoofable - see the note above."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    return forwarded.split(",")[0].strip() or (
+        request.client.host if request.client else "unknown")
+
+
+@app.middleware("http")
+async def rate_limit(request, call_next):
+    # Skipped when the pool is absent, the same signal get_db_connection() reads to
+    # mean "not running under the lifespan": that is the test suite, which drives
+    # ~50 requests through TestClient as one client and would otherwise start
+    # 429ing as it grows - a failure that would look like anything but this.
+    if _pool is not None and over_rate_limit(client_key(request), monotonic()):
+        # 429 + Retry-After is the documented contract for this, and a well-behaved
+        # client backs off on its own. Not cached: Cache-Control is only set on 200s.
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests; slow down and retry shortly."},
+            headers={"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)},
+        )
+    return await call_next(request)
 
 
 def get_db_connection():
@@ -112,8 +205,14 @@ def get_db_connection():
 
 
 def db_error(exc: Exception) -> HTTPException:
-    """500 without leaking the raw database exception to the client."""
-    print(f"[error] {type(exc).__name__}: {exc}")  # goes to server logs only
+    """500 without leaking the raw database exception to the client.
+
+    log.exception, not print: it carries the level and the traceback, so a pool
+    timeout is greppable and distinguishable from a bad query in the platform log
+    viewer. print() reached stdout but arrived unlevelled and stackless, which is
+    the one thing wanted at the moment an endpoint starts 500ing.
+    """
+    log.exception("db error on request: %s", type(exc).__name__)
     return HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/")
@@ -146,7 +245,15 @@ PM25_MODELS = {"lightgbm", "naive_baseline"}
 
 @app.get("/forecast")
 async def get_forecast(model: str = "lightgbm"):
-    """Return the latest stored forecast for the requested model."""
+    """Return the latest forecast that was published before its actual existed.
+
+    Filtered to source = 'daily', not merely labelled like /predictions. This is
+    the dashboard headline: the backtest record runs to 2026-08-28 and the daily
+    record is ahead of it, so an unfiltered `ORDER BY forecast_date DESC LIMIT 1`
+    reads as a live forecast on any day the daily row is missing while quietly
+    serving a walk-forward row fitted after the fact. `source` is echoed anyway
+    so the caller never has to trust that this filter stayed.
+    """
 
     if model not in PM25_MODELS:
         raise HTTPException(
@@ -164,10 +271,12 @@ async def get_forecast(model: str = "lightgbm"):
                         predicted_pm2_5,
                         actual_pm2_5,
                         model,
-                        created_at
+                        created_at,
+                        source
                     FROM predictions
                     WHERE city = %s
                       AND model = %s
+                      AND source = 'daily'
                     ORDER BY forecast_date DESC
                     LIMIT 1
                     """,
@@ -182,7 +291,7 @@ async def get_forecast(model: str = "lightgbm"):
                 detail=f"No {model} forecast found",
             )
 
-        forecast_date, predicted, actual, model_name, created_at = row
+        forecast_date, predicted, actual, model_name, created_at, source = row
 
         return {
             "city": CITY,
@@ -194,6 +303,7 @@ async def get_forecast(model: str = "lightgbm"):
             ),
             "status": "verified" if actual is not None else "pending",
             "created_at": created_at.isoformat(),
+            "source": PROVENANCE.get(source, source),
         }
 
     except HTTPException:
@@ -285,8 +395,12 @@ async def get_leaderboard():
         for model, mae, rmse, sample_size, score_date in rows:
             leaderboard.append({
                 "model": model,
-                "mae": mae,
-                "rmse": rmse,
+                # float(), matching /electricity/leaderboard. Both columns are
+                # FLOAT, so this is a no-op today and the two handlers agreeing is
+                # the point: whichever one a NUMERIC migration touched would 500 on
+                # Decimal, and one of them silently not coercing is how that ships.
+                "mae": float(mae) if mae is not None else None,
+                "rmse": float(rmse) if rmse is not None else None,
                 "sample_size": sample_size,
                 "as_of": score_date.isoformat(),
                 "description": MODEL_DESCRIPTIONS.get(model, ""),
@@ -300,7 +414,14 @@ async def get_leaderboard():
 
         return {
             "leaderboard": leaderboard,
-            "note": "Lower MAE and RMSE indicate better performance. Each model shows its most recently scored metrics."
+            # Each row is one model's latest scored day, so sample_size is
+            # normally 1 and the ranking can invert /evaluation's on a single
+            # bad day. Saying so is the fix: the multi-day record is the claim,
+            # this is the last data point.
+            "note": "Each row is a model's most recently scored day, so a "
+                    "sample_size of 1 can rank models differently from the "
+                    "multi-day record at /evaluation. Lower MAE and RMSE are "
+                    "better.",
         }
     except HTTPException:
         raise
@@ -346,7 +467,7 @@ async def get_predictions(
                 params.append(limit)
 
                 cur.execute(f"""
-                    SELECT forecast_date, model, predicted_pm2_5, actual_pm2_5, created_at
+                    SELECT forecast_date, model, predicted_pm2_5, actual_pm2_5, created_at, source
                     FROM predictions
                     WHERE {where_clause}
                     ORDER BY forecast_date DESC, model
@@ -355,22 +476,38 @@ async def get_predictions(
 
                 rows = cur.fetchall()
 
-                predictions = []
-                for forecast_date, model_name, predicted, actual, created_at in rows:
-                    error = abs(actual - predicted) if actual is not None and predicted is not None else None
-                    predictions.append({
-                        "forecast_date": forecast_date.isoformat(),
-                        "model": model_name,
-                        "predicted_pm2_5": predicted,
-                        "actual_pm2_5": actual,
-                        "error": error,
-                        "created_at": created_at.isoformat() if created_at else None,
-                    })
+        # Serialization outside the `with`: the pool is max_size=8 and JSON-encoding
+        # 500 rows does not need a connection held open for it.
+        predictions = []
+        for forecast_date, model_name, predicted, actual, created_at, source in rows:
+            # Coerced at the unpack, not per output field, so `error` below is
+            # covered by the same two lines. /forecast and /leaderboard already
+            # coerce and these did not, which is the asymmetry worth closing:
+            # both columns are FLOAT today so this is a no-op, but a NUMERIC
+            # migration that touched one column and not the other makes
+            # `actual - predicted` a Decimal-minus-float TypeError - a 500 from
+            # the row loop, not from the encoder, which handles Decimal fine.
+            predicted = float(predicted) if predicted is not None else None
+            actual = float(actual) if actual is not None else None
+            error = abs(actual - predicted) if actual is not None and predicted is not None else None
+            predictions.append({
+                "forecast_date": forecast_date.isoformat(),
+                "model": model_name,
+                "predicted_pm2_5": predicted,
+                "actual_pm2_5": actual,
+                "error": error,
+                "created_at": created_at.isoformat() if created_at else None,
+                # Exposed, not filtered: 'backtest' rows outnumber 'daily' ones
+                # ~50:1 here and were indistinguishable in this payload. Filtering
+                # would change the existing contract; labelling is enough for a
+                # caller to tell a published forecast from a launch-record one.
+                "source": PROVENANCE.get(source, source),
+            })
 
-                return {
-                    "predictions": predictions,
-                    "count": len(predictions),
-                }
+        return {
+            "predictions": predictions,
+            "count": len(predictions),
+        }
     except Exception as e:
         raise db_error(e)
 
@@ -470,14 +607,19 @@ async def get_evaluation(days: Optional[int] = Query(None, ge=0)):
 @app.get("/history")
 async def get_history(days: int = Query(30, ge=1, le=365)):
     """
-    Get historical observations for the last N days available.
-    Defaults to last 30 days of available data.
+    Get the `days` most recently stored PM2.5 observations, oldest first.
+
+    `days` bounds *rows*, not the calendar: the observations table has date gaps
+    (see vericast/pm25/ingest.py), so days=30 over a gap reaches further back
+    than 30 calendar days. That is what a chart wants - N points, no holes at the
+    right-hand edge - and it is why the count is reported as `days_returned`
+    rather than a date range. Switch to a date predicate only if a caller needs
+    "the last 30 calendar days, gaps included".
     """
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Get observations - order by date descending and limit to 'days'
-                # This gives us the most recent 'days' days of available data
+                # DESC + LIMIT to take the newest rows, reversed below for charting.
                 cur.execute("""
                     SELECT as_of, pm2_5, pm10, temperature_2m_mean,
                            wind_speed_10m_max, precipitation_sum
@@ -492,16 +634,16 @@ async def get_history(days: int = Query(30, ge=1, le=365)):
         if not rows:
             raise HTTPException(status_code=404, detail="No historical data found")
 
-        # Convert to list of dictionaries
+        # float() on every value column, as in /predictions: all five are FLOAT
+        # today, so this only matters if one is ever migrated to NUMERIC.
         history = []
         for row in rows:
             history.append({
                 "date": row[0].isoformat(),
-                "pm2_5": row[1],
-                "pm10": row[2],
-                "temperature_2m_mean": row[3],
-                "wind_speed_10m_max": row[4],
-                "precipitation_sum": row[5]
+                **{name: float(v) if v is not None else None
+                   for name, v in zip(("pm2_5", "pm10", "temperature_2m_mean",
+                                       "wind_speed_10m_max", "precipitation_sum"),
+                                      row[1:])},
             })
 
         # Return in chronological order (oldest first) for easier charting
@@ -550,7 +692,7 @@ async def health():
                 "stale_days": stale_days,
                 "source_lag_expected": stale_days <= PM25_STALE_LIMIT_DAYS}
     except Exception as e:
-        print(f"[error] health check failed: {type(e).__name__}: {e}")
+        log.exception("health check failed: %s", type(e).__name__)
         raise HTTPException(status_code=503, detail="Service unavailable")
 
 
@@ -603,13 +745,18 @@ async def electricity_health():
             "source_lag_expected": stale_days <= ELEC_STALE_LIMIT_DAYS,
         }
     except Exception as e:
-        print(f"[error] electricity health check failed: {type(e).__name__}: {e}")
+        log.exception("electricity health check failed: %s", type(e).__name__)
         raise HTTPException(status_code=503, detail="Service unavailable")
 
 
 @app.get("/electricity/forecast")
 async def get_electricity_forecast(model: str = "lightgbm"):
-    """Latest stored peak-demand forecast (MW) for the requested model."""
+    """Latest peak-demand forecast (MW) published before its actual existed.
+
+    Filtered to source = 'daily' for the same reason as /forecast: this feeds the
+    dashboard headline, and an unfiltered LIMIT 1 would present a walk-forward
+    backtest row as a live forecast whenever today's daily row is absent.
+    """
     if model not in ELEC_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
 
@@ -619,9 +766,9 @@ async def get_electricity_forecast(model: str = "lightgbm"):
                 cur.execute(
                     """
                     SELECT forecast_date, predicted_demand_mw, actual_demand_mw,
-                           model, created_at
+                           model, created_at, source
                     FROM electricity_predictions
-                    WHERE state = %s AND model = %s
+                    WHERE state = %s AND model = %s AND source = 'daily'
                     ORDER BY forecast_date DESC
                     LIMIT 1
                     """,
@@ -632,7 +779,7 @@ async def get_electricity_forecast(model: str = "lightgbm"):
         if not row:
             raise HTTPException(status_code=404, detail=f"No {model} forecast found")
 
-        forecast_date, predicted, actual, model_name, created_at = row
+        forecast_date, predicted, actual, model_name, created_at, source = row
 
         return {
             "state": STATE,
@@ -642,6 +789,7 @@ async def get_electricity_forecast(model: str = "lightgbm"):
             "actual_demand_mw": float(actual) if actual is not None else None,
             "status": "verified" if actual is not None else "pending",
             "created_at": created_at.isoformat(),
+            "source": PROVENANCE.get(source, source),
         }
     except HTTPException:
         raise
@@ -686,7 +834,7 @@ async def get_electricity_predictions(
 
                 cur.execute(f"""
                     SELECT forecast_date, model, predicted_demand_mw,
-                           actual_demand_mw, created_at
+                           actual_demand_mw, created_at, source
                     FROM electricity_predictions
                     WHERE {where_clause}
                     ORDER BY forecast_date DESC, model
@@ -695,21 +843,28 @@ async def get_electricity_predictions(
 
                 rows = cur.fetchall()
 
-                predictions = []
-                for forecast_date, model_name, predicted, actual, created_at in rows:
-                    scored = actual is not None and predicted is not None
-                    error = abs(actual - predicted) if scored else None
-                    predictions.append({
-                        "forecast_date": forecast_date.isoformat(),
-                        "model": model_name,
-                        "predicted_demand_mw": predicted,
-                        "actual_demand_mw": actual,
-                        "error": error,
-                        "error_pct": (error / actual * 100) if scored and actual else None,
-                        "created_at": created_at.isoformat() if created_at else None,
-                    })
+        # Serialization outside the `with`, as in /predictions above.
+        predictions = []
+        for forecast_date, model_name, predicted, actual, created_at, source in rows:
+            # Coerced at the unpack, as in /predictions - `error` and `error_pct`
+            # below both read these, so one pair of lines covers all four fields.
+            predicted = float(predicted) if predicted is not None else None
+            actual = float(actual) if actual is not None else None
+            scored = actual is not None and predicted is not None
+            error = abs(actual - predicted) if scored else None
+            predictions.append({
+                "forecast_date": forecast_date.isoformat(),
+                "model": model_name,
+                "predicted_demand_mw": predicted,
+                "actual_demand_mw": actual,
+                "error": error,
+                "error_pct": (error / actual * 100) if scored and actual else None,
+                "created_at": created_at.isoformat() if created_at else None,
+                # Labelled, not filtered - see /predictions.
+                "source": PROVENANCE.get(source, source),
+            })
 
-                return {"predictions": predictions, "count": len(predictions)}
+        return {"predictions": predictions, "count": len(predictions)}
     except Exception as e:
         raise db_error(e)
 
@@ -837,9 +992,10 @@ async def get_electricity_leaderboard():
         return {
             "state": STATE,
             "leaderboard": leaderboard,
-            "note": ("Lower MAE, RMSE and MAPE indicate better performance. Each model "
-                     "shows its most recently scored metrics; use /electricity/evaluation "
-                     "for the full record."),
+            "note": ("Each row is a model's most recently scored day, so a "
+                     "sample_size of 1 can rank models differently from the "
+                     "multi-day record at /electricity/evaluation. Lower MAE, "
+                     "RMSE and MAPE are better."),
         }
     except HTTPException:
         raise
@@ -848,8 +1004,11 @@ async def get_electricity_leaderboard():
 
 @app.get("/electricity/history")
 async def get_electricity_history(days: int = Query(30, ge=1, le=365)):
-    """Historical peak demand (MW), energy (MU) and temperature for the last N
-    days of available data."""
+    """The `days` most recently stored observations, oldest first.
+
+    Peak demand (MW), energy met (MU) and temperature. `days` bounds rows, not
+    the calendar - same contract, and same reason, as /history.
+    """
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -866,12 +1025,13 @@ async def get_electricity_history(days: int = Query(30, ge=1, le=365)):
         if not rows:
             raise HTTPException(status_code=404, detail="No historical data found")
 
+        # float() as in /history.
         history = [{
             "date": row[0].isoformat(),
-            "peak_demand_mw": row[1],
-            "energy_met_mu": row[2],
-            "temperature_2m_mean": row[3],
-            "temperature_2m_max": row[4],
+            **{name: float(v) if v is not None else None
+               for name, v in zip(("peak_demand_mw", "energy_met_mu",
+                                   "temperature_2m_mean", "temperature_2m_max"),
+                                  row[1:])},
         } for row in rows]
 
         history.reverse()  # chronological, for charting

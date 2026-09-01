@@ -38,8 +38,10 @@ MAX(peak_demand_mw) OVER (ORDER BY as_of
 `RANGE ... PRECEDING` addressed by date structurally cannot reference a future row,
 and returns NULL across a date gap instead of silently reaching over it — so the
 leakage guarantee is a property of the query rather than a test that has to pass.
-`CASE WHEN COUNT(*) OVER w7 = 7` enforces minimum periods the same way, which is
-stricter than a row-index check because it also nulls out gap-shortened windows.
+`CASE WHEN COUNT(peak_demand_mw) OVER w7 = 7` enforces minimum periods the same
+way, which is stricter than a row-index check because it also nulls out
+gap-shortened windows — and it counts the averaged column rather than `*`, so a
+present row carrying a NULL value counts as absent too.
 CI asserts it anyway, against a real Postgres: `tests/test_feature_alignment.py`
 reproduces the 2025-05-21 → 05-24 Maharashtra gap and checks that `demand_lag_1`
 nulls across it.
@@ -194,7 +196,7 @@ the only way the improvement percentage means anything.
 ```
 app.py                            FastAPI service, both targets
 index.html                        dashboard, one tab per target
-verify_deployment_readiness.py    the single go-live gate (16 checks)
+verify_deployment_readiness.py    the single go-live gate (17 checks)
 models/                           committed LightGBM artifacts
 vericast/
 ├── __init__.py                   resolves models/ paths from the package, not cwd
@@ -209,16 +211,17 @@ vericast/
 │   ├── predict.py                write tomorrow's forecast for both models
 │   ├── score.py                  fill actual_pm2_5 for every pending row (only daily-path writer of actuals)
 │   └── diagnose.py               refuse to publish an unfit forecast (non-zero exit)
-└── elec/                         Maharashtra peak demand (MW), same seven roles
+└── elec/                         Maharashtra peak demand (MW), same eight roles
     ├── ingest.py                 demand mirror + Open-Meteo temperature
-    ├── features.py               one INSERT ... SELECT; no leakage test needed (see Architecture)
+    ├── features.py               one INSERT ... SELECT; lag/rolling/calendar → electricity_features
+    ├── leakage_test.py           assert no feature row sees data past its own as_of
     ├── train.py                  retrain → models/lightgbm_elec_model.txt; owns FEATURE_COLUMNS
     ├── predict.py                three models, per-model publish guards
     ├── score.py                  fill actual_demand_mw, upsert MAE/RMSE/MAPE
     └── diagnose.py               6-check publish gate (non-zero exit)
 ```
 
-Same seven filenames in both target packages, so `pm25/x.py` and `elec/x.py` always
+Same eight filenames in both target packages, so `pm25/x.py` and `elec/x.py` always
 do the same job — that symmetry is what makes the two pipelines readable side by side.
 Each `train.py` is the single definition of its target's `FEATURE_COLUMNS`; `predict.py`
 and the backtests import it, so the lists cannot drift (asserted in
@@ -279,15 +282,15 @@ city would need — see Known limits below.
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /health` | Latest observation date, staleness in days + `source_lag_expected` (2-day threshold) |
-| `GET /forecast?model=lightgbm` | Latest stored forecast, with `status: pending\|verified` |
-| `GET /history?days=30` | Recent observations |
+| `GET /forecast?model=lightgbm` | Latest **verified-provenance** forecast (`source = 'daily'`), with `status: pending\|verified` |
+| `GET /history?days=30` | The 30 most recently stored observations, oldest first (`days` bounds **rows**, not the calendar) |
 | `GET /leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
 | `GET /evaluation` | Full record per model, split into `verified` and `backtest` blocks |
 | `GET /evaluation?days=30` | Same, restricted to a rolling window (`days` is `ge=0`; a bad one is 422) |
 | `GET /predictions?model=lightgbm&limit=12` | Prediction log with errors |
 | `GET /electricity/health` | Latest demand observation + `source_lag_expected` (5-day threshold) |
-| `GET /electricity/forecast?model=lightgbm` | Latest stored demand forecast in MW |
-| `GET /electricity/history?days=30` | Recent peak demand, energy met and temperature |
+| `GET /electricity/forecast?model=lightgbm` | Latest **verified-provenance** demand forecast in MW (`source = 'daily'`) |
+| `GET /electricity/history?days=30` | Same row-bounded contract: recent peak demand, energy met and temperature |
 | `GET /electricity/leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
 | `GET /electricity/evaluation` | Same split, with **MAPE** alongside MAE/RMSE in each block |
 | `GET /electricity/predictions?model=lightgbm&limit=15` | Prediction log with `error` and `error_pct` |
@@ -313,6 +316,15 @@ planned for is reported under its own raw name instead of being dropped, so the 
 still add up. Sorting follows `verified` MAE, falling back to `backtest` MAE, with
 unscored models last.
 
+`/forecast` and `/electricity/forecast` **filter** to `source = 'daily'` rather than
+merely labelling it, because they are the dashboard headline: the seeded backtest
+record and the daily record overlap in `forecast_date`, so an unfiltered
+`ORDER BY forecast_date DESC LIMIT 1` would present a walk-forward row fitted after
+the fact as today's live forecast on any day the daily row is missing. Both echo
+`source` anyway, so a caller never has to trust that the filter stayed. `/predictions`
+and `/electricity/predictions` still label without filtering — there the backtest rows
+are the point.
+
 Interactive docs at `/docs`. PM2.5 values are raw concentration in μg/m³ —
 **not** AQI; no AQI transform is computed anywhere in this system. Electricity values
 are peak demand met in MW and energy met in MU, as published upstream.
@@ -336,7 +348,7 @@ would be re-reading only changes once a day.
 
 - `.github/workflows/daily-pipeline.yml` — **two independent jobs, no `needs:`**:
   - `pipeline` (PM2.5): ingest → engineer features → leakage test → score pending → make forecast → verify.
-  - `electricity`: ingest → engineer features → score pending → make forecast → verify.
+  - `electricity`: ingest → engineer features → leakage test → score pending → make forecast → verify.
 
   Each job's last step is its `diagnose.py`, and both now gate on upstream freshness:
   `vericast/pm25/diagnose.py` refuses at 2 days behind, `vericast/elec/diagnose.py` at 5
@@ -348,8 +360,10 @@ would be re-reading only changes once a day.
   `forecast_date = latest_obs + 1 day` on both sides, so a stalled source slides the
   anchor along with it and every other internal-consistency check still passes. Both
   jobs run `verify_alignment()` inside their "Engineer features" step, which is where
-  the features(t) → target(t+1) join is asserted on the daily path; the PM2.5 job also
-  has `leakage_test.py` as its own step.
+  the features(t) → target(t+1) join is asserted on the daily path, and both then run
+  their own `leakage_test.py` as a separate step, which re-derives every stored feature
+  value from the observations by calendar date. The two checks are complementary: one
+  covers the join, the other the values.
 
   They run in parallel and neither gates the other. That is the point: the electricity
   source is a third-party mirror that can stall, and a stall there must not block a
@@ -385,7 +399,10 @@ would be re-reading only changes once a day.
   minutes of training, and a rejected push would discard the retrain.
 
 Both scoring scripts score *every* pending row, not just yesterday's, so a missed run
-self-heals on the next one instead of leaving a permanent NULL.
+self-heals on the next one instead of leaving a permanent NULL. Ingest self-heals the
+other direction: each run re-scans the last 30 days for the earliest date with no
+usable observation and restarts from there, so a day the upstream skipped or served
+too thin is refetched once it lands rather than staying behind the resume point.
 
 ## Running it
 
@@ -438,19 +455,39 @@ localhost.
 
 Deliberately not built. Each line names the ceiling and what would justify crossing it.
 
-- **No rate limiting.** `Cache-Control: public, max-age=300` plus a bounded 8-slot pool
-  is the whole defence. Add `slowapi` when the logs show a scraper that a shared cache
-  does not absorb. The absence of auth is separate and by design — see
-  [`.github/SECURITY.md`](.github/SECURITY.md); this is a read-only public record.
-- **Ingest never backfills a hole.** Both `resolve_date_range()`s resume monotonically
-  from `MAX(as_of)`, so a date the upstream skipped (Maharashtra's
-  2025-05-21 → 05-24) or served as NULL is never refetched. Tolerable because the
-  `RANGE ... PRECEDING` frames null out across a gap rather than reaching over it, so a
-  hole costs accuracy, never correctness. A bounded re-scan of the last 30 days is the
-  upgrade if coverage starts to matter.
+- **Rate limiting is in-process, not distributed.** A fixed 120-requests-per-minute
+  window per client, in stdlib, in front of `Cache-Control: public, max-age=300` and the
+  bounded 8-slot pool. It covers the case the cache does not: a client looping
+  `/evaluation` with a cache-busting query string can otherwise hold every pool slot
+  until requests time out. The budget is per instance and resets on deploy, and the key
+  comes from `X-Forwarded-For`, which the client supplies — so it is a capacity guard,
+  not a security control, and a distributed or header-rotating caller is out of scope.
+  `slowapi` + Redis is the upgrade at more than one instance. The absence of auth is
+  separate and by design — see [`.github/SECURITY.md`](.github/SECURITY.md); this is a
+  read-only public record.
+- **Hole recovery is best-effort, bounded at 30 days.** Both `resolve_date_range()`s take
+  the earlier of `MAX(as_of) + 1 day` and the earliest date in the last `RESCAN_DAYS`
+  with no usable observation, so a skipped or too-thin day is refetched once the upstream
+  serves it. Beyond that window a hole is still permanent (Maharashtra's
+  2025-05-21 → 05-24 predates the change), which stays tolerable because the
+  `RANGE ... PRECEDING` frames null out across a gap rather than reaching over it — a
+  hole costs accuracy, never correctness. Widening the window only helps if a source
+  starts revising in months rather than days.
 - **One city, one state.** `model_performance` has no `city` column (its electricity
-  counterpart has `state`), because it predates the second target. Changing `CITY`
-  without a migration would silently mix cities in the PM2.5 leaderboard.
+  counterpart has `state`), because it predates the second target. `CITY` other than
+  `Nagpur` therefore fails loudly at import in both `app.py` and `vericast/pm25/score.py`
+  rather than quietly overwriting the published leaderboard in place. Everything else is
+  keyed on city; crossing this means a `city` column plus a
+  `UNIQUE(city, score_date, model)` swap, which is a constraint change rather than an
+  addition and so out of `vericast/schema.py`'s scope.
+- **The demand mirror tracks a mutable branch.** `DEMAND_CSV_URL` points at
+  Grid-Sentinel's `main`, not a commit SHA, deliberately: a pin can only serve dates that
+  existed when it was taken, and this mirror backfills late, which is exactly what the
+  30-day re-scan above depends on. Two guards stand in for it — a required-column check
+  that fails naming the URL before any row is accepted, and a 15,000–40,000 MW
+  plausibility bound that catches a unit change (kW, GW) a column-name check cannot see.
+  Neither catches a plausible-but-wrong number, and nothing can: the record rests on the
+  mirror being honest.
 - **The dashboard's CSP is a `<meta http-equiv>`, not a header.** `index.html` is served
   as a static GitHub Pages file, so there is no server to set one. The meta form is
   weaker — `frame-ancestors` and `report-uri` are ignored in it — and `'unsafe-inline'`
@@ -467,13 +504,22 @@ Deliberately not built. Each line names the ceiling and what would justify cross
   fix is to rename the Render service and the GitHub repo first; the dashboard's
   `API_BASE`, its CSP `connect-src` and that security link all pin the same host and
   move together.
-- **Housekeeping left open:** `print()` rather than `logging` in the pipeline scripts, no
-  Docker `HEALTHCHECK`, plain `uvicorn` rather than `uvicorn[standard]`, an O(n²) scan in
-  `vericast/pm25/ingest.py` (`wx_times.index(date_str)` re-scans the weather array once
-  per day inside the ingest loop — a dict keyed on the date string is the fix, worth
-  doing when a backfill makes the range long enough to notice), and
-  `/electricity/leaderboard` coercing floats its sibling does not (the columns are
-  `FLOAT`, so nothing but style is at stake — the coercion should come out, not spread).
+- **Plain `uvicorn`, not `uvicorn[standard]`.** The extra pulls in `uvloop`, `httptools`,
+  `watchfiles`, `websockets` and `PyYAML` as unpinned transitive deps, and every other
+  line in `requirements.txt` is pinned exactly on purpose. This API is read-only, cached
+  for 5 minutes and bounded by an 8-slot pool, so it is nowhere near parser-bound — the
+  swap would trade five unpinned dependencies in the image for throughput nothing is
+  waiting on. Worth revisiting only if the pool stops being the limit.
+- **`python -O` still disarms the self-checks, just not the data gates.** `assert` is
+  erased by `-O` / `PYTHONOPTIMIZE=1`, so the checks that guard *data* — both
+  `verify_alignment()`s, both `train.py` feature-count checks,
+  `save_elec_backtest_results.py`'s — `raise AssertionError` explicitly instead, and stay
+  armed however the interpreter is invoked. The remaining bare `assert`s are all in
+  `__main__` self-checks (`vericast/gate.py`'s `demo()`, `vericast/local_time.py`), where
+  being erased costs nothing because under `-O` the check simply is not the check anymore.
+  Nothing in this repo runs with `-O`; the split exists so that adding it for speed can
+  only cost self-checks, never a gate. Crossing this means dropping `assert` from the
+  self-checks too, which buys nothing until something actually sets the flag.
 
 ## Security
 

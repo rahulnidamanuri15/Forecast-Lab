@@ -19,21 +19,43 @@ from datetime import timedelta
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import ELEC_STALE_LIMIT_DAYS, MODEL_ELEC as MODEL_PATH, local_time
+from vericast import (
+    ELEC_MAX_MW,
+    ELEC_MIN_MW,
+    ELEC_STALE_LIMIT_DAYS,
+    MODEL_ELEC as MODEL_PATH,
+    local_time,
+)
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 STATE = os.getenv("STATE", "Maharashtra")
 
-# Observed 2023-2026 Maharashtra range is 20,147-32,419 MW. Bounds are wide
-# enough for growth and a mild winter, tight enough that a unit error or a
-# mis-parsed column fails instead of publishing.
-MIN_MW, MAX_MW = 15_000.0, 40_000.0
+# Imported, not re-stated: elec/ingest.py rejects an implausible *observation* and
+# this rejects an implausible *forecast* against the same claim about the target.
+# When this file owned a second copy of the numbers, tests/test_mirror_guards.py
+# was pinning only the ingest pair - so a change here could have loosened the
+# publish gate with the suite still green. Same fix as STALE_LIMIT_DAYS below.
+MIN_MW, MAX_MW = ELEC_MIN_MW, ELEC_MAX_MW
 
 STALE_LIMIT_DAYS = ELEC_STALE_LIMIT_DAYS  # defined in vericast/__init__.py
 SIGMA_LIMIT = 3.0      # forecast must sit within 3 sd of the trailing 30-day mean
 
 EXPECTED_MODELS = {"naive_baseline", "seasonal_naive", "lightgbm"}
+
+
+def expected_models(features_current, demand_lag_6):
+    """The models predict.py would actually have published for this run.
+
+    It skips seasonal_naive when demand_lag_6 is NULL - a date gap inside the last
+    week, which is the mirror's problem and not this run's - rather than publishing
+    a NULL forecast, so demanding it here would turn a deliberate degradation into
+    a red pipeline. lightgbm is NOT excused for a stale or missing features row:
+    the as_of check already fails on that, and one report of a problem is the right
+    number. Same split as vericast/pm25/diagnose.py.
+    """
+    excused = {"seasonal_naive"} if features_current and demand_lag_6 is None else set()
+    return EXPECTED_MODELS - excused
 
 
 def check(label, ok, detail=""):
@@ -74,9 +96,15 @@ def main():
                 else f"{stale_days} days behind (normal for this source)",
             )
 
-            cur.execute("SELECT MAX(as_of) FROM electricity_features WHERE state = %s",
-                        (STATE,))
-            latest_feat = cur.fetchone()[0]
+            # demand_lag_6 comes back alongside as_of because it is the one column
+            # predict.py checks on its own: a date gap inside the last week leaves
+            # it NULL and seasonal_naive is skipped while the other two publish.
+            cur.execute("""
+                SELECT as_of, demand_lag_6 FROM electricity_features
+                WHERE state = %s ORDER BY as_of DESC LIMIT 1
+            """, (STATE,))
+            feat_row = cur.fetchone()
+            latest_feat, demand_lag_6 = feat_row if feat_row else (None, None)
             print(f"  Latest features date:    {latest_feat}")
             all_ok &= check(
                 "features as_of matches observations as_of",
@@ -88,18 +116,28 @@ def main():
 
             # Every model should have published for the day after the newest
             # observation - that is what vericast/elec/predict.py labels it.
+            # source = 'daily' so a launch-backtest row seeded on that date, which
+            # was written with the actual already in hand, can't satisfy the gate.
             expected_date = latest_obs + timedelta(days=1)
             cur.execute("""
                 SELECT model, predicted_demand_mw
                 FROM electricity_predictions
-                WHERE state = %s AND forecast_date = %s
+                WHERE state = %s AND forecast_date = %s AND source = 'daily'
             """, (STATE, expected_date))
             published = dict(cur.fetchall())
             print(f"  Expected forecast_date:  {expected_date}")
 
-            missing = EXPECTED_MODELS - published.keys()
+            # Expect only what predict.py would actually have published; the rule
+            # lives in expected_models() above so a test can reach it without a DB.
+            expect = expected_models(latest_feat == latest_obs, demand_lag_6)
+            if "seasonal_naive" not in expect:
+                print(f"  seasonal_naive not expected: demand_lag_6 is NULL at "
+                      f"{latest_feat} (date gap in the last week), so predict.py "
+                      f"skipped it")
+
+            missing = expect - published.keys()
             all_ok &= check(
-                f"All {len(EXPECTED_MODELS)} models published for {expected_date}",
+                f"All {len(expect)} expected models published for {expected_date}",
                 not missing,
                 f"missing: {sorted(missing)}" if missing else
                 # `is not None` for the same reason as the `v is None or` below,

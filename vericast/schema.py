@@ -198,15 +198,28 @@ TABLES = {
 # marks the existing backtest rows 'daily' too, so /leaderboard and /evaluation
 # would still be reading them as published-then-verified.
 #
-# Both backfills are bounded, because an unbounded one is a standing rule rather
-# than a migration. Every writer now labels its own rows - score.py and predict.py
-# force 'daily', the two experiments/save_*_backtest_results.py scripts write the
-# 'backtest' literal - so only rows that predate the column ever need fixing, and
-# those are exactly the rows the bounds select. Without the bounds these would
-# keep firing forever on rules that are only true of the launch data: a legitimate
-# multi-day daily score would be relabelled 'backtest' and drop off /leaderboard
-# permanently, and this file has no down-migration to undo that.
-MIGRATION_CUTOFF = "2026-08-30"  # day after `source` landed; nothing older is self-labelled
+# All four backfills are bounded by created_at, because an unbounded one is a
+# standing rule rather than a migration. Every writer now labels its own rows -
+# score.py and predict.py force 'daily', the two
+# experiments/save_*_backtest_results.py scripts write the 'backtest' literal - so
+# only rows that predate the column ever need fixing, and those are exactly the rows
+# the bound selects. Without it these would keep firing forever on rules that are
+# only true of the launch data: a legitimate multi-day daily score would be
+# relabelled 'backtest' and drop off /leaderboard permanently, and this file has no
+# down-migration to undo that.
+#
+# The row-level pair is the one that needed the bound most, and shipped without it.
+# Their other bound - MAX(score_date) WHERE source = 'backtest' - is a value
+# experiments/save_backtest_results.py *advances*, because its aggregate upsert sets
+# source = EXCLUDED.source on conflict with score_date = evaluation_dates[-1]. So
+# "re-run the seeder, then run this module" was two documented routine operations
+# that together relabelled verified rows. created_at closes it: a row published
+# after the migration date is never a candidate, whatever the seeder does to the
+# bound afterwards.
+#
+# The date is in the past and must stay there. A cutoff in the future leaves the
+# window open on rows being written today, which is the whole failure mode.
+MIGRATION_CUTOFF = "2026-08-29"  # `source` landed this day; nothing written since is a candidate
 
 MIGRATIONS = (
     "ALTER TABLE model_performance "
@@ -235,11 +248,13 @@ MIGRATIONS = (
     # nothing, which is the right answer on a fresh database.
     "UPDATE predictions SET source = 'backtest' "
     "WHERE source = 'daily' AND forecast_date <= "
-    "(SELECT MAX(score_date) FROM model_performance WHERE source = 'backtest');",
+    "(SELECT MAX(score_date) FROM model_performance WHERE source = 'backtest') "
+    f"AND created_at < '{MIGRATION_CUTOFF}';",
     "UPDATE electricity_predictions p SET source = 'backtest' "
     "WHERE p.source = 'daily' AND p.forecast_date <= "
     "(SELECT MAX(score_date) FROM electricity_model_performance "
-    " WHERE source = 'backtest' AND state = p.state);",
+    " WHERE source = 'backtest' AND state = p.state) "
+    f"AND p.created_at < '{MIGRATION_CUTOFF}';",
 )
 
 

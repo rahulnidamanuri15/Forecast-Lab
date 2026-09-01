@@ -75,7 +75,7 @@ def _scalar(cur, sql, params=()):
 #
 # Only the *observations* are synthetic. The features tables are built by calling
 # the production engineer_features(), so CI runs the real RANGE ... PRECEDING
-# frames and COUNT(*) OVER wN guards. Hand-writing feature rows here would make
+# frames and COUNT(<col>) OVER wN guards. Hand-writing feature rows here would make
 # the leakage tests assert against this file instead of against the query.
 # --------------------------------------------------------------------------
 
@@ -316,8 +316,9 @@ def test_elec_lag_is_null_across_the_date_gap(cur):
 def test_elec_rolling_30_requires_a_full_window(cur):
     """demand_roll_30_mean must be NULL until 30 days of history exist.
 
-    COUNT(*) OVER w30 = 30 is a stricter guard than a row-index check: it also
-    nulls out any window that a date gap left short.
+    COUNT(peak_demand_mw) OVER w30 = 30 is a stricter guard than a row-index
+    check: it also nulls out any window that a date gap left short, or that a row
+    with a NULL value left one value short.
     """
     first_29_nonnull = _scalar(cur, """
         SELECT COUNT(*) FROM (
