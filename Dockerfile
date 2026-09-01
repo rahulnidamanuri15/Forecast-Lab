@@ -38,4 +38,18 @@ USER 10001
 # than an ARG that would have to be kept in sync with the deploy for no gain.
 ENV PORT=8000
 EXPOSE 8000
+
+# Reports unhealthy on the one failure a port check cannot see: the process is up
+# and serving but its database is gone, which is when /health 503s. Python rather
+# than curl because slim ships neither curl nor wget, and adding one for this would
+# cost more image than the check saves. sys.exit(1) on any exception, so a refused
+# connection and a 503 read the same to Docker.
+#
+# start-period covers the pool opening on first request. Render ignores HEALTHCHECK
+# (it probes over HTTP itself), so this is for `docker run` and Compose.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import os,urllib.request,sys;\
+sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ['PORT']+'/health',timeout=4).status==200 else 1)" \
+    || exit 1
+
 CMD uvicorn app:app --host 0.0.0.0 --port ${PORT}

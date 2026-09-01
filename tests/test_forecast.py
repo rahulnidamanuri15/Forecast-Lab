@@ -30,7 +30,8 @@ def test_forecast_endpoint_lightgbm_success():
             15.5,           # predicted_pm2_5
             None,           # actual_pm2_5 (pending)
             'lightgbm',     # model
-            datetime.now(timezone.utc)  # created_at
+            datetime.now(timezone.utc),  # created_at
+            'daily',        # source
         ]
 
         # Make the request
@@ -45,6 +46,12 @@ def test_forecast_endpoint_lightgbm_success():
         assert data["model"] == "lightgbm"
         assert data["actual_pm2_5"] is None
         assert data["status"] == "pending"
+        assert data["source"] == "verified"
+
+        # The headline card reads this endpoint, so the filter is the point: without
+        # it the newest row can be a walk-forward backtest fitted after the fact.
+        sql, _ = mock_cursor.execute.call_args[0]
+        assert "source = 'daily'" in sql
 
 def test_forecast_endpoint_naive_baseline_success():
     """Test that the forecast endpoint returns 200 for naive_baseline model."""
@@ -62,7 +69,8 @@ def test_forecast_endpoint_naive_baseline_success():
             12.3,           # predicted_pm2_5
             12.3,           # actual_pm2_5 (scored)
             'naive_baseline', # model
-            datetime.now(timezone.utc)  # created_at
+            datetime.now(timezone.utc),  # created_at
+            'daily',        # source
         ]
 
         # Make the request
@@ -145,7 +153,8 @@ def test_electricity_forecast_success():
         cur = _mock_cursor(mock_get_db)
         forecast_date = date(2026, 8, 23)
         cur.fetchone.return_value = [
-            forecast_date, 25923.9, None, 'lightgbm', datetime.now(timezone.utc)
+            forecast_date, 25923.9, None, 'lightgbm',
+            datetime.now(timezone.utc), 'daily'
         ]
 
         response = client.get("/electricity/forecast?model=lightgbm")
@@ -155,6 +164,12 @@ def test_electricity_forecast_success():
         assert data["state"] == "Maharashtra"
         assert data["forecast_demand_mw"] == 25923.9
         assert data["status"] == "pending"
+        assert data["source"] == "verified"
+
+        # Same reason as the PM2.5 headline: the backtest record must not surface
+        # here as a live forecast.
+        sql, _ = cur.execute.call_args[0]
+        assert "source = 'daily'" in sql
 
 
 def test_electricity_forecast_seasonal_naive_allowed():
@@ -163,7 +178,7 @@ def test_electricity_forecast_seasonal_naive_allowed():
         cur = _mock_cursor(mock_get_db)
         cur.fetchone.return_value = [
             date(2026, 8, 23), 24907.0, 24907.0, 'seasonal_naive',
-            datetime.now(timezone.utc)
+            datetime.now(timezone.utc), 'daily'
         ]
 
         response = client.get("/electricity/forecast?model=seasonal_naive")
@@ -358,8 +373,8 @@ def test_electricity_predictions_error_pct():
     with patch('app.get_db_connection') as mock_get_db:
         cur = _mock_cursor(mock_get_db)
         cur.fetchall.return_value = [
-            (date(2026, 8, 22), 'lightgbm', 27000.0, 28000.0, datetime.now(timezone.utc)),
-            (date(2026, 8, 23), 'lightgbm', 25000.0, None, datetime.now(timezone.utc)),
+            (date(2026, 8, 22), 'lightgbm', 27000.0, 28000.0, datetime.now(timezone.utc), 'daily'),
+            (date(2026, 8, 23), 'lightgbm', 25000.0, None, datetime.now(timezone.utc), 'backtest'),
         ]
 
         response = client.get("/electricity/predictions?limit=2")
@@ -370,3 +385,5 @@ def test_electricity_predictions_error_pct():
         assert rows[0]["error_pct"] == pytest.approx(1000 / 28000 * 100)
         assert rows[1]["error"] is None
         assert rows[1]["error_pct"] is None
+        # Provenance is labelled here too, so a launch-record row is visible as one.
+        assert [r["source"] for r in rows] == ["verified", "backtest"]

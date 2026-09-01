@@ -4,7 +4,7 @@ import psycopg
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from vericast import local_time
+from vericast import PM25_MAX, PM25_MIN, RESCAN_DAYS, local_time, resume_start
 
 load_dotenv()
 
@@ -25,6 +25,27 @@ MIN_HOURS_PER_DAY = 18
 INITIAL_START = "2023-08-01"
 
 
+def plausible_pm25(value):
+    """True when `value` could be a daily mean PM2.5 for this city, in ug/m3.
+
+    The symmetric guard to elec/ingest.py's plausible_mw(). Open-Meteo's CAMS
+    field is a unit assumption, not a guarantee: a switch to mg/m3 (/1000), a
+    sentinel like -999 served in place of a null, or the field coming to mean
+    something else would all parse as a float and enter the record as an
+    ordinary-looking number. An observation is worse than a bad forecast here,
+    because it becomes the *actual* every model is scored against - a permanent
+    error in the published record that afterwards looks like a forecasting miss.
+
+    Bounds live in vericast/__init__.py, shared with the publish gate in
+    diagnose.py. Out-of-range means NULL, not a dropped row: that is exactly what
+    a thin-hours day already does below, and the rest of the pipeline handles a
+    NULL observation (features.py NULLs the lags, train.py filters, and
+    get_earliest_hole() re-fetches the date on the next run). Contrast with elec,
+    where peak_demand_mw is NOT NULL so the row has to be skipped instead.
+    """
+    return PM25_MIN <= value <= PM25_MAX
+
+
 def get_last_observed_date():
     """Return the most recent as_of date already stored for this city, or None."""
     with psycopg.connect(DATABASE_URL) as conn:
@@ -37,32 +58,63 @@ def get_last_observed_date():
             return row[0] if row else None
 
 
+def get_earliest_hole(cur, since):
+    """Earliest date in [since, yesterday] this city has no usable pm2_5 for, or None.
+
+    Two kinds of hole, one query: a date with no row at all (the upstream skipped
+    the day, or an ingest run never covered it) and a date whose row carries a NULL
+    pm2_5 (a thin-hours day under MIN_HOURS_PER_DAY). Both are re-fetchable, because
+    the API may have filled in since - and an upsert makes a re-fetch of a good day
+    free.
+
+    generate_series is the reason this is one query: LEFT JOIN against the dates
+    that *should* exist finds an absent row, which no scan of the stored rows can.
+    """
+    cur.execute(
+        """
+        SELECT MIN(d.day)::date FROM generate_series(%s::date, %s::date, '1 day') d(day)
+        LEFT JOIN observations o ON o.as_of = d.day AND o.city = %s
+        WHERE o.as_of IS NULL OR o.pm2_5 IS NULL
+        """,
+        (since, local_time.yesterday(), CITY),
+    )
+    return cur.fetchone()[0]
+
+
 def resolve_date_range():
     """
     Decide what date range to fetch.
 
     - First run (no data yet): backfill from INITIAL_START.
-    - Subsequent runs: resume the day after the latest stored observation.
+    - Subsequent runs: the earlier of "the day after the latest stored
+      observation" and "the earliest hole in the last RESCAN_DAYS days".
     - End date is always "yesterday", since the weather/air-quality
       archive APIs are historical and may not have a complete record
       for the current day yet.
+
+    The re-scan is what makes a hole temporary. A monotonic resume off MAX(as_of)
+    alone left every skipped or NULL day permanently behind the resume point;
+    RESCAN_DAYS bounds the re-read so it never re-fetches 700 days. Filling one is
+    still best-effort: if the upstream never serves that date, the next run simply
+    starts from it again, and every write is an upsert so a re-fetched good day is
+    a no-op.
     """
-    # ponytail: monotonic resume off MAX(as_of), so a day the archive served as
-    # NULL is never refetched - the row exists, the value stays missing, and the
-    # window frames null out around it. Correct for the steady state and it never
-    # re-reads 700 days. Upgrade path if coverage matters: start from the earliest
-    # date in the last 30 days that has a NULL pm2_5, else last_date + 1 day.
     last_date = get_last_observed_date()
-    yesterday = local_time.yesterday()
 
     if last_date is None:
-        start = datetime.strptime(INITIAL_START, "%Y-%m-%d").date()
-    else:
-        start = last_date + timedelta(days=1)
+        return datetime.strptime(INITIAL_START, "%Y-%m-%d").date(), local_time.yesterday()
 
-    end = yesterday
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            hole = get_earliest_hole(
+                cur, local_time.yesterday() - timedelta(days=RESCAN_DAYS))
 
-    return start, end
+    start = resume_start(last_date, hole)
+    if hole and start == hole:
+        print(f"Re-scanning from {hole}: earliest missing or NULL day in the last "
+              f"{RESCAN_DAYS} days (a hole the monotonic resume would skip forever).")
+
+    return start, local_time.yesterday()
 
 
 def fetch_and_aggregate_data(start_date, end_date):
@@ -114,14 +166,18 @@ def fetch_and_aggregate_data(start_date, end_date):
     pm2_5_values = aq_data["hourly"]["pm2_5"]
     pm10_values = aq_data["hourly"]["pm10"]
 
-    # Extract daily weather data
-    wx_times = wx_data["daily"]["time"]
-    temp_values = wx_data["daily"]["temperature_2m_mean"]
-    wind_values = wx_data["daily"]["wind_speed_10m_max"]
-    precip_values = wx_data["daily"]["precipitation_sum"]
+    # Extract daily weather data, keyed on the date string the loop below looks up.
+    # A dict rather than wx_times.index(date_str): that re-scanned the whole array
+    # once per day, which is invisible for a 1-day run and O(n^2) on a 700-day
+    # backfill - the one run where it matters.
+    weather = dict(zip(wx_data["daily"]["time"], zip(
+        wx_data["daily"]["temperature_2m_mean"],
+        wx_data["daily"]["wind_speed_10m_max"],
+        wx_data["daily"]["precipitation_sum"],
+    )))
 
     print(f"AQI hours: {len(pm2_5_values)}, missing: {sum(v is None for v in pm2_5_values)}")
-    print(f"Weather days: {len(wx_times)}")
+    print(f"Weather days: {len(weather)}")
 
     # Aggregate hourly to daily
     daily_data = {}
@@ -153,15 +209,9 @@ def fetch_and_aggregate_data(start_date, end_date):
     for date_str in sorted(daily_data.keys()):
         data = daily_data[date_str]
 
-        # Find corresponding weather data
-        try:
-            wx_idx = wx_times.index(date_str)
-            temp = temp_values[wx_idx]
-            wind = wind_values[wx_idx]
-            precip = precip_values[wx_idx]
-        except ValueError:
-            # Weather data might not exist for this date
-            temp = wind = precip = None
+        # Weather data might not exist for this date, which stays a NULL triple
+        # rather than a skip: the pm2_5 mean is the target and is usable without it.
+        temp, wind, precip = weather.get(date_str, (None, None, None))
 
         # A day with too few hours becomes NULL rather than a mean over a
         # window that isn't a day. The rest of the pipeline already handles
@@ -173,6 +223,18 @@ def fetch_and_aggregate_data(start_date, end_date):
         if pm2_5_avg is None or pm10_avg is None:
             print(f"  [skip] {date_str}: only {data['pm2_5_count']}h pm2_5 / "
                   f"{data['pm10_count']}h pm10 (need {MIN_HOURS_PER_DAY})")
+
+        # Implausible is the third form of the same case, and the only one that
+        # would otherwise be accepted silently: enough hours, arithmetic fine, wrong
+        # number. Checked on pm2_5 only - it is the scored target, and any upstream
+        # unit change or sentinel value hits both fields together, so guarding the
+        # one that enters the record catches the class. pm10 is a feature and would
+        # need its own bounds, which is more numbers to justify than it earns.
+        if pm2_5_avg is not None and not plausible_pm25(pm2_5_avg):
+            print(f"  [null] {date_str}: pm2_5 {pm2_5_avg:.1f} is outside "
+                  f"{PM25_MIN:g}-{PM25_MAX:g} ug/m3 (unit change or sentinel "
+                  f"upstream?)")
+            pm2_5_avg = None
 
         records_to_insert.append((
             CITY,      # city

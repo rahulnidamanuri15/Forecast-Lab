@@ -87,17 +87,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: 1/5 Ingest demand and temperature
+      - name: 1/6 Ingest demand and temperature
         run: python -m vericast.elec.ingest
 
-      - name: 2/5 Engineer features
+      - name: 2/6 Engineer features
         run: python -m vericast.elec.features
 
-      - name: 3/5 Score pending predictions
+      - name: 3/6 Leakage test
+        run: python -m vericast.elec.leakage_test
+
+      - name: 4/6 Score pending predictions
         run: python -m vericast.elec.score
 
-      - name: 4/5 Make new forecast
+      - name: 5/6 Make new forecast
         run: python -m vericast.elec.predict
 
-      - name: 5/5 Verify forecast is publishable
+      - name: 6/6 Verify forecast is publishable
         run: python -m vericast.elec.diagnose

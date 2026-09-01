@@ -21,11 +21,12 @@ def test_predictions_endpoint_success():
         mock_get_db.return_value.__enter__.return_value = mock_conn
         mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
 
-        # Mock the database response - prediction data
+        # Mock the database response - prediction data. Six columns: `source` is
+        # the last one, so a row can be told apart from a launch-backtest row.
         forecast_date = date.today()
         mock_cursor.fetchall.return_value = [
-            (forecast_date, 'lightgbm', 15.5, None, datetime.now(timezone.utc)),
-            (forecast_date, 'naive_baseline', 12.3, 12.3, datetime.now(timezone.utc))
+            (forecast_date, 'lightgbm', 15.5, None, datetime.now(timezone.utc), 'daily'),
+            (forecast_date, 'naive_baseline', 12.3, 12.3, datetime.now(timezone.utc), 'backtest')
         ]
 
         # Make the request. Deliberately unfiltered: the mock returns rows for
@@ -49,6 +50,8 @@ def test_predictions_endpoint_success():
         assert pred1["actual_pm2_5"] is None
         assert pred1["error"] is None
         assert "created_at" in pred1
+        # 'daily' is renamed `verified` on the way out, same word /evaluation uses.
+        assert pred1["source"] == "verified"
 
         # Check second prediction (naive_baseline)
         pred2 = data["predictions"][1]
@@ -58,9 +61,31 @@ def test_predictions_endpoint_success():
         assert pred2["actual_pm2_5"] == 12.3
         assert pred2["error"] == 0.0
         assert "created_at" in pred2
+        # The row the split exists for: a launch-backtest row is still returned,
+        # but a caller can now see it is not part of the published record.
+        assert pred2["source"] == "backtest"
 
         # Check count
         assert data["count"] == 2
+
+
+def test_predictions_selects_the_source_column():
+    """`source` has to be in the SELECT list, not just in the response dict.
+
+    Asserted on the SQL as well as on the payload because the mock returns
+    whatever tuple it is given: a handler that dropped the column from the query
+    would still pass the payload assertions above once the mock was updated.
+    """
+    with patch('app.get_db_connection') as mock_get_db:
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_get_db.return_value.__enter__.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchall.return_value = []
+
+        assert client.get("/predictions").status_code == 200
+        sql, _ = mock_cursor.execute.call_args[0]
+        assert "source" in sql
 
 def test_predictions_endpoint_scored_only():
     """Test that the predictions endpoint filters scored predictions correctly."""
@@ -74,7 +99,7 @@ def test_predictions_endpoint_scored_only():
         # Mock the database response - only scored predictions
         forecast_date = date.today()
         mock_cursor.fetchall.return_value = [
-            (forecast_date, 'naive_baseline', 12.3, 12.3, datetime.now(timezone.utc))
+            (forecast_date, 'naive_baseline', 12.3, 12.3, datetime.now(timezone.utc), 'daily')
         ]
 
         # Make the request with scored_only=true

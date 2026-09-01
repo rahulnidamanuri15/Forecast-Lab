@@ -11,8 +11,10 @@ Checks three invariants against `observations`, deriving expectations from
 
 Check 3 used to re-implement features.py's old `if i >= 6:` row-index logic,
 which meant it ratified the bug it was supposed to catch. It now asserts the
-full-window property that vericast/pm25/features.py's `COUNT(*) OVER wN`
-guarantees, so the two disagree if either drifts.
+full-window property that vericast/pm25/features.py's `COUNT(pm2_5) OVER wN`
+guarantees, so the two disagree if either drifts. (It counts the averaged column
+rather than `*` for the same reason `len(values)` here excludes NULLs - a
+thin-hours day is a present row with an absent value.)
 """
 import os
 import psycopg

@@ -7,10 +7,14 @@ same job with stronger guarantees:
   * `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND INTERVAL '1 day' PRECEDING` is
     date-addressed, not row-addressed, so it returns NULL across a date gap on
     its own - no explicit gap guard to forget.
-  * `COUNT(*) OVER w7 = 7` is stricter than the old row-index check: `if i >= 6`
+  * `COUNT(pm2_5) OVER w7 = 7` is stricter than the old row-index check: `if i >= 6`
     means "seven rows exist", not "seven consecutive days exist", so the old
     version averaged 7 rows whether or not they spanned 7 calendar days and
-    still called the result a 7-day mean. This refuses instead.
+    still called the result a 7-day mean. This refuses instead. It counts the
+    averaged column, not `*`: a thin-hours day is stored as a row with a NULL
+    value (ingest.py's MIN_HOURS_PER_DAY), which `AVG` skips - so `COUNT(*)`
+    would pass a 6-value mean off as a 7-day one, and disagree with
+    leakage_test.py's `len(values) == days`.
   * Look-ahead leakage is structurally unexpressible - a `RANGE ... PRECEDING`
     frame cannot reference a future row.
 
@@ -46,10 +50,10 @@ SELECT
     MAX(wind_speed_10m_max) OVER lag1,
     MAX(precipitation_sum) OVER lag1,
 
-    CASE WHEN COUNT(*) OVER w7  = 7  THEN AVG(pm2_5) OVER w7  END,
-    CASE WHEN COUNT(*) OVER w30 = 30 THEN AVG(pm2_5) OVER w30 END,
-    CASE WHEN COUNT(*) OVER w7  = 7  THEN AVG(pm10)  OVER w7  END,
-    CASE WHEN COUNT(*) OVER w30 = 30 THEN AVG(pm10)  OVER w30 END,
+    CASE WHEN COUNT(pm2_5) OVER w7  = 7  THEN AVG(pm2_5) OVER w7  END,
+    CASE WHEN COUNT(pm2_5) OVER w30 = 30 THEN AVG(pm2_5) OVER w30 END,
+    CASE WHEN COUNT(pm10)  OVER w7  = 7  THEN AVG(pm10)  OVER w7  END,
+    CASE WHEN COUNT(pm10)  OVER w30 = 30 THEN AVG(pm10)  OVER w30 END,
 
     EXTRACT(ISODOW FROM as_of)::int - 1,
     EXTRACT(MONTH  FROM as_of)::int,
@@ -122,22 +126,24 @@ WHERE o.city = %s
 
 
 def verify_alignment(cur):
-    """Assert the features(t) -> target(t+1) contract, gaps accounted for.
+    """Enforce the features(t) -> target(t+1) contract, gaps accounted for.
 
     Equality against the observed gap count rather than a tolerance, for the
     reason vericast/elec/features.py gives: a hardcoded "<= 1" pre-forgives the
-    next gap, and forgives a genuinely broken join just as quietly.
+    next gap, and forgives a genuinely broken join just as quietly. Raised rather
+    than asserted for the reason given there too - python -O erases `assert`.
     """
     cur.execute(GAP_DAYS_SQL, (CITY,))
     gaps = cur.fetchone()[0]
     cur.execute(ORPHAN_ROWS_SQL, (CITY,))
     orphans = cur.fetchone()[0]
 
-    assert orphans == gaps, (
-        f"{orphans} feature rows have no next-day target but only {gaps} "
-        f"observation gap(s) explain it - the features(t) -> target(t+1) "
-        f"contract is broken"
-    )
+    if orphans != gaps:
+        raise AssertionError(
+            f"{orphans} feature rows have no next-day target but only {gaps} "
+            f"observation gap(s) explain it - the features(t) -> target(t+1) "
+            f"contract is broken"
+        )
     print(f"  Alignment OK: {orphans} orphan row(s), all explained by "
           f"{gaps} observation gap(s)")
 

@@ -3,10 +3,24 @@ import numpy as np
 import psycopg
 from dotenv import load_dotenv
 
+from vericast import PM25_CITY_OF_RECORD
+
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 CITY = os.getenv("CITY", "Nagpur")
+
+# model_performance is keyed UNIQUE(score_date, model) with no city column (see
+# vericast/__init__.py), so a run under a different CITY would upsert Pune's
+# errors onto Nagpur's rows and overwrite the published record in place. The
+# predictions themselves are keyed on city and would be fine, which is what makes
+# this quiet: /leaderboard would just start serving a blend under one city's name.
+if CITY != PM25_CITY_OF_RECORD:
+    raise RuntimeError(
+        f"CITY={CITY!r} but model_performance is keyed without a city and holds "
+        f"{PM25_CITY_OF_RECORD!r}'s record; scoring would overwrite it in place. "
+        f"Adding a city column plus UNIQUE(city, score_date, model) is the fix."
+    )
 
 # Attach the actual observation to every prediction still waiting for one and
 # report what changed. Deliberately not scoped to "yesterday": if a day's run

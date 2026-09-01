@@ -93,10 +93,15 @@ def train_and_save():
     print(f"Training production LightGBM on {len(X)} samples "
           f"({feature_dates[0]} -> {feature_dates[-1]})")
     print(f"Feature matrix shape: {X.shape} ({len(FEATURE_COLUMNS)} columns expected)")
-    assert X.shape[1] == len(FEATURE_COLUMNS), (
-        f"Feature count mismatch: got {X.shape[1]}, expected {len(FEATURE_COLUMNS)}. "
-        "The SQL column order and FEATURE_COLUMNS must match."
-    )
+    # Raised, not asserted, for the reason vericast/elec/train.py gives: python -O
+    # erases `assert`, and a silently-shuffled feature matrix trains a model that
+    # scores plausibly and is wrong every day.
+    if X.shape[1] != len(FEATURE_COLUMNS):
+        raise AssertionError(
+            f"Feature count mismatch: got {X.shape[1]}, expected "
+            f"{len(FEATURE_COLUMNS)}. The SQL column order and FEATURE_COLUMNS "
+            f"must match."
+        )
 
     # Retrain gate before anything is written. A refused retrain leaves the
     # incumbent artifact untouched and exits 0 - see vericast/gate.py.

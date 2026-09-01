@@ -11,18 +11,25 @@ from datetime import timedelta
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import MODEL_PM25 as MODEL_PATH, PM25_STALE_LIMIT_DAYS, local_time
+from vericast import (
+    MODEL_PM25 as MODEL_PATH,
+    PM25_MAX,
+    PM25_MIN,
+    PM25_STALE_LIMIT_DAYS,
+    local_time,
+)
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 CITY = os.getenv("CITY", "Nagpur")
 
-# Nagpur's observed 2023-2026 daily CAMS range is roughly 4-160 ug/m3. Bounds are
-# wide enough for a bad Diwali week, tight enough that a unit error or a sign flip
-# fails instead of publishing. Nothing anywhere else in the stack looks at the
-# forecast's *value* - not app.py, not verify_deployment_readiness.py - so this is
-# the only gate between a -40 ug/m3 prediction and the public record.
-MIN_PM25, MAX_PM25 = 1.0, 500.0
+# Imported, not defined here, for the same reason as STALE_LIMIT_DAYS below:
+# pm25/ingest.py gates the incoming *observation* on these bounds and this gates
+# the outgoing *forecast*, and two copies could drift into a publish gate looser
+# than the ingest one. Still the only check on the forecast's value - nothing in
+# app.py or verify_deployment_readiness.py looks at it - so this stays the gate
+# between a -40 ug/m3 prediction and the public record.
+MIN_PM25, MAX_PM25 = PM25_MIN, PM25_MAX
 
 SIGMA_LIMIT = 3.0   # forecast must sit within 3 sd of the trailing 30-day mean
 
@@ -35,6 +42,18 @@ STALE_LIMIT_DAYS = PM25_STALE_LIMIT_DAYS
 # raising, so without a completeness check here a day that published only the
 # naive baseline exits 0 and the pipeline treats it as a full run.
 EXPECTED_MODELS = {"naive_baseline", "lightgbm"}
+
+
+def expected_models(latest_pm25):
+    """The models predict.py would actually have published for this run.
+
+    It skips naive_baseline when the latest observation carries a NULL pm2_5 - a
+    thin-hours day under ingest.py's MIN_HOURS_PER_DAY - rather than publishing a
+    NULL forecast, so demanding it here would turn a deliberate degradation into a
+    red pipeline. lightgbm is NOT excused for NULL features: check 4 already fails
+    on that, and one report of a problem is the right number.
+    """
+    return EXPECTED_MODELS - ({"naive_baseline"} if latest_pm25 is None else set())
 
 
 def check(label, ok, detail=""):
@@ -60,11 +79,18 @@ def main():
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            # 2. Latest observation date
+            # 2. Latest observation date, and its value: a thin-hours day is a
+            #    present row with a NULL pm2_5 (ingest.py's MIN_HOURS_PER_DAY),
+            #    which is exactly when predict.py skips naive_baseline.
             cur.execute(
-                "SELECT MAX(as_of) FROM observations WHERE city = %s", (CITY,)
+                """
+                SELECT as_of, pm2_5 FROM observations
+                WHERE city = %s ORDER BY as_of DESC LIMIT 1
+                """,
+                (CITY,),
             )
-            latest_obs = cur.fetchone()[0]
+            obs_row = cur.fetchone()
+            latest_obs, latest_pm25 = obs_row if obs_row else (None, None)
             print(f"  Latest observation date: {latest_obs}")
 
             # 2b. Is the upstream source still moving? Ported from
@@ -154,16 +180,23 @@ def main():
             cur.execute(
                 """
                 SELECT model, predicted_pm2_5 FROM predictions
-                WHERE city = %s AND forecast_date = %s
+                WHERE city = %s AND forecast_date = %s AND source = 'daily'
                 """,
                 (CITY, expected_date),
             )
             published = dict(cur.fetchall())
             print(f"  Expected forecast_date:  {expected_date}")
 
-            missing = EXPECTED_MODELS - published.keys()
+            # Expect only what predict.py would actually have published; the rule
+            # lives in expected_models() above so a test can reach it without a DB.
+            expect = expected_models(latest_pm25)
+            if "naive_baseline" not in expect:
+                print(f"  naive_baseline not expected: {latest_obs} has NULL pm2_5 "
+                      f"(too few hours ingested), so predict.py skipped it")
+
+            missing = expect - published.keys()
             all_ok &= check(
-                f"All {len(EXPECTED_MODELS)} models published for {expected_date}",
+                f"All {len(expect)} expected models published for {expected_date}",
                 not missing,
                 f"missing: {sorted(missing)}" if missing else
                 ", ".join(f"{m}={published[m]:.1f}" for m in sorted(published)
