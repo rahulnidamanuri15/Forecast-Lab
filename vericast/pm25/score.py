@@ -3,35 +3,32 @@ import numpy as np
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import PM25_CITY_OF_RECORD
+from vericast import require_city_of_record
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-CITY = os.getenv("CITY", "Nagpur")
 
-# model_performance is keyed UNIQUE(score_date, model) with no city column (see
-# vericast/__init__.py), so a run under a different CITY would upsert Pune's
-# errors onto Nagpur's rows and overwrite the published record in place. The
-# predictions themselves are keyed on city and would be fine, which is what makes
-# this quiet: /leaderboard would just start serving a blend under one city's name.
-if CITY != PM25_CITY_OF_RECORD:
-    raise RuntimeError(
-        f"CITY={CITY!r} but model_performance is keyed without a city and holds "
-        f"{PM25_CITY_OF_RECORD!r}'s record; scoring would overwrite it in place. "
-        f"Adding a city column plus UNIQUE(city, score_date, model) is the fix."
-    )
+# model_performance is keyed UNIQUE(score_date, model) with no city column, so a
+# run under a different CITY would upsert another city's errors onto Nagpur's rows
+# and overwrite the published record in place. The predictions themselves are keyed
+# on city and would be fine, which is what makes this quiet.
+CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
 
-# Attach the actual observation to every prediction still waiting for one and
-# report what changed. Deliberately not scoped to "yesterday": if a day's run
-# was missed, that row would otherwise stay pending forever. Driven purely off
-# forecast_date == observations.as_of, so there is no timezone decision here.
+# Attach the actual observation to every prediction still waiting for one.
+# Deliberately not scoped to "yesterday": if a day's run was missed, that row would
+# otherwise stay pending forever. Driven purely off forecast_date ==
+# observations.as_of, so there is no timezone decision here.
 #
 # predicted_pm2_5 IS NOT NULL because that column is nullable: scoring a NULL
-# prediction makes np.mean below return NaN, and a NaN mae in model_performance
-# 500s /leaderboard on JSON serialisation until the row is deleted by hand.
-# vericast/pm25/predict.py no longer writes one, but a row from before that
-# guard must not be scored either.
+# prediction makes np.mean below return NaN, and a NaN mae 500s /leaderboard on
+# JSON serialisation until the row is deleted by hand.
+#
+# source = 'daily' so this only ever fills in rows that were published before the
+# outcome. Backtest rows arrive with their actual already set, so they never match
+# `actual_pm2_5 IS NULL` today - but that is the writer's habit, not a constraint,
+# and one backtest inserted without its actual would otherwise be scored here and
+# averaged into the published record as a verified day.
 SCORE_SQL = """
 UPDATE predictions p
 SET actual_pm2_5 = o.pm2_5
@@ -39,17 +36,16 @@ FROM observations o
 WHERE o.city = p.city
   AND o.as_of = p.forecast_date
   AND p.city = %s
+  AND p.source = 'daily'
   AND p.actual_pm2_5 IS NULL
   AND p.predicted_pm2_5 IS NOT NULL
   AND o.pm2_5 IS NOT NULL
 RETURNING p.forecast_date, p.model, p.predicted_pm2_5, o.pm2_5;
 """
 
-# The INSERT does not name `source`: vericast/schema.py declares
-# DEFAULT 'daily', so the honest writer never has to. The DO UPDATE branch does
-# have to - a DEFAULT applies to inserts only, so a daily score landing on a
-# score_date a backtest already wrote would keep source='backtest' and stay
-# filtered out of /leaderboard forever.
+# `source` forced in the DO UPDATE branch: schema.py's DEFAULT 'daily' applies to
+# inserts only, so a daily score landing on a score_date a backtest already wrote
+# would keep source='backtest' and stay filtered out of /leaderboard forever.
 UPSERT_PERF_SQL = """
 INSERT INTO model_performance (score_date, model, mae, rmse, sample_size)
 VALUES (%s, %s, %s, %s, %s)

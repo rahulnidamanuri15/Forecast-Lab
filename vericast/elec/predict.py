@@ -8,6 +8,10 @@ therefore looser than PM2.5's.
 
 Three models compete: naive_baseline (persistence), seasonal_naive (same weekday
 last week, which in a power grid beats persistence on Sundays), and lightgbm.
+
+Every publish path is gated *before* its commit: staleness, then plausibility.
+diagnose.py (step 6/6) still range-checks what was written, but it cannot be the
+only gate - by the time it runs, a bad row is public.
 """
 import os
 import psycopg
@@ -15,7 +19,15 @@ import lightgbm as lgb
 from datetime import timedelta
 from dotenv import load_dotenv
 
-from vericast import ELEC_STALE_LIMIT_DAYS, MODEL_ELEC as MODEL_PATH, local_time
+from vericast import (
+    ELEC_MAX_MW,
+    ELEC_MIN_MW,
+    ELEC_STALE_LIMIT_DAYS,
+    MODEL_ELEC as MODEL_PATH,
+    local_time,
+    refuse_implausible,
+    refuse_stale,
+)
 from vericast.elec.train import FEATURE_COLUMNS
 
 load_dotenv()
@@ -23,13 +35,10 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 STATE = os.getenv("STATE", "Maharashtra")
 
-# Same limit the diagnostic gate enforces (vericast/__init__.py); this one only warns.
-STALE_WARN_DAYS = ELEC_STALE_LIMIT_DAYS
+UNIT = "MW"
 
-# `source` omitted from the INSERT (schema.py declares DEFAULT 'daily') and forced
-# in the DO UPDATE, as in vericast/pm25/predict.py: a DEFAULT applies to inserts
-# only, so a real forecast landing on a date the launch backtest seeded would keep
-# source='backtest' and never count towards the published-then-verified record.
+# `source` forced in the DO UPDATE for the reason vericast/pm25/predict.py's
+# upsert_sql explains: schema.py's DEFAULT 'daily' applies to inserts only.
 UPSERT_SQL = """
 INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model)
 VALUES (%s, %s, %s, %s)
@@ -86,23 +95,21 @@ def make_daily_prediction():
 
         as_of, peak_demand_mw = row
         forecast_date = as_of + timedelta(days=1)
-        staleness_days = (today - as_of).days
 
-        if staleness_days > STALE_WARN_DAYS:
-            print(
-                f"[WARN] Most recent observation is from {as_of}, which is "
-                f"{staleness_days} day(s) old (the demand mirror normally lags "
-                f"2-4 days; more than {STALE_WARN_DAYS} suggests it has stalled). "
-                f"Forecasting for {forecast_date} based on stale data."
-            )
-        else:
-            print(f"Latest observation {as_of} is {staleness_days} day(s) old "
-                  f"(normal for this source).")
+        # Raises past the limit, before anything is published. 2-4 days is the
+        # normal lag for this mirror, so only past ELEC_STALE_LIMIT_DAYS has it
+        # actually stalled.
+        stale_days = refuse_stale(as_of, today, ELEC_STALE_LIMIT_DAYS, "electricity")
+        print(f"Latest observation {as_of} is {stale_days} day(s) old "
+              f"(normal for this source).")
 
         print(f"Making prediction for {forecast_date} based on {as_of}'s observation")
 
         # 1/3 naive persistence: tomorrow == the latest actual.
+        peak_demand_mw = refuse_implausible(peak_demand_mw, ELEC_MIN_MW, ELEC_MAX_MW,
+                                            "naive_baseline", UNIT)
         cur.execute(UPSERT_SQL, (STATE, forecast_date, peak_demand_mw, "naive_baseline"))
+
         conn.commit()
         print(f"[OK] Stored naive_baseline prediction for {forecast_date}: "
               f"{peak_demand_mw:.0f} MW")
@@ -131,31 +138,37 @@ def make_daily_prediction():
                 print("[WARN] demand_lag_6 is NULL (date gap within the last week); "
                       "skipping seasonal_naive.")
             else:
+                seasonal = refuse_implausible(seasonal, ELEC_MIN_MW, ELEC_MAX_MW,
+                                              "seasonal_naive", UNIT)
                 cur.execute(UPSERT_SQL, (STATE, forecast_date, seasonal, "seasonal_naive"))
+
                 conn.commit()
                 print(f"[OK] Stored seasonal_naive prediction for {forecast_date}: "
                       f"{seasonal:.0f} MW")
 
-            # 3/3 LightGBM: needs every feature present.
-            if lgbm_model is None:
-                pass
-            elif any(v is None for v in feature_values):
-                missing = [name for name, v in named.items() if v is None]
-                print(f"[WARN] Latest features row has NULL values {missing} (likely a "
-                      f"date gap); skipping LightGBM forecast to avoid a garbage prediction.")
-            else:
-                import numpy as np
-                X = np.array([feature_values], dtype=float)
-                lgbm_pred = float(lgbm_model.predict(X)[0])
+            # 3/3 LightGBM: needs every feature present. Guarded rather than an
+            # empty `if lgbm_model is None: pass` first arm - load_lightgbm_model()
+            # has already printed the missing-artifact warning, so there was
+            # nothing for that branch to do. Same shape as the PM2.5 twin.
+            if lgbm_model is not None:
+                if any(v is None for v in feature_values):
+                    missing = [name for name, v in named.items() if v is None]
+                    print(f"[WARN] Latest features row has NULL values {missing} (likely a "
+                          f"date gap); skipping LightGBM forecast to avoid a garbage prediction.")
+                else:
+                    import numpy as np
+                    X = np.array([feature_values], dtype=float)
+                    lgbm_pred = float(lgbm_model.predict(X)[0])
 
-                cur.execute(UPSERT_SQL, (STATE, forecast_date, lgbm_pred, "lightgbm"))
-                conn.commit()
-                print(f"[OK] Stored lightgbm prediction for {forecast_date}: "
-                      f"{lgbm_pred:.0f} MW")
+                    lgbm_pred = refuse_implausible(lgbm_pred, ELEC_MIN_MW, ELEC_MAX_MW,
+                                                   "lightgbm", UNIT)
+                    cur.execute(UPSERT_SQL, (STATE, forecast_date, lgbm_pred, "lightgbm"))
+                    conn.commit()
+                    print(f"[OK] Stored lightgbm prediction for {forecast_date}: "
+                          f"{lgbm_pred:.0f} MW")
 
-        # Scoring is vericast/elec/score.py's job (step 4 of the daily job,
-        # before this one). It scores *every* pending row, so a missed day
-        # self-heals; a second copy of that rule here would only drift.
+        # Scoring is vericast/elec/score.py's job (step 4, before this one). It
+        # scores *every* pending row, so a missed day self-heals.
 
         return True
 

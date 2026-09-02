@@ -11,7 +11,7 @@ import lightgbm as lgb
 from dotenv import load_dotenv
 
 from vericast import MODEL_ELEC as MODEL_PATH
-from vericast.gate import challenger_ships
+from vericast.gate import challenger_ships, record_training_window
 
 load_dotenv()
 
@@ -95,9 +95,8 @@ def train_and_save():
     print(f"Training production LightGBM on {len(X)} samples "
           f"({feature_dates[0]} -> {feature_dates[-1]})")
     print(f"Feature matrix shape: {X.shape} ({len(FEATURE_COLUMNS)} columns expected)")
-    # Raised, not asserted: python -O erases `assert`, and this is the only check
-    # that the SQL column order still matches FEATURE_COLUMNS. A mismatch trains a
-    # model on shuffled features that scores plausibly and is wrong every day.
+    # Raised, not asserted: python -O erases `assert`, and a silently-shuffled
+    # feature matrix trains a model that scores plausibly and is wrong every day.
     if X.shape[1] != len(FEATURE_COLUMNS):
         raise AssertionError(
             f"Feature count mismatch: got {X.shape[1]}, expected "
@@ -105,12 +104,12 @@ def train_and_save():
             f"must match."
         )
 
-    # Retrain gate before anything is written. A refused retrain leaves the
-    # incumbent artifact untouched and exits 0 - see vericast/gate.py.
+    # A refused retrain leaves the incumbent artifact untouched and exits 0.
     if not challenger_ships(X, y, PARAMS, NUM_BOOST_ROUND,
                             FEATURE_COLUMNS.index("demand_lag_1"),
                             incumbent_path=MODEL_PATH,
-                            feature_names=FEATURE_COLUMNS, unit=UNIT):
+                            feature_names=FEATURE_COLUMNS, unit=UNIT,
+                            dates=feature_dates):
         print(f"[SKIP] Keeping the existing model at {MODEL_PATH}.")
         return None
 
@@ -119,6 +118,8 @@ def train_and_save():
 
     model.save_model(MODEL_PATH)
     print(f"[OK] Saved production model to {MODEL_PATH}")
+    # After the artifact, as in pm25/train.py.
+    record_training_window(MODEL_PATH, feature_dates, len(X))
 
     reloaded = lgb.Booster(model_file=MODEL_PATH)
     check_pred = reloaded.predict(X[-1:])

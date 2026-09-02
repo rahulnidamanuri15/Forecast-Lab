@@ -1,34 +1,29 @@
 """Engineer the point-in-time electricity feature store.
 
-One idempotent INSERT ... SELECT. This is the design both feature stores use -
-vericast/pm25/features.py was ported to it from a Python row-loop - because
-Postgres window frames give guarantees a loop cannot:
+One idempotent INSERT ... SELECT. Postgres window frames carry the guarantees:
 
   * `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND INTERVAL '1 day' PRECEDING` is
     date-addressed, not row-addressed, so it returns NULL across a date gap on
     its own - no explicit gap guard to forget. (Maharashtra has one such gap:
     2025-05-21 -> 2025-05-24.)
-  * `COUNT(peak_demand_mw) OVER w7 = 7` is stricter than a row-index check:
-    counting rows averages the previous 7 *rows* whether or not they are 7
-    consecutive days, silently spanning gaps. This refuses instead. It counts the
-    averaged column rather than `*` so a NULL value counts as absent, which
-    matters for temp_roll_7: temperature_2m_mean is nullable, and `AVG` skips
-    NULLs, so `COUNT(*)` would label a 6-value mean a 7-day one.
+  * `COUNT(peak_demand_mw) OVER w7 = 7` refuses to call an incomplete window a
+    7-day mean. It counts the averaged column rather than `*` so a NULL value
+    counts as absent, which matters for temp_roll_7: temperature_2m_mean is
+    nullable and `AVG` skips NULLs.
   * Look-ahead leakage is structurally unexpressible - a `RANGE ... PRECEDING`
-    frame cannot reference a future row. That is a claim about this SQL as
-    written, though, not about the rows in the table, so
-    vericast/elec/leakage_test.py re-derives every stored value from the
-    observations by calendar date and the daily job runs it as its own step -
-    the same arrangement vericast/pm25/ has. The complementary check is the
-    features(t) -> target(t+1) *join*, which verify_alignment() below runs at the
-    end of every engineer_features() call, so it fires on the daily cron and not
-    only in tests/test_feature_alignment.py on push.
+    frame cannot reference a future row. That is a claim about this SQL, not about
+    the rows in the table, so leakage_test.py re-derives every stored value from
+    the observations by calendar date as its own pipeline step, and
+    verify_alignment() below checks the complementary features(t) -> target(t+1)
+    *join* at the end of every engineer_features() call.
 
 Full recompute every run, so changing a feature definition needs no backfill.
 """
 import os
 import psycopg
 from dotenv import load_dotenv
+
+from vericast import alignment_sql, verify_alignment as check_alignment
 
 load_dotenv()
 
@@ -99,71 +94,13 @@ ON CONFLICT (state, as_of) DO UPDATE SET
 """
 
 
-# Every feature row must have a next-day observation to be the target of, except
-# where the observation series itself has a hole. Both counts come from the same
-# shape so they can be compared directly: an orphan is only excusable if a gap
-# explains it.
-#
-# The join half of the daily leakage gate; leakage_test.py is the value half, and
-# neither substitutes for the other. This one runs inline here rather than as its
-# own step so it fires before the SQL above can hand a broken join to predict.py.
-ORPHAN_ROWS_SQL = """
-SELECT COUNT(*)
-FROM electricity_features f
-WHERE f.state = %s
-  AND f.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
-                 FROM electricity_observations WHERE state = f.state)
-  AND NOT EXISTS (
-      SELECT 1 FROM electricity_observations o
-      WHERE o.state = f.state
-        AND o.as_of = f.as_of + INTERVAL '1 day'
-  )
-"""
-
-GAP_DAYS_SQL = """
-SELECT COUNT(*)
-FROM electricity_observations o
-WHERE o.state = %s
-  AND o.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
-                 FROM electricity_observations WHERE state = o.state)
-  AND NOT EXISTS (
-      SELECT 1 FROM electricity_observations n
-      WHERE n.state = o.state
-        AND n.as_of = o.as_of + INTERVAL '1 day'
-  )
-"""
+GAP_DAYS_SQL, ORPHAN_ROWS_SQL = alignment_sql(
+    "electricity_features", "electricity_observations", "state")
 
 
 def verify_alignment(cur):
-    """Enforce the features(t) -> target(t+1) contract, gaps accounted for.
-
-    Equality, not a tolerance: hardcoding "<= 1" for Maharashtra's known
-    2025-05-21 -> 2025-05-24 hole absorbs the next gap silently, and absorbs a
-    genuinely broken join just as quietly. Deriving the expected count from the
-    observations means a NEW gap fails here - loudly, on the day it appears -
-    rather than being pre-forgiven.
-
-    Raised, not asserted. This is a data-integrity gate on the daily path, and
-    `assert` is erased by python -O / PYTHONOPTIMIZE=1: the one interpreter flag
-    someone adds for speed would turn every gate in this pipeline into a no-op
-    that still exits 0. AssertionError keeps the type and message a caller may
-    already match on. Same reasoning in vericast/pm25/features.py and both
-    train.py modules; the remaining bare asserts are all in `__main__`
-    self-checks, where being erased under -O costs nothing.
-    """
-    cur.execute(GAP_DAYS_SQL, (STATE,))
-    gaps = cur.fetchone()[0]
-    cur.execute(ORPHAN_ROWS_SQL, (STATE,))
-    orphans = cur.fetchone()[0]
-
-    if orphans != gaps:
-        raise AssertionError(
-            f"{orphans} feature rows have no next-day target but only {gaps} "
-            f"observation gap(s) explain it - the features(t) -> target(t+1) "
-            f"contract is broken"
-        )
-    print(f"  Alignment OK: {orphans} orphan row(s), all explained by "
-          f"{gaps} observation gap(s)")
+    """This state's alignment check. See vericast.verify_alignment for the contract."""
+    check_alignment(cur, GAP_DAYS_SQL, ORPHAN_ROWS_SQL, STATE)
 
 
 def engineer_features():
@@ -191,10 +128,8 @@ def engineer_features():
                 print(f"  NULL demand_roll_7_mean: {no_roll7} (first 6 days + gap-spanning windows)")
                 print(f"  NULL demand_roll_30_mean: {no_roll30} (first 29 days + gap-spanning windows)")
 
-                # Runs inside the daily job's "Engineer features" step, right
-                # after the SQL that could break it. An AssertionError here exits
-                # non-zero, so the pipeline stops before predict.py publishes a
-                # forecast built on a broken join.
+                # An AssertionError here exits non-zero, so the pipeline stops
+                # before predict.py publishes a forecast built on a broken join.
                 verify_alignment(cur)
     except Exception as e:
         print(f"Error engineering electricity features: {e}")

@@ -152,10 +152,12 @@ dmypy.json
 cython_debug
 
 # VeriCast specific
-# NOTE: models/lightgbm_model.txt and models/lightgbm_elec_model.txt are
-# deliberately NOT ignored - weekly-retrain.yml commits them back to the repo,
-# and daily-pipeline.yml reads them from the checkout. Ignoring either would
-# break that model handoff.
+# NOTE: models/lightgbm_model.txt, models/lightgbm_elec_model.txt and their
+# .window.json sidecars are deliberately NOT ignored - weekly-retrain.yml
+# commits them back to the repo with `git add models/`, and daily-pipeline.yml
+# reads them from the checkout. Ignoring any of them would break that model
+# handoff, and an ignored sidecar would silently leave the gate reporting
+# comparability against the previous model's training window.
 
 # IDE
 .vscode/

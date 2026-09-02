@@ -77,3 +77,22 @@ def test_the_publish_gates_share_the_ingest_bounds():
 
     assert (elec_diagnose.MIN_MW, elec_diagnose.MAX_MW) == (ELEC_MIN_MW, ELEC_MAX_MW)
     assert (pm25_diagnose.MIN_PM25, pm25_diagnose.MAX_PM25) == (PM25_MIN, PM25_MAX)
+
+
+def test_the_model_allowlists_agree():
+    """Three hand-maintained model sets per target, with nothing tying them.
+
+    diagnose.EXPECTED_MODELS decides which missing forecast is a failure, app's
+    *_MODELS decides which `model=` query is accepted, and the description dicts
+    label them. Add a model to one and not the others and the failures are all
+    quiet: no diagnose complaint for a model that never published, a 400 on a model
+    that does, and an empty description string instead of an error.
+    """
+    import app
+    from vericast.elec import diagnose as elec_diagnose
+    from vericast.pm25 import diagnose as pm25_diagnose
+
+    assert (pm25_diagnose.EXPECTED_MODELS == app.PM25_MODELS
+            == set(app.MODEL_DESCRIPTIONS))
+    assert (elec_diagnose.EXPECTED_MODELS == app.ELEC_MODELS
+            == set(app.ELEC_MODEL_DESCRIPTIONS))

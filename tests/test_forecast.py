@@ -1,14 +1,14 @@
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from datetime import date, datetime, timezone
 
-# Import the app
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import app
+from conftest import wire_cursor
 
 STATE = os.getenv("STATE", "Maharashtra")
 
@@ -16,14 +16,9 @@ client = TestClient(app)
 
 def test_forecast_endpoint_lightgbm_success():
     """Test that the forecast endpoint returns 200 for lightgbm model."""
-    # Mock database connection and cursor
     with patch('app.get_db_connection') as mock_get_db:
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_get_db.return_value.__enter__.return_value = mock_conn
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor = wire_cursor(mock_get_db)
 
-        # Mock the database response - forecast data
         forecast_date = date.today()
         mock_cursor.fetchone.return_value = [
             forecast_date,  # forecast_date
@@ -34,10 +29,8 @@ def test_forecast_endpoint_lightgbm_success():
             'daily',        # source
         ]
 
-        # Make the request
         response = client.get("/forecast?model=lightgbm")
 
-        # Assertions
         assert response.status_code == 200
         data = response.json()
         assert data["city"] == "Nagpur"
@@ -55,14 +48,9 @@ def test_forecast_endpoint_lightgbm_success():
 
 def test_forecast_endpoint_naive_baseline_success():
     """Test that the forecast endpoint returns 200 for naive_baseline model."""
-    # Mock database connection and cursor
     with patch('app.get_db_connection') as mock_get_db:
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_get_db.return_value.__enter__.return_value = mock_conn
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor = wire_cursor(mock_get_db)
 
-        # Mock the database response - forecast data
         forecast_date = date.today()
         mock_cursor.fetchone.return_value = [
             forecast_date,  # forecast_date
@@ -73,10 +61,8 @@ def test_forecast_endpoint_naive_baseline_success():
             'daily',        # source
         ]
 
-        # Make the request
         response = client.get("/forecast?model=naive_baseline")
 
-        # Assertions
         assert response.status_code == 200
         data = response.json()
         assert data["city"] == "Nagpur"
@@ -88,10 +74,8 @@ def test_forecast_endpoint_naive_baseline_success():
 
 def test_forecast_endpoint_invalid_model():
     """Test that the forecast endpoint handles invalid model parameters."""
-    # Make the request with invalid model
     response = client.get("/forecast?model=invalid_model")
 
-    # Assertions
     assert response.status_code == 400
     data = response.json()
     assert "detail" in data
@@ -99,20 +83,13 @@ def test_forecast_endpoint_invalid_model():
 
 def test_forecast_endpoint_no_data():
     """Test that the forecast endpoint handles missing forecast data."""
-    # Mock database connection to return no data
     with patch('app.get_db_connection') as mock_get_db:
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_get_db.return_value.__enter__.return_value = mock_conn
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor = wire_cursor(mock_get_db)
 
-        # Mock the database response - no data
         mock_cursor.fetchone.return_value = None
 
-        # Make the request
         response = client.get("/forecast?model=lightgbm")
 
-        # Assertions
         assert response.status_code == 404
         data = response.json()
         assert "detail" in data
@@ -120,14 +97,11 @@ def test_forecast_endpoint_no_data():
 
 def test_forecast_endpoint_database_error():
     """Test that the forecast endpoint handles database errors."""
-    # Mock database connection to raise an exception
     with patch('app.get_db_connection') as mock_get_db:
         mock_get_db.side_effect = Exception("Database connection failed")
 
-        # Make the request
         response = client.get("/forecast?model=lightgbm")
 
-        # Assertions
         assert response.status_code == 500
         data = response.json()
         assert "detail" in data
@@ -138,19 +112,10 @@ def test_forecast_endpoint_database_error():
 # arithmetic are the parts that can silently go wrong.
 # --------------------------------------------------------------------------
 
-def _mock_cursor(mock_get_db):
-    """Wire a MagicMock cursor into the `with get_db_connection()` pattern."""
-    mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_get_db.return_value.__enter__.return_value = mock_conn
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-    return mock_cursor
-
-
 def test_electricity_forecast_success():
     """A pending electricity forecast comes back with MW units and status."""
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         forecast_date = date(2026, 8, 23)
         cur.fetchone.return_value = [
             forecast_date, 25923.9, None, 'lightgbm',
@@ -175,7 +140,7 @@ def test_electricity_forecast_success():
 def test_electricity_forecast_seasonal_naive_allowed():
     """seasonal_naive is a published electricity model, so it must not 400."""
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchone.return_value = [
             date(2026, 8, 23), 24907.0, 24907.0, 'seasonal_naive',
             datetime.now(timezone.utc), 'daily'
@@ -210,7 +175,7 @@ def test_electricity_evaluation_metrics():
     so a backtest row can never be averaged into the published record.
     """
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = [
             ('lightgbm', 'daily', 2, 0, 100.0, 100.0, 10.0),
             ('naive_baseline', 'daily', 2, 0, 100.0, 141.4213562, 10.0),
@@ -251,7 +216,7 @@ def test_electricity_evaluation_metrics():
 def test_electricity_evaluation_splits_provenance():
     """MAPE too, not just MAE/RMSE, stays inside its own provenance block."""
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = [
             ('lightgbm', 'daily', 3, 0, 500.0, 600.0, 2.0),
             ('lightgbm', 'backtest', 700, 0, 300.0, 400.0, 1.1),
@@ -274,7 +239,7 @@ def test_electricity_evaluation_rejects_negative_days():
 
 def test_electricity_evaluation_no_data():
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = []
 
         response = client.get("/electricity/evaluation")
@@ -292,7 +257,7 @@ def test_electricity_leaderboard_sorts_and_filters_daily():
     filter is asserted on the SQL text.
     """
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = [
             ('naive_baseline', 900.0, 1100.0, 3.4, 1, date(2026, 8, 23)),
             ('seasonal_naive', None, None, None, 1, date(2026, 8, 23)),
@@ -318,7 +283,7 @@ def test_electricity_leaderboard_sorts_and_filters_daily():
 
 def test_electricity_leaderboard_empty_is_404():
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = []
 
         response = client.get("/electricity/leaderboard")
@@ -330,7 +295,7 @@ def test_electricity_leaderboard_empty_is_404():
 def test_electricity_history_returns_oldest_first_and_binds_the_limit():
     """Same contract as /history: DESC in SQL, reversed for charting, bound LIMIT."""
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = [
             (date(2026, 8, 23), 27000.0, 480.0, 29.5, 34.0),
             (date(2026, 8, 22), 26500.0, 471.0, 28.9, 33.2),
@@ -353,7 +318,7 @@ def test_electricity_history_empty_is_404_not_500():
     """The 404 is raised inside the try, so this holds `except HTTPException: raise`
     in place - without it db_error() turns an empty table into a 500."""
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = []
 
         response = client.get("/electricity/history?days=30")
@@ -371,7 +336,7 @@ def test_electricity_history_rejects_zero_days():
 def test_electricity_predictions_error_pct():
     """error_pct is what the dashboard bands its badges on."""
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = [
             (date(2026, 8, 22), 'lightgbm', 27000.0, 28000.0, datetime.now(timezone.utc), 'daily'),
             (date(2026, 8, 23), 'lightgbm', 25000.0, None, datetime.now(timezone.utc), 'backtest'),

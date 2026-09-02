@@ -1,24 +1,27 @@
 """Retrain gate: refuse to ship a model that is broken.
 
-weekly-retrain.yml used to retrain, commit the bytes, and push - no holdout, no
-check, no rollback. A Sunday where upstream shipped garbage silently replaced a
-working model and the daily pipeline picked it up on next checkout.
+Holds out the tail of the series, fits a challenger on the head only, and scores
+it on rows it has never seen. A refused retrain is not a failure: the caller keeps
+the old artifact, prints why, and exits 0, so weekly-retrain.yml's existing
+`git diff --cached --quiet` branch reports "nothing to commit" on its own.
 
-The gate holds out the tail of the series, fits a challenger on the head only,
-and scores it on rows it has never seen. A refused retrain is not a failure: the
-caller keeps the old artifact, prints why, and exits 0, so the workflow's
-existing `git diff --cached --quiet` branch reports "nothing to commit" on its
-own.
+Why this does NOT vote on "challenger beats the incumbent artifact", which is the
+obvious design: the incumbent on disk was trained on *all* rows, including the
+ones held out. Measured on the live data that advantage is 1.5x on PM2.5 (3.33 vs
+4.93 ug/m3) and 2.0x on electricity (585 vs 1148 MW), so an honest challenger
+essentially cannot win and the gate would freeze the incumbent forever instead of
+protecting against a bad one. Its number is still printed, for drift, but it does
+not vote.
 
-Why this does NOT vote on "challenger beats the incumbent artifact", which is
-the obvious design and was the first one here: the incumbent on disk was trained
-on *all* rows, including the ones held out. Measured on the live data that
-advantage is 1.5x on PM2.5 (3.33 vs 4.93 ug/m3) and 2.0x on electricity (585 vs
-1148 MW) - the incumbent scores better on the holdout than on its own training
-head - so an honest challenger essentially cannot win and the gate freezes the
-incumbent forever instead of protecting against a bad one. The incumbent's
-training range is not stored anywhere, so the comparison cannot be made fair.
-Its number is still printed, for drift, but it does not vote.
+record_training_window() now writes the window each artifact was fit on, so the
+printout can at least say *whether* the incumbent saw the holdout instead of
+assuming it did. After a retrain is skipped for a week or more the incumbent's
+window genuinely ends before the holdout begins and the comparison is fair;
+ponytail: it still does not vote, because a vote needs the same six-broken-model
+calibration the three bars below got and only becomes measurable once artifacts
+carrying a window have been through a few cycles. Upgrade path: when
+`comparable` below has been true for a few retrains, add ratio-vs-incumbent as a
+fourth check with its own bar.
 
 What votes instead is three absolute checks, calibrated against six
 deliberately-broken models (shuffled labels, 1-round stump, constant label,
@@ -35,6 +38,7 @@ than walk-forward for the same reason: refitting per holdout day costs 30 fits
 (experiments/save_elec_backtest_results.py has the mechanics) only if borderline
 retrains start getting refused for noise.
 """
+import json
 import os
 
 import numpy as np
@@ -59,14 +63,60 @@ def _mae(pred, y):
     return float(np.mean(np.abs(np.asarray(pred) - np.asarray(y))))
 
 
+def window_path(model_path):
+    """Sidecar path for `model_path`'s training window."""
+    return f"{model_path}.window.json"
+
+
+def record_training_window(model_path, dates, rows):
+    """Note which dates an artifact was fit on, beside the artifact itself.
+
+    A sidecar rather than a DB table or LightGBM metadata: the artifact is a file
+    that CI commits, so the fact travels with it through the same git diff, and a
+    missing sidecar is exactly as informative as a missing artifact. `dates` is the
+    feature-date sequence, oldest-first, as DATASET_SQL returns it.
+
+    ponytail: last-write-wins, no history. The gate only ever asks about the one
+    artifact on disk; if per-retrain history is wanted later, append to a JSONL
+    instead of overwriting.
+    """
+    if not dates:
+        return None
+    payload = {"first": str(dates[0]), "last": str(dates[-1]), "rows": int(rows)}
+    with open(window_path(model_path), "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    print(f"[gate] Recorded training window {payload['first']} -> "
+          f"{payload['last']} ({payload['rows']} rows) beside the artifact.")
+    return payload
+
+
+def read_training_window(model_path):
+    """The recorded window, or None when there is no readable sidecar.
+
+    Returns None rather than raising on a corrupt or hand-edited file: this only
+    ever feeds a printed line, and a broken sidecar must not take down a retrain.
+    """
+    try:
+        with open(window_path(model_path), encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return {"first": payload["first"], "last": payload["last"],
+                "rows": int(payload["rows"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def challenger_ships(X, y, params, num_boost_round, baseline_col,
                      incumbent_path=None, feature_names=None,
-                     holdout_days=HOLDOUT_DAYS, unit=""):
+                     holdout_days=HOLDOUT_DAYS, unit="", dates=None):
     """True if a model retrained today is fit to overwrite the artifact on disk.
 
     `baseline_col` is the column index of the persistence feature - y(t), used to
     forecast y(t+1) - which is the do-nothing forecast every model must beat.
     Callers pass `FEATURE_COLUMNS.index("pm2_5_lag_1")` or its elec equivalent.
+
+    `dates` is the feature-date sequence behind X, oldest-first. Optional, and only
+    used to say whether the incumbent's recorded training window overlaps the
+    holdout - i.e. whether its printed score is comparable at all.
 
     Passes (True) when there is too little data to hold anything out; refusing
     then would mean never shipping a first model. X must be ordered oldest-first,
@@ -128,9 +178,25 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
     if incumbent_path and os.path.exists(incumbent_path):
         incumbent = lgb.Booster(model_file=incumbent_path)
         if incumbent.num_feature() == X.shape[1]:
-            print("[gate]   (incumbent scores "
-                  f"{_mae(incumbent.predict(X_hold), y_hold):.4f}{suffix} on the "
-                  "same rows, but it trained on them - not comparable)")
+            incumbent_mae = _mae(incumbent.predict(X_hold), y_hold)
+            # The sidecar is what makes this line honest. Without it every
+            # incumbent score had to be caveated as not comparable; with it, an
+            # incumbent whose window ends before the holdout starts never saw
+            # these rows and its number means what it looks like.
+            window = read_training_window(incumbent_path)
+            holdout_start = str(dates[split]) if dates is not None else None
+            comparable = bool(window and holdout_start
+                              and window["last"] < holdout_start)
+            if comparable:
+                note = (f"trained through {window['last']}, before the holdout "
+                        f"opens at {holdout_start} - comparable")
+            elif window:
+                note = (f"trained through {window['last']}, which covers the "
+                        f"holdout - not comparable")
+            else:
+                note = "no recorded training window, assume it saw them"
+            print(f"[gate]   (incumbent scores {incumbent_mae:.4f}{suffix} on the "
+                  f"same rows; {note})")
         else:
             print(f"[gate]   (incumbent expects {incumbent.num_feature()} "
                   f"features, data has {X.shape[1]}; feature set changed)")
@@ -147,10 +213,9 @@ def demo():
 
     ponytail: bare `assert` is right here and wrong in the pipeline gates. This is
     a __main__ self-check whose whole job is to fail loudly under CI's plain
-    `python -m vericast.gate`; being erased by python -O costs nothing, because
-    under -O it simply is not the check anymore. The gates that guard *data* -
-    verify_alignment(), the train.py feature-count checks - raise instead, since
-    there -O would silently turn them into no-ops that still exit 0.
+    `python -m vericast.gate`; under -O it simply is not the check anymore. The
+    gates that guard *data* raise instead, since there -O would silently turn them
+    into no-ops that still exit 0.
     """
     rng = np.random.default_rng(0)
     n = 300
@@ -186,6 +251,22 @@ def demo():
     assert not ships(rounds=1), "a 1-round stump must be refused"
     assert challenger_ships(X[:50], y[:50], params, 100, 0), \
         "too few rows to hold out must accept"
+
+    # The sidecar round-trips, and a missing or corrupt one reads as None rather
+    # than raising - the printed comparability line must never fail a retrain.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        artifact = os.path.join(tmp, "model.txt")
+        assert read_training_window(artifact) is None, "absent sidecar must be None"
+        dates = [f"2026-08-{d:02d}" for d in range(1, 11)]
+        record_training_window(artifact, dates, len(dates))
+        assert read_training_window(artifact) == {
+            "first": "2026-08-01", "last": "2026-08-10", "rows": 10}
+        with open(window_path(artifact), "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        assert read_training_window(artifact) is None, "corrupt sidecar must be None"
+        assert record_training_window(artifact, [], 0) is None, \
+            "an empty date list has no window to record"
 
     print("[OK] gate self-check passed")
 

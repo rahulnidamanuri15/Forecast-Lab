@@ -3,24 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<!-- The page is served as a static file (GitHub Pages), so there is no server to
-     set a CSP header and the meta form is the only one available. It is weaker -
+<!-- The page is a static file (GitHub Pages), so there is no server to set a CSP
+     header and the meta form is the only one available. It is weaker -
      frame-ancestors and report-uri are ignored in meta - but the part that matters
-     here works: script-src pins executable code to this file plus the one pinned
-     CDN entry, so an injected <script src> from anywhere else does not run.
-     'unsafe-inline' is unavoidable while the styles, the script and the tab
+     works: script-src pins executable code to this file plus the one pinned CDN
+     entry. 'unsafe-inline' is unavoidable while the styles, the script and the tab
      onclick= handlers are inline; esc() is what guards the interpolated rows.
      connect-src lists the deployed API and the two local dev origins, because
      window.API_BASE is the documented way to point this page at a local uvicorn.
 
-     With DevTools open you will see connect-src block
-     cdn.jsdelivr.net/.../chart.umd.js.map. That is DevTools fetching the
-     sourcemap named in the minified bundle's trailing comment, not the page
-     doing anything - the chart renders fine and no visitor without DevTools
-     ever makes the request. It is deliberately NOT fixed by adding jsdelivr to
-     connect-src: connect-src is the one directive stopping injected script from
-     posting the page's data somewhere else, and widening it for a devtools
-     convenience trades a real guarantee for a console line. -->
+     With DevTools open, connect-src blocks cdn.jsdelivr.net/.../chart.umd.js.map -
+     DevTools fetching the sourcemap, not the page. Deliberately NOT fixed by
+     widening connect-src: that directive is what stops injected script from
+     posting this page's data elsewhere, and a console line is not worth it. -->
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'none';
   script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
@@ -716,9 +711,11 @@
         VERICAST
       </a>
 
-      <div class="city-tabs">
-        <button class="tab-btn active" id="tab-pm25" onclick="switchTab('pm25')">Nagpur PM2.5</button>
-        <button class="tab-btn" id="tab-electricity" onclick="switchTab('electricity')">Maharashtra Electricity Demand</button>
+      <div class="city-tabs" role="tablist" aria-label="Forecast target">
+        <button class="tab-btn active" id="tab-pm25" role="tab" aria-selected="true"
+                aria-controls="panel-pm25" onclick="switchTab('pm25')">Nagpur PM2.5</button>
+        <button class="tab-btn" id="tab-electricity" role="tab" aria-selected="false"
+                aria-controls="panel-electricity" onclick="switchTab('electricity')">Maharashtra Electricity Demand</button>
       </div>
     </div>
 
@@ -1130,18 +1127,14 @@
 
 <script>
   // Backend API URL. The one place the deployed host is written down - the
-  // FastAPI Docs link in the header is pointed at it below rather than
-  // hardcoding it a second time, so a redeploy to a new host is a one-line
-  // change. Override for local work with `window.API_BASE = 'http://localhost:8000'`
-  // before this script runs; same env-override shape as
-  // verify_deployment_readiness.py's API_BASE.
+  // FastAPI Docs link is pointed at it below rather than hardcoding it twice.
+  // Override for local work with `window.API_BASE = 'http://localhost:8000'`
+  // before this script runs.
   //
-  // The host still reads `forecast-lab` because that is the live Render service
-  // name and the GitHub repo it deploys from; the project was renamed to VeriCast
-  // afterwards. Left as-is deliberately - rewriting a working hostname to match a
-  // README breaks the page. Renaming the Render service and the repo is the fix,
-  // and it has to happen there first; the CSP connect-src above pins this same
-  // host, so both change together.
+  // The host still reads `forecast-lab`: that is the live Render service name and
+  // the repo it deploys from, both predating the VeriCast rename. Renaming those
+  // is the fix, and the CSP connect-src above pins this host, so both change
+  // together.
   const API_BASE = window.API_BASE || 'https://forecast-lab-2l0q.onrender.com';
 
   document.getElementById('api-docs-link').href = `${API_BASE}/docs`;
@@ -1152,6 +1145,12 @@
     return res.json();
   }
 
+  // Thresholds are CPCB's PM2.5 sub-index breakpoints (30/60/90/120 ug/m3), but
+  // the labels deliberately describe the concentration rather than borrowing AQI's
+  // health wording: this page publishes one pollutant's 24h mean, and "GOOD" or
+  // "UNHEALTHY" would be a health claim about an AQI it never computes.
+  // ponytail: a real AQI needs the other pollutants' sub-indices and a max() over
+  // them - add that only if the page starts ingesting them.
   function getBand(val) {
     if (val <= 30) return { label: 'LOW CONCENTRATION', cls: 'cat-low' };
     if (val <= 60) return { label: 'MODERATE', cls: 'cat-mod' };
@@ -1164,9 +1163,16 @@
     return (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
   }
 
-  // Values below come from our own DB and the API allowlists `model`, so this
-  // is belt-and-braces - but every row built as an innerHTML template string
-  // goes through it, so a future column of free text cannot inject markup.
+  // toFixed already carries the '-', so prefixing '+' unconditionally renders
+  // "+-4.2%" the first week LightGBM loses to persistence - on the one callout
+  // whose whole job is saying which model won.
+  function signedPct(n) {
+    return `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
+  }
+
+  // Values below come from our own DB and the API allowlists `model`, so this is
+  // belt-and-braces - but every innerHTML row goes through it, so a future column
+  // of free text cannot inject markup.
   function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, c => (
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1180,10 +1186,34 @@
     return Math.max(0, 100 - Math.abs(actual - predicted) / actual * 100);
   }
 
+  // The one filter both history tables and every metric derived from them run
+  // through. /predictions labels provenance rather than filtering it, because
+  // 'backtest' rows outnumber published ones ~50:1 there and a caller may
+  // legitimately want the launch record. This page may not: its table is headed
+  // "logged before actual outcomes were known", and a walk-forward backtest row
+  // was fitted after the fact. Quoting one under that heading is the retro-fitting
+  // the provenance split exists to prevent.
+  //
+  // Allowlist, not `!== 'backtest'`: the API renames source 'daily' to 'verified'
+  // on the way out, so a third provenance added upstream would arrive under a name
+  // this page has never seen and a denylist would wave it straight into the table.
+  function publishedOnly(payload) {
+    return ((payload && payload.predictions) || [])
+      .filter(r => r.source === 'verified');
+  }
+
+  // Both empty-state messages, so a filtered-to-nothing table says so instead of
+  // sitting on "Loading prediction records..." forever.
+  function emptyHistoryRow(tbodyId) {
+    document.getElementById(tbodyId).innerHTML =
+      '<tr><td colspan="7" style="text-align: center; color: var(--text-faint); '
+      + 'padding: 30px;">No prediction published before its outcome yet.</td></tr>';
+  }
+
   // Both leaderboard tables, one renderer: the payloads differ only by a mape
-  // column and by how many decimals the unit deserves (μg/m³ to 2, MW to 0).
-  // `description` goes in title= rather than its own column - the API ships it,
-  // and the row is already five columns wide on a phone.
+  // column and by the decimals the unit deserves (μg/m³ to 2, MW to 0).
+  // `description` goes in title= rather than its own column - the row is already
+  // five columns wide on a phone.
   function renderLeaderboard(tbodyId, board, decimals, withMape) {
     const tbody = document.getElementById(tbodyId);
     const cols = withMape ? 6 : 5;
@@ -1207,9 +1237,8 @@
   // gate is source_lag_expected, not status alone: a stalled upstream still
   // answers status: 'ok' with a stale latest_observation, and showing that as
   // LIVE is the one way this page can publish a number that is quietly wrong.
-  // The staleness threshold differs per target (2 days for PM2.5, 5 for the
-  // demand mirror, both in vericast/__init__.py) - the API has already applied
-  // its own, which is exactly why this reads the flag rather than stale_days.
+  // The threshold differs per target and the API has already applied its own,
+  // which is why this reads the flag rather than stale_days.
   function setStatusPill(health, label) {
     const pill = document.getElementById('status-pill');
     const statusText = document.getElementById('status-text');
@@ -1285,9 +1314,8 @@
         pill.className = `category-pill ${band.cls}`;
 
         // Explicit, not `if (latestObsVal)`: a genuine 0 μg/m³ observation is
-        // falsy and silently dropped the whole comparison. Zero is also the one
-        // value the division cannot take, so it is excluded on its own line
-        // rather than folded back into a truthiness test.
+        // falsy and would silently drop the comparison. Zero is also the one
+        // value the division cannot take.
         if (latestObsVal !== null && latestObsVal !== undefined && latestObsVal !== 0) {
           const diff = fVal - latestObsVal;
           const pctDiff = ((diff / latestObsVal) * 100).toFixed(1);
@@ -1300,44 +1328,44 @@
       // 4. Full-record accuracy & model comparison
       if (evaluation && evaluation.evaluation) {
         // /evaluation nests its metrics under `verified` / `backtest` and ships no
-        // combined figure on purpose: averaging a 700-day launch backtest into a
-        // few dozen verified days is the retro-fitting this project exists to
-        // avoid. Spreading `verified` up leaves every read below unchanged and
-        // makes this page quote the published-then-verified record only - a model
-        // that exists solely in the backtest has no mae here and renders as an
-        // honest dash rather than a backtest number wearing a verified label.
+        // combined figure on purpose. Spreading `verified` up makes this page quote
+        // the published-then-verified record only: a model that exists solely in
+        // the backtest has no mae here and renders as an honest dash.
         const models = evaluation.evaluation.map(m => ({ ...m, ...(m.verified || {}) }));
         const lgb = models.find(m => m.model === 'lightgbm');
         const naive = models.find(m => m.model === 'naive_baseline');
 
-        if (lgb && naive && lgb.mae != null && naive.mae != null) {
-          const lgbMae = lgb.mae;
-          const naiveMae = naive.mae;
-          const improvement = (((naiveMae - lgbMae) / naiveMae) * 100).toFixed(1);
-
-          document.getElementById('kpi-mae-val').innerHTML = `${fmt(lgbMae, 2)} <span class="unit">vs ${fmt(naiveMae, 2)}</span>`;
+        // Split the way the electricity panel splits it: what LightGBM alone can
+        // fill goes first. Under one paired gate, a baseline that has not scored
+        // yet - or scored NULL - blanked the record count and LightGBM's own MAE
+        // too, so the page understated its record for a reason it never showed.
+        if (lgb && lgb.mae != null) {
+          document.getElementById('metric-lgb-mae').textContent = fmt(lgb.mae, 2);
+          document.getElementById('metric-lgb-rmse').textContent = fmt(lgb.rmse, 2);
+          document.getElementById('bar-lgb-val').textContent = fmt(lgb.mae, 2);
           document.getElementById('kpi-record-val').textContent = lgb.scored_count;
           document.getElementById('metric-total-scored').textContent = lgb.scored_count;
 
           // The launch backtest stays discoverable without becoming the headline.
-          // Without this the number silently changed meaning when the split
-          // landed - same label, a different and much smaller sample behind it.
           const bt = lgb.backtest;
           document.getElementById('kpi-mae-val').title =
             `Verified over ${lgb.scored_count} published day(s).`
             + (bt && bt.mae != null
                 ? ` Launch backtest: MAE ${fmt(bt.mae, 2)} over ${bt.scored_count} days, never averaged in.`
                 : '');
+        }
 
-          document.getElementById('metric-lgb-mae').textContent = fmt(lgbMae, 2);
-          document.getElementById('metric-lgb-rmse').textContent = fmt(lgb.rmse, 2);
+        if (lgb && naive && lgb.mae != null && naive.mae != null) {
+          const lgbMae = lgb.mae;
+          const naiveMae = naive.mae;
+          const improvement = ((naiveMae - lgbMae) / naiveMae) * 100;
+
+          document.getElementById('kpi-mae-val').innerHTML = `${fmt(lgbMae, 2)} <span class="unit">vs ${fmt(naiveMae, 2)}</span>`;
           document.getElementById('metric-naive-mae').textContent = fmt(naiveMae, 2);
-
-          document.getElementById('bar-lgb-val').textContent = fmt(lgbMae, 2);
           document.getElementById('bar-naive-val').textContent = fmt(naiveMae, 2);
 
-          document.getElementById('callout-improve-val').textContent = `+${improvement}%`;
-          document.getElementById('hero-improvement-text').textContent = `${improvement}% better than persistence baseline (MAE ${fmt(lgbMae, 2)} vs ${fmt(naiveMae, 2)})`;
+          document.getElementById('callout-improve-val').textContent = signedPct(improvement);
+          document.getElementById('hero-improvement-text').textContent = `${improvement.toFixed(1)}% better than persistence baseline (MAE ${fmt(lgbMae, 2)} vs ${fmt(naiveMae, 2)})`;
 
           // Bar widths relative to max
           const maxVal = Math.max(lgbMae, naiveMae) * 1.35;
@@ -1347,8 +1375,9 @@
       }
 
       // 5. Prediction History Table & Accuracy calculation
-      if (predictions && predictions.predictions && predictions.predictions.length) {
-        const rows = predictions.predictions;
+      const publishedRows = publishedOnly(predictions);
+      if (publishedRows.length) {
+        const rows = publishedRows;
         let within5Count = 0;
         let totalScored = 0;
         let totalAccuracySum = 0;
@@ -1401,19 +1430,24 @@
           document.getElementById('acc-big-num').innerHTML =
             `${avgAcc}% <span>last ${accScored} scored</span>`;
         }
+      } else {
+        emptyHistoryRow('history-table-body');
       }
 
-      // 6. Chart: Prediction vs Actual
-      if (history && history.historical_data && forecast) {
+      // 6. Chart: Prediction vs Actual. Guarded on what it plots - the observed
+      // series and the published rows - not on `forecast`, which is tomorrow's
+      // single number and appears nowhere in either chart. A 404 on /forecast
+      // (the first day before predict.py runs, or a missing artifact) used to
+      // blank both charts along with it.
+      if (history && history.historical_data) {
         const labels = history.historical_data.map(d => d.date.slice(5)); // MM-DD
         const obsValues = history.historical_data.map(d => d.pm2_5);
 
         // Published predictions on the same axis, keyed by the day they were
-        // for. Days outside the /predictions window stay null and simply break
-        // the line - the card claims two series, so it has to draw two.
+        // for. Days outside the /predictions window stay null and break the
+        // line - the card claims two series, so it has to draw two.
         const predByDate = new Map(
-          ((predictions && predictions.predictions) || [])
-            .map(r => [r.forecast_date, r.predicted_pm2_5]));
+          publishedRows.map(r => [r.forecast_date, r.predicted_pm2_5]));
         const predValues = history.historical_data.map(
           d => predByDate.has(d.date) ? predByDate.get(d.date) : null);
 
@@ -1465,14 +1499,18 @@
             }
           }
         });
+      }
 
-        // 7. Chart: Absolute error over the recent scored predictions.
+      // 7. Chart: Absolute error over the recent scored predictions. Its own
+      // guard: it plots publishedRows and nothing else, so /history or /forecast
+      // failing must not blank the one chart that shows the verified record.
+      if (publishedRows.length) {
         const ctx2 = document.getElementById('accuracyChart').getContext('2d');
         if (accChartInstance) accChartInstance.destroy();
 
-        // Real scored rows, oldest-first. Was a hardcoded array; a
-        // publish-then-verify dashboard cannot show invented accuracy.
-        const scored = (predictions && predictions.predictions || [])
+        // Real scored rows, oldest-first: a publish-then-verify dashboard cannot
+        // show invented accuracy.
+        const scored = publishedRows
           .filter(r => r.actual_pm2_5 !== null && r.actual_pm2_5 !== undefined)
           .slice().reverse();
         const accLabels = scored.map(r => r.forecast_date.slice(5));
@@ -1543,9 +1581,9 @@
 
       renderLeaderboard('el-leaderboard-table-body', leaderboard, 0, true);
 
-      // 1. Status pill, same shared writer the PM2.5 panel uses. Without this the
-      // header still read LIVE · <a Nagpur date> while this panel was open, which
-      // is a freshness claim about the wrong series.
+      // 1. Status pill, same shared writer the PM2.5 panel uses. Without it the
+      // header reads LIVE · <a Nagpur date> while this panel is open, which is a
+      // freshness claim about the wrong series.
       elHealth = health;
       setStatusPill(health, 'MAHARASHTRA');
 
@@ -1612,10 +1650,10 @@
         if (lgb && naive && lgb.mape != null && naive.mape != null) {
           document.getElementById('el-kpi-mape-val').innerHTML =
             `${fmt(lgb.mape, 2)}% <span class="unit">vs ${fmt(naive.mape, 2)}%</span>`;
-          const improvement = ((naive.mae - lgb.mae) / naive.mae * 100).toFixed(1);
-          document.getElementById('el-callout-improve-val').textContent = `+${improvement}%`;
+          const improvement = (naive.mae - lgb.mae) / naive.mae * 100;
+          document.getElementById('el-callout-improve-val').textContent = signedPct(improvement);
           document.getElementById('el-hero-improvement-text').textContent =
-            `${improvement}% better than persistence baseline (MAE ${fmt(lgb.mae, 0)} vs ${fmt(naive.mae, 0)} MW)`;
+            `${improvement.toFixed(1)}% better than persistence baseline (MAE ${fmt(lgb.mae, 0)} vs ${fmt(naive.mae, 0)} MW)`;
         }
 
         // Bar per model, already MAE-sorted by the API.
@@ -1637,8 +1675,9 @@
       }
 
       // 5. History table + error chart, both off the same scored rows.
-      if (predictions && predictions.predictions && predictions.predictions.length) {
-        const rows = predictions.predictions;
+      const elPublishedRows = publishedOnly(predictions);
+      if (elPublishedRows.length) {
+        const rows = elPublishedRows;
         let within3 = 0, totalScored = 0, accSum = 0;
 
         document.getElementById('el-history-table-body').innerHTML = rows.map(r => {
@@ -1705,6 +1744,8 @@
             }
           }
         });
+      } else {
+        emptyHistoryRow('el-history-table-body');
       }
 
       // 6. Demand vs temperature, dual axis - the thermal driver is the whole
@@ -1753,24 +1794,31 @@
   }
 
   // Lazy: the electricity panel only fetches the first time it is opened, so the
-  // default PM2.5 view still costs exactly the 5 requests it always did.
+  // default PM2.5 view still costs exactly the 6 requests it always did.
   function switchTab(name) {
-    document.getElementById('panel-pm25').hidden = name !== 'pm25';
-    document.getElementById('panel-electricity').hidden = name !== 'electricity';
-    document.getElementById('tab-pm25').classList.toggle('active', name === 'pm25');
-    document.getElementById('tab-electricity').classList.toggle('active', name === 'electricity');
+    const isElec = name === 'electricity';
+    document.getElementById('panel-pm25').hidden = isElec;
+    document.getElementById('panel-electricity').hidden = !isElec;
+    // aria-selected alongside the class: the class is what the eye reads, the
+    // attribute is what a screen reader reads, and a tablist that never updates
+    // it announces both tabs as selected forever.
+    for (const [id, selected] of [['tab-pm25', !isElec], ['tab-electricity', isElec]]) {
+      const btn = document.getElementById(id);
+      btn.classList.toggle('active', selected);
+      btn.setAttribute('aria-selected', String(selected));
+    }
 
-    if (name === 'electricity' && !elLoaded) {
+    if (isElec && !elLoaded) {
       elLoaded = true;
       initElectricity();
       return;   // initElectricity sets the pill itself once its /health lands
     }
-    // Repoint the one header pill at whichever series is now on screen. The
-    // cached health is what each init already fetched; re-reading it here is
-    // cheaper than a request and cannot disagree with the panel below it.
-    const cached = name === 'electricity' ? elHealth : pm25Health;
+    // Repoint the one header pill at whichever series is now on screen, from the
+    // health each init already fetched - cheaper than a request, and it cannot
+    // disagree with the panel below it.
+    const cached = isElec ? elHealth : pm25Health;
     if (cached !== undefined) {
-      setStatusPill(cached, name === 'electricity' ? 'MAHARASHTRA' : 'NAGPUR');
+      setStatusPill(cached, isElec ? 'MAHARASHTRA' : 'NAGPUR');
     }
   }
 

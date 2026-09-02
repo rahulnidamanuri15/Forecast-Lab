@@ -4,15 +4,21 @@ import psycopg
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from vericast import PM25_MAX, PM25_MIN, RESCAN_DAYS, local_time, resume_start
+from vericast import (
+    PM25_MAX,
+    PM25_MIN,
+    RESCAN_DAYS,
+    local_time,
+    require_city_of_record,
+    resume_start,
+)
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Configuration
 LAT, LON = 21.1463, 79.0849          # Nagpur, India
-CITY = os.getenv("CITY", "Nagpur")
+CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
 
 # Hours of hourly data a day needs before its mean is called a daily mean. One
 # hour averaged alone is indistinguishable downstream from 24, and it feeds the
@@ -28,20 +34,10 @@ INITIAL_START = "2023-08-01"
 def plausible_pm25(value):
     """True when `value` could be a daily mean PM2.5 for this city, in ug/m3.
 
-    The symmetric guard to elec/ingest.py's plausible_mw(). Open-Meteo's CAMS
-    field is a unit assumption, not a guarantee: a switch to mg/m3 (/1000), a
-    sentinel like -999 served in place of a null, or the field coming to mean
-    something else would all parse as a float and enter the record as an
-    ordinary-looking number. An observation is worse than a bad forecast here,
-    because it becomes the *actual* every model is scored against - a permanent
-    error in the published record that afterwards looks like a forecasting miss.
-
-    Bounds live in vericast/__init__.py, shared with the publish gate in
-    diagnose.py. Out-of-range means NULL, not a dropped row: that is exactly what
-    a thin-hours day already does below, and the rest of the pipeline handles a
-    NULL observation (features.py NULLs the lags, train.py filters, and
-    get_earliest_hole() re-fetches the date on the next run). Contrast with elec,
-    where peak_demand_mw is NOT NULL so the row has to be skipped instead.
+    A unit change (mg/m3), or a -999 sentinel served in place of a null, parses
+    as an ordinary float and becomes the *actual* every model is scored against -
+    a permanent error in the published record that later looks like a forecasting
+    miss. Bounds are shared with the publish gate in diagnose.py.
     """
     return PM25_MIN <= value <= PM25_MAX
 
@@ -61,14 +57,9 @@ def get_last_observed_date():
 def get_earliest_hole(cur, since):
     """Earliest date in [since, yesterday] this city has no usable pm2_5 for, or None.
 
-    Two kinds of hole, one query: a date with no row at all (the upstream skipped
-    the day, or an ingest run never covered it) and a date whose row carries a NULL
-    pm2_5 (a thin-hours day under MIN_HOURS_PER_DAY). Both are re-fetchable, because
-    the API may have filled in since - and an upsert makes a re-fetch of a good day
-    free.
-
-    generate_series is the reason this is one query: LEFT JOIN against the dates
-    that *should* exist finds an absent row, which no scan of the stored rows can.
+    Covers both a missing row and a row with a NULL pm2_5 (a thin-hours day).
+    generate_series is why this is one query: a LEFT JOIN against the dates that
+    *should* exist finds an absent row, which no scan of stored rows can.
     """
     cur.execute(
         """
@@ -83,21 +74,15 @@ def get_earliest_hole(cur, since):
 
 def resolve_date_range():
     """
-    Decide what date range to fetch.
+    Decide what date range to fetch: the earlier of "the day after the latest
+    stored observation" and "the earliest hole in the last RESCAN_DAYS days".
+    First run (no data yet) backfills from INITIAL_START. The end is always
+    yesterday, since the archive APIs have no complete record for today.
 
-    - First run (no data yet): backfill from INITIAL_START.
-    - Subsequent runs: the earlier of "the day after the latest stored
-      observation" and "the earliest hole in the last RESCAN_DAYS days".
-    - End date is always "yesterday", since the weather/air-quality
-      archive APIs are historical and may not have a complete record
-      for the current day yet.
-
-    The re-scan is what makes a hole temporary. A monotonic resume off MAX(as_of)
-    alone left every skipped or NULL day permanently behind the resume point;
-    RESCAN_DAYS bounds the re-read so it never re-fetches 700 days. Filling one is
-    still best-effort: if the upstream never serves that date, the next run simply
-    starts from it again, and every write is an upsert so a re-fetched good day is
-    a no-op.
+    The re-scan is what makes a hole temporary: a monotonic resume off MAX(as_of)
+    alone left every skipped or NULL day permanently behind the resume point.
+    Still best-effort - if the upstream never serves that date, the next run
+    starts from it again, and every write is an upsert.
     """
     last_date = get_last_observed_date()
 
@@ -121,26 +106,22 @@ def fetch_and_aggregate_data(start_date, end_date):
     """Fetch hourly AQ and daily weather data, aggregate to daily level.
 
     pm2_5/pm10 here are CAMS *reanalysis* (a model), not ground-station
-    readings — the scoring target is a model estimate, not measured air. Chosen for
-    gap-free coverage over 2023->present, which is what makes the publish-then-verify
-    record clean. Upgrade path: swap the air-quality call below for OpenAQ (CPCB
-    stations, free key) and handle its gaps; this is the only function that touches
-    the AQ source.
+    readings - the scoring target is a model estimate, not measured air. Chosen for
+    gap-free coverage over 2023->present. Upgrade path: swap the air-quality call
+    below for OpenAQ (CPCB stations, free key) and handle its gaps; this is the
+    only function that touches the AQ source.
 
     A "daily mean" here is a **UTC** day: `"timezone": "UTC"` below, and the
-    bucketing loop keys on the UTC date of each hourly timestamp. The date range
-    it is asked for comes from local_time (Asia/Kolkata), so an as_of of
-    2026-08-27 labels 2026-08-27 00:00-23:00 UTC, which in IST is 05:30 that day
-    to 04:30 the next. Both models see the same definition on both sides of the
-    train/score boundary, so the record is internally consistent - that is the
-    property that matters here, not which 24 hours the label names.
+    bucketing loop keys on the UTC date of each hourly timestamp. Both models see
+    the same definition on both sides of the train/score boundary, so the record is
+    internally consistent - that is the property that matters, not which 24 hours
+    the label names.
 
-    Deliberately NOT switched to Asia/Kolkata: the whole series was ingested this
-    way, and re-ingesting under a different timezone would silently redefine every
-    historical actual - moving the numbers this repo has already published and
-    scored against. That is retro-fitting, the one thing a publish-then-verify
-    record cannot do. Anyone who wants IST-day means starts a new city key rather
-    than rewriting this one.
+    Deliberately NOT switched to Asia/Kolkata: re-ingesting under a different
+    timezone would silently redefine every historical actual, moving numbers this
+    repo has already published and scored against. That is retro-fitting, the one
+    thing a publish-then-verify record cannot do. Anyone who wants IST-day means
+    starts a new city key rather than rewriting this one.
     """
     START, END = start_date.isoformat(), end_date.isoformat()
 
@@ -166,10 +147,8 @@ def fetch_and_aggregate_data(start_date, end_date):
     pm2_5_values = aq_data["hourly"]["pm2_5"]
     pm10_values = aq_data["hourly"]["pm10"]
 
-    # Extract daily weather data, keyed on the date string the loop below looks up.
-    # A dict rather than wx_times.index(date_str): that re-scanned the whole array
-    # once per day, which is invisible for a 1-day run and O(n^2) on a 700-day
-    # backfill - the one run where it matters.
+    # Keyed on the date string the loop below looks up. A dict rather than
+    # wx_times.index(date_str): that is O(n^2) on a 700-day backfill.
     weather = dict(zip(wx_data["daily"]["time"], zip(
         wx_data["daily"]["temperature_2m_mean"],
         wx_data["daily"]["wind_speed_10m_max"],
@@ -183,7 +162,6 @@ def fetch_and_aggregate_data(start_date, end_date):
     daily_data = {}
 
     for i, timestamp in enumerate(times):
-        # Convert to date only (ignoring time)
         dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
         date_str = dt.date().isoformat()
 
@@ -227,9 +205,7 @@ def fetch_and_aggregate_data(start_date, end_date):
         # Implausible is the third form of the same case, and the only one that
         # would otherwise be accepted silently: enough hours, arithmetic fine, wrong
         # number. Checked on pm2_5 only - it is the scored target, and any upstream
-        # unit change or sentinel value hits both fields together, so guarding the
-        # one that enters the record catches the class. pm10 is a feature and would
-        # need its own bounds, which is more numbers to justify than it earns.
+        # unit change or sentinel hits both fields together.
         if pm2_5_avg is not None and not plausible_pm25(pm2_5_avg):
             print(f"  [null] {date_str}: pm2_5 {pm2_5_avg:.1f} is outside "
                   f"{PM25_MIN:g}-{PM25_MAX:g} ug/m3 (unit change or sentinel "

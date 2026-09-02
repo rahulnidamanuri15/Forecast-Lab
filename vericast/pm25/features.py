@@ -1,20 +1,14 @@
 """Engineer the point-in-time PM2.5 feature store.
 
-One idempotent INSERT ... SELECT, ported from vericast/elec/features.py, which
-replaced the Python row-loop this file used to be. Postgres window frames do the
-same job with stronger guarantees:
+One idempotent INSERT ... SELECT. Postgres window frames carry the guarantees:
 
   * `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND INTERVAL '1 day' PRECEDING` is
     date-addressed, not row-addressed, so it returns NULL across a date gap on
     its own - no explicit gap guard to forget.
-  * `COUNT(pm2_5) OVER w7 = 7` is stricter than the old row-index check: `if i >= 6`
-    means "seven rows exist", not "seven consecutive days exist", so the old
-    version averaged 7 rows whether or not they spanned 7 calendar days and
-    still called the result a 7-day mean. This refuses instead. It counts the
-    averaged column, not `*`: a thin-hours day is stored as a row with a NULL
-    value (ingest.py's MIN_HOURS_PER_DAY), which `AVG` skips - so `COUNT(*)`
-    would pass a 6-value mean off as a 7-day one, and disagree with
-    leakage_test.py's `len(values) == days`.
+  * `COUNT(pm2_5) OVER w7 = 7` refuses to call an incomplete window a 7-day mean.
+    It counts the averaged column, not `*`: a thin-hours day is stored as a row
+    with a NULL value (ingest.py's MIN_HOURS_PER_DAY), which `AVG` skips, so
+    `COUNT(*)` would pass a 6-value mean off as a 7-day one.
   * Look-ahead leakage is structurally unexpressible - a `RANGE ... PRECEDING`
     frame cannot reference a future row.
 
@@ -24,11 +18,17 @@ import os
 import psycopg
 from dotenv import load_dotenv
 
+from vericast import (
+    alignment_sql,
+    require_city_of_record,
+    verify_alignment as check_alignment,
+)
+
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-CITY = os.getenv("CITY", "Nagpur")
+CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
 
 # is_weekend is BOOLEAN here (see vericast/schema.py:55), unlike
 # electricity_features.is_weekend which is INT - so no ::int cast.
@@ -89,63 +89,16 @@ ON CONFLICT (city, as_of) DO UPDATE SET
 """
 
 
-# Ported from vericast/elec/features.py so both feature stores check the same
-# contract on the daily path. leakage_test.py (step 3 of daily-pipeline.yml) is not
-# a substitute: it checks feature *values* - lag_1 equals the previous calendar day,
-# roll_7/30 NULL unless the window is complete - and never asks whether each
-# feature row has a next-day target to be scored against.
-#
-# Row existence, not `pm2_5 IS NOT NULL`: a low-coverage day is stored as a row
-# with a NULL value (ingest.py's MIN_HOURS_PER_DAY), and train.py filters those.
-# What is broken-join territory is a *missing row*, which is what these count.
-ORPHAN_ROWS_SQL = """
-SELECT COUNT(*)
-FROM features f
-WHERE f.city = %s
-  AND f.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
-                 FROM observations WHERE city = f.city)
-  AND NOT EXISTS (
-      SELECT 1 FROM observations o
-      WHERE o.city = f.city
-        AND o.as_of = f.as_of + INTERVAL '1 day'
-  )
-"""
-
-GAP_DAYS_SQL = """
-SELECT COUNT(*)
-FROM observations o
-WHERE o.city = %s
-  AND o.as_of < (SELECT MAX(as_of) - INTERVAL '1 day'
-                 FROM observations WHERE city = o.city)
-  AND NOT EXISTS (
-      SELECT 1 FROM observations n
-      WHERE n.city = o.city
-        AND n.as_of = o.as_of + INTERVAL '1 day'
-  )
-"""
+# Its own check, not covered by leakage_test.py: that one re-derives feature
+# *values* and never asks whether each feature row has a next-day target to score
+# against. Both queries live in vericast/__init__.py - the two targets differed
+# only in table and key names.
+GAP_DAYS_SQL, ORPHAN_ROWS_SQL = alignment_sql("features", "observations", "city")
 
 
 def verify_alignment(cur):
-    """Enforce the features(t) -> target(t+1) contract, gaps accounted for.
-
-    Equality against the observed gap count rather than a tolerance, for the
-    reason vericast/elec/features.py gives: a hardcoded "<= 1" pre-forgives the
-    next gap, and forgives a genuinely broken join just as quietly. Raised rather
-    than asserted for the reason given there too - python -O erases `assert`.
-    """
-    cur.execute(GAP_DAYS_SQL, (CITY,))
-    gaps = cur.fetchone()[0]
-    cur.execute(ORPHAN_ROWS_SQL, (CITY,))
-    orphans = cur.fetchone()[0]
-
-    if orphans != gaps:
-        raise AssertionError(
-            f"{orphans} feature rows have no next-day target but only {gaps} "
-            f"observation gap(s) explain it - the features(t) -> target(t+1) "
-            f"contract is broken"
-        )
-    print(f"  Alignment OK: {orphans} orphan row(s), all explained by "
-          f"{gaps} observation gap(s)")
+    """This city's alignment check. See vericast.verify_alignment for the contract."""
+    check_alignment(cur, GAP_DAYS_SQL, ORPHAN_ROWS_SQL, CITY)
 
 
 def engineer_features():

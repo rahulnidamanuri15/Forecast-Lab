@@ -1,14 +1,13 @@
 """Verify the electricity feature store is point-in-time correct.
 
-The twin of vericast/pm25/leakage_test.py, and it exists for the same reason that
-one does: the window frames in features.py make look-ahead leakage structurally
-unexpressible, but "the SQL cannot express leakage" is a claim about the SQL as
-written, and nothing on the daily path re-read the stored rows to confirm the SQL
-in the file is the SQL that produced them. verify_alignment() checks the
-features(t) -> target(t+1) *join*; this checks the *values*.
+The window frames in features.py make look-ahead leakage structurally
+unexpressible, but that is a claim about the SQL as written, and nothing else on
+the daily path re-reads the stored rows to confirm the SQL in the file is the SQL
+that produced them. verify_alignment() checks the features(t) -> target(t+1)
+*join*; this checks the *values*.
 
-Checks four invariants against `electricity_observations`, deriving expectations
-from *calendar dates* rather than row positions:
+Four invariants against `electricity_observations`, derived from *calendar dates*
+rather than row positions:
 
   1. same-day columns equal that day's observation exactly, and
      cooling_degree_days is GREATEST(0, temp - COOLING_BASE) of it;
@@ -20,9 +19,8 @@ from *calendar dates* rather than row positions:
      features at as_of = t predict t+1, so same-weekday-last-week is y(t-6);
   4. the rolling columns are NULL unless every one of the preceding 6 / 29
      calendar days is present *with a value*, and equal the mean (or max) over
-     that full window when they are. Counting the averaged column rather than `*`
-     is what temp_roll_7 needs: temperature_2m_mean is nullable and AVG skips
-     NULLs, so a 6-value mean must not be labelled a 7-day one.
+     that full window when they are. Counting values rather than days is what
+     temp_roll_7 needs: temperature_2m_mean is nullable and AVG skips NULLs.
 
 Usage: python -m vericast.elec.leakage_test
 """
@@ -108,9 +106,8 @@ def run_leakage_test():
             errors.append(f"{as_of}: cooling_degree_days is "
                           f"{feat['cooling_degree_days']}, expected {cdd}")
 
-        # 2. Calendar columns. ISODOW is Mon=1, the column is Mon=0, and weekend
-        #    is Sat/Sun - an off-by-one here shifts every weekday the model sees
-        #    and shows up nowhere else.
+        # 2. Calendar columns. ISODOW is Mon=1, the column is Mon=0 - an off-by-one
+        #    here shifts every weekday the model sees and shows up nowhere else.
         if feat["day_of_week"] != as_of.weekday():
             errors.append(f"{as_of}: day_of_week is {feat['day_of_week']}, "
                           f"expected {as_of.weekday()}")

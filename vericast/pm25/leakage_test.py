@@ -1,30 +1,30 @@
 """Verify the PM2.5 feature store is point-in-time correct.
 
-Checks three invariants against `observations`, deriving expectations from
+Checks four invariants against `observations`, deriving expectations from
 *calendar dates* rather than row positions:
 
   1. same-day weather columns equal that day's observation exactly;
-  2. `*_lag_1` equals the previous calendar day, and is NULL when that day is
+  2. `day_of_week` / `month` / `is_weekend` match the calendar date itself;
+  3. `*_lag_1` equals the previous calendar day, and is NULL when that day is
      missing (a date gap) or when the row is the first in the series;
-  3. `*_roll_7` / `*_roll_30` are NULL unless every one of the preceding 6 / 29
+  4. `*_roll_7` / `*_roll_30` are NULL unless every one of the preceding 6 / 29
      calendar days is present, and equal the mean over that full window when it is.
 
-Check 3 used to re-implement features.py's old `if i >= 6:` row-index logic,
-which meant it ratified the bug it was supposed to catch. It now asserts the
-full-window property that vericast/pm25/features.py's `COUNT(pm2_5) OVER wN`
-guarantees, so the two disagree if either drifts. (It counts the averaged column
-rather than `*` for the same reason `len(values)` here excludes NULLs - a
-thin-hours day is a present row with an absent value.)
+Check 4 asserts the full-window property features.py's `COUNT(pm2_5) OVER wN`
+guarantees, derived independently, so the two disagree if either drifts. Both
+exclude NULLs: a thin-hours day is a present row with an absent value.
 """
 import os
 import psycopg
 from datetime import timedelta
 from dotenv import load_dotenv
 
+from vericast import require_city_of_record
+
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-CITY = os.getenv("CITY", "Nagpur")
+CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
 
 TOLERANCE = 1e-9
 
@@ -48,7 +48,8 @@ LAGS = [
 SAME_DAY = ["temperature_2m_mean", "wind_speed_10m_max", "precipitation_sum"]
 
 OBS_COLS = ["pm2_5", "pm10", "temperature_2m_mean", "wind_speed_10m_max", "precipitation_sum"]
-FEAT_COLS = [c for c, _ in LAGS] + [c for c, _, _ in ROLLING] + SAME_DAY
+FEAT_COLS = ([c for c, _ in LAGS] + [c for c, _, _ in ROLLING] + SAME_DAY
+             + ["day_of_week", "month", "is_weekend"])
 
 
 def mismatch(a, b, tol=TOLERANCE):
@@ -87,7 +88,20 @@ def run_leakage_test():
             if mismatch(feat[col], today[col]):
                 errors.append(f"{as_of}: {col} {feat[col]} != observation {today[col]}")
 
-        # 2. Lags come from the previous *calendar* day, or are NULL if it is absent.
+        # 2. Calendar columns. ISODOW is Mon=1, the column is Mon=0 - an off-by-one
+        #    here shifts every weekday the model sees and shows up nowhere else.
+        #    is_weekend is BOOLEAN here and INT in electricity_features, so both
+        #    halves go through bool().
+        if feat["day_of_week"] != as_of.weekday():
+            errors.append(f"{as_of}: day_of_week is {feat['day_of_week']}, "
+                          f"expected {as_of.weekday()}")
+        if feat["month"] != as_of.month:
+            errors.append(f"{as_of}: month is {feat['month']}, expected {as_of.month}")
+        if bool(feat["is_weekend"]) != (as_of.weekday() >= 5):
+            errors.append(f"{as_of}: is_weekend is {feat['is_weekend']}, "
+                          f"expected {as_of.weekday() >= 5}")
+
+        # 3. Lags come from the previous *calendar* day, or are NULL if it is absent.
         prev = obs.get(as_of - timedelta(days=1))
         for fcol, ocol in LAGS:
             expected = None if prev is None else prev[ocol]
@@ -96,7 +110,7 @@ def run_leakage_test():
                     f"{as_of}: {fcol} is {feat[fcol]}, expected {expected}"
                     + ("" if prev else " (NULL - previous day absent)"))
 
-        # 3. Rolling means need every day of the window, else NULL.
+        # 4. Rolling means need every day of the window, else NULL.
         for fcol, ocol, days in ROLLING:
             window = [obs.get(as_of - timedelta(days=d)) for d in range(days)]
             values = [w[ocol] for w in window if w is not None and w[ocol] is not None]

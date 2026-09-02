@@ -64,14 +64,12 @@ TABLES = {
             UNIQUE(city, as_of)
         );
     """,
-    # `source` here is the same column, and the same DEFAULT, as on
-    # model_performance below - but it matters more, because /evaluation is the
-    # headline accuracy claim and it aggregates these rows directly. A 'daily'
-    # row was published before its actual_pm2_5 existed; a 'backtest' row was
-    # written by experiments/save_backtest_results.py with the actual already in
-    # hand. Averaging them together answers a different question than the one
-    # this project exists to answer, and before this column there was no way to
-    # tell them apart after the fact.
+    # `source` splits the record: a 'daily' row was published before its
+    # actual_pm2_5 existed, a 'backtest' row was written by
+    # experiments/save_backtest_results.py with the actual already in hand.
+    # /evaluation aggregates these rows directly and is the headline accuracy
+    # claim, so averaging the two answers a different question than the one this
+    # project exists to answer.
     "predictions": """
         CREATE TABLE IF NOT EXISTS predictions (
             id SERIAL PRIMARY KEY,
@@ -85,19 +83,15 @@ TABLES = {
             UNIQUE(city, forecast_date, model)
         );
     """,
-    # No city column, unlike its electricity counterpart: this table predates
-    # the second target and the live PM2.5 record is keyed on (score_date, model).
-    # Consequence, since nothing else states it: changing CITY needs a migration,
-    # not just an env var - rows from two cities would land on the same
-    # (score_date, model) key and overwrite each other.
+    # No city column, unlike its electricity counterpart: this table predates the
+    # second target, so changing CITY needs a migration, not just an env var -
+    # two cities' rows would land on the same (score_date, model) key.
     #
-    # Rows here come from vericast/pm25/score.py (one scored day, sample_size
-    # normally 1) and, once at launch, from experiments/save_backtest_results.py
-    # (a whole backtest, sample_size in the hundreds). `source` is what tells them
-    # apart, because /leaderboard needs it: it reads the latest score_date per
-    # model, so a backtest re-run today would become the published leaderboard
-    # with a sample_size of several hundred. The DEFAULT is 'daily' so the honest
-    # writer (score.py) never has to name the column - only the backtests do.
+    # Rows come from vericast/pm25/score.py (one scored day, sample_size normally
+    # 1) and, once at launch, from experiments/save_backtest_results.py (a whole
+    # backtest, sample_size in the hundreds). /leaderboard reads the latest
+    # score_date per model, so without `source` a backtest re-run today would
+    # become the published leaderboard.
     "model_performance": """
         CREATE TABLE IF NOT EXISTS model_performance (
             id SERIAL PRIMARY KEY,
@@ -168,10 +162,9 @@ TABLES = {
             UNIQUE(state, forecast_date, model)
         );
     """,
-    # mape lives here and not on the existing model_performance table: adding a
-    # column to a live table the published record reads from is unrequested risk.
-    # `source` is the one exception, and it went on both tables together - see the
-    # model_performance comment above for why /leaderboard needs it.
+    # mape lives here and not on model_performance: adding a column to a live table
+    # the published record reads from is unrequested risk. `source` is the one
+    # exception, and it went on both tables together.
     "electricity_model_performance": """
         CREATE TABLE IF NOT EXISTS electricity_model_performance (
             id SERIAL PRIMARY KEY,
@@ -190,36 +183,25 @@ TABLES = {
 }
 
 # Columns added after the tables were already live. ADD COLUMN IF NOT EXISTS keeps
-# this as idempotent as the CREATEs above, so `python -m vericast.schema` is still
-# safe to run against production - which is what makes this the migration rather
-# than a psql snippet in the README that only one machine ever ran.
+# this as idempotent as the CREATEs above, so `python -m vericast.schema` stays safe
+# to run against production - which is what makes this the migration rather than a
+# psql snippet only one machine ever ran.
 #
 # The backfill is the half that is easy to miss: ADD COLUMN ... DEFAULT 'daily'
-# marks the existing backtest rows 'daily' too, so /leaderboard and /evaluation
-# would still be reading them as published-then-verified.
+# marks the existing backtest rows 'daily' too.
 #
 # All four backfills are bounded by created_at, because an unbounded one is a
-# standing rule rather than a migration. Every writer now labels its own rows -
-# score.py and predict.py force 'daily', the two
-# experiments/save_*_backtest_results.py scripts write the 'backtest' literal - so
-# only rows that predate the column ever need fixing, and those are exactly the rows
-# the bound selects. Without it these would keep firing forever on rules that are
-# only true of the launch data: a legitimate multi-day daily score would be
-# relabelled 'backtest' and drop off /leaderboard permanently, and this file has no
-# down-migration to undo that.
+# standing rule rather than a migration. Every writer now labels its own rows, so
+# only rows predating the column need fixing - and those are exactly what the bound
+# selects. Unbounded, a legitimate multi-day daily score would be relabelled
+# 'backtest' and drop off /leaderboard permanently, with no down-migration to undo
+# it. The other available bound (MAX(score_date) WHERE source = 'backtest') is a
+# value the seeders *advance*, so "re-run the seeder, then run this module" was two
+# routine operations that together relabelled verified rows.
 #
-# The row-level pair is the one that needed the bound most, and shipped without it.
-# Their other bound - MAX(score_date) WHERE source = 'backtest' - is a value
-# experiments/save_backtest_results.py *advances*, because its aggregate upsert sets
-# source = EXCLUDED.source on conflict with score_date = evaluation_dates[-1]. So
-# "re-run the seeder, then run this module" was two documented routine operations
-# that together relabelled verified rows. created_at closes it: a row published
-# after the migration date is never a candidate, whatever the seeder does to the
-# bound afterwards.
-#
-# The date is in the past and must stay there. A cutoff in the future leaves the
-# window open on rows being written today, which is the whole failure mode.
-MIGRATION_CUTOFF = "2026-08-29"  # `source` landed this day; nothing written since is a candidate
+# The date is in the past and must stay there: a future cutoff leaves the window
+# open on rows being written today, which is the whole failure mode.
+MIGRATION_CUTOFF = "2026-08-29"  # `source` landed this day
 
 MIGRATIONS = (
     "ALTER TABLE model_performance "
@@ -235,17 +217,15 @@ MIGRATIONS = (
     f"WHERE sample_size > 1 AND source = 'daily' AND created_at < '{MIGRATION_CUTOFF}';",
 
     # Row-level tables. /evaluation aggregates these directly and is the headline
-    # accuracy claim, so it needs the same column - see the predictions comment above.
+    # accuracy claim, so it needs the same column.
     "ALTER TABLE predictions "
     "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
     "ALTER TABLE electricity_predictions "
     "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
     # The bound is derived from the data rather than guessed: the backtest's own
-    # aggregate row records score_date = its last evaluated date, and it is already
-    # correctly labelled, so every prediction row it wrote has
-    # forecast_date <= that date and every row published afterwards is past it.
-    # NULL subquery (no backtest seeded) makes the comparison NULL and updates
-    # nothing, which is the right answer on a fresh database.
+    # aggregate row records score_date = its last evaluated date, so every
+    # prediction row it wrote has forecast_date <= that date. A NULL subquery (no
+    # backtest seeded) makes the comparison NULL and updates nothing.
     "UPDATE predictions SET source = 'backtest' "
     "WHERE source = 'daily' AND forecast_date <= "
     "(SELECT MAX(score_date) FROM model_performance WHERE source = 'backtest') "
@@ -259,9 +239,8 @@ MIGRATIONS = (
 
 
 def create_tables():
-    # Same guard as app.py:16. This runs unattended in ci.yml; without it a
-    # missing DSN reaches psycopg as None and surfaces as a connection-string
-    # parse error rather than the actual problem.
+    # Runs unattended in ci.yml; without this a missing DSN reaches psycopg as None
+    # and surfaces as a connection-string parse error rather than the real problem.
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL environment variable is not set")
 

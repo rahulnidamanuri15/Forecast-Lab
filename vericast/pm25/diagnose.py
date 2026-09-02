@@ -17,18 +17,19 @@ from vericast import (
     PM25_MIN,
     PM25_STALE_LIMIT_DAYS,
     local_time,
+    require_city_of_record,
 )
+from vericast.pm25.train import FEATURE_COLUMNS
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-CITY = os.getenv("CITY", "Nagpur")
+CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
 
-# Imported, not defined here, for the same reason as STALE_LIMIT_DAYS below:
-# pm25/ingest.py gates the incoming *observation* on these bounds and this gates
-# the outgoing *forecast*, and two copies could drift into a publish gate looser
-# than the ingest one. Still the only check on the forecast's value - nothing in
-# app.py or verify_deployment_readiness.py looks at it - so this stays the gate
-# between a -40 ug/m3 prediction and the public record.
+# Shared with ingest.py's gate on the incoming *observation* and with predict.py's
+# refuse_implausible() gate on the outgoing forecast, so none of the three can
+# drift looser than the others. This file is the trend/sigma half of the publish
+# gate; the range half now also runs before predict.py's commit, where refusing
+# still means nothing was published.
 MIN_PM25, MAX_PM25 = PM25_MIN, PM25_MAX
 
 SIGMA_LIMIT = 3.0   # forecast must sit within 3 sd of the trailing 30-day mean
@@ -37,8 +38,7 @@ SIGMA_LIMIT = 3.0   # forecast must sit within 3 sd of the trailing 30-day mean
 # same number, and when this file owned it they drifted. See vericast/__init__.py.
 STALE_LIMIT_DAYS = PM25_STALE_LIMIT_DAYS
 
-# Both models vericast/pm25/predict.py publishes. Same role as
-# vericast/elec/diagnose.py:36: predict.py warns and skips a model rather than
+# Both models predict.py publishes. It warns and skips a model rather than
 # raising, so without a completeness check here a day that published only the
 # naive baseline exits 0 and the pipeline treats it as a full run.
 EXPECTED_MODELS = {"naive_baseline", "lightgbm"}
@@ -47,11 +47,9 @@ EXPECTED_MODELS = {"naive_baseline", "lightgbm"}
 def expected_models(latest_pm25):
     """The models predict.py would actually have published for this run.
 
-    It skips naive_baseline when the latest observation carries a NULL pm2_5 - a
-    thin-hours day under ingest.py's MIN_HOURS_PER_DAY - rather than publishing a
-    NULL forecast, so demanding it here would turn a deliberate degradation into a
-    red pipeline. lightgbm is NOT excused for NULL features: check 4 already fails
-    on that, and one report of a problem is the right number.
+    naive_baseline is excused on a thin-hours day (NULL pm2_5), which predict.py
+    skips deliberately. lightgbm is not excused for NULL features: check 4 already
+    fails on that, and one report of a problem is the right number.
     """
     return EXPECTED_MODELS - ({"naive_baseline"} if latest_pm25 is None else set())
 
@@ -93,14 +91,12 @@ def main():
             latest_obs, latest_pm25 = obs_row if obs_row else (None, None)
             print(f"  Latest observation date: {latest_obs}")
 
-            # 2b. Is the upstream source still moving? Ported from
-            #     vericast/elec/diagnose.py:63-75. Everything below this point
-            #     is an internal-consistency check anchored on latest_obs, so
-            #     all of them pass while Open-Meteo is a week stale - the anchor
-            #     just slides. This is the only check that looks at the clock.
-            #     Early return rather than `all_ok &=`: with no observations at
-            #     all, expected_date is None and the checks below compare
-            #     against nothing.
+            # 2b. Is the upstream source still moving? Every check below is an
+            #     internal-consistency check anchored on latest_obs, so all of
+            #     them pass while Open-Meteo is a week stale - the anchor just
+            #     slides. This is the only check that looks at the clock. Early
+            #     return, not `all_ok &=`: with no observations expected_date is
+            #     None and the checks below compare against nothing.
             if latest_obs is None:
                 check("Observations exist", False, f"no observations for {CITY}")
                 print("=" * 60)
@@ -129,23 +125,30 @@ def main():
                 "vericast/pm25/features.py needs to run" if latest_feat != latest_obs else "",
             )
 
-            # 4. Are there NULLs in the latest features row?
+            # 4. Are there NULLs in the latest features row? Column list generated
+            #    from train.FEATURE_COLUMNS rather than spelled out here: the model
+            #    reads exactly those 15, and when this query owned a second copy a
+            #    reorder or a renamed column left it checking the old set - passing
+            #    on the very NULL that stops predict.py's lightgbm arm. Same reason
+            #    verify_deployment_readiness.py generates its copy.
             cur.execute(
-                """
-                SELECT pm2_5_lag_1, pm10_lag_1, temperature_lag_1, wind_speed_lag_1,
-                       precipitation_lag_1, pm2_5_roll_7, pm2_5_roll_30, pm10_roll_7,
-                       pm10_roll_30, day_of_week, month, is_weekend,
-                       temperature_2m_mean, wind_speed_10m_max, precipitation_sum
+                f"""
+                SELECT {", ".join(FEATURE_COLUMNS)}
                 FROM features WHERE city = %s ORDER BY as_of DESC LIMIT 1
                 """,
                 (CITY,),
             )
             row = cur.fetchone()
-            has_nulls = row is None or any(v is None for v in row)
+            # Name the NULL columns rather than dumping the tuple: predict.py's
+            # own warning names them, and 15 values with three Nones buried in
+            # them is a puzzle rather than a report.
+            missing = ([c for c, v in zip(FEATURE_COLUMNS, row) if v is None]
+                       if row else list(FEATURE_COLUMNS))
             all_ok &= check(
                 "Latest features row has no NULLs",
-                not has_nulls,
-                str(row) if has_nulls else "",
+                not missing,
+                ("no features row at all" if row is None else str(missing))
+                if missing else "",
             )
 
             # 5. Does a lightgbm prediction row actually exist?
@@ -164,18 +167,15 @@ def main():
                 pred_row is not None,
                 "no lightgbm rows found at all" if pred_row is None else str(pred_row),
             )
-            # No staleness sub-check on MAX(forecast_date) here. `fdate < latest_obs`
-            # passed at fdate == latest_obs - a forecast published for today rather
-            # than tomorrow, which is exactly the failure it looked like it caught.
-            # Check 6 below tests the real contract (forecast_date == latest_obs + 1)
-            # against the *expected* date, so the weak version was redundant when it
-            # was right and wrong when it disagreed. elec/diagnose.py never had one.
+            # Deliberately no staleness sub-check on MAX(forecast_date): check 6
+            # tests the real contract (forecast_date == latest_obs + 1) against the
+            # expected date, and any weaker version of it passes on a forecast
+            # published for today rather than tomorrow.
 
             # 6. Is every value published for that date physically plausible?
-            #    Ported from vericast/elec/diagnose.py:91-117. Anchored to
-            #    latest_obs + 1 day, not MAX(forecast_date): if predict.py failed
-            #    today, MAX() silently falls back to yesterday's already-published
-            #    row, which passes every check below and clears the pipeline.
+            #    Anchored to latest_obs + 1 day, not MAX(forecast_date): if
+            #    predict.py failed today, MAX() silently falls back to yesterday's
+            #    already-published row, which passes every check below.
             expected_date = latest_obs + timedelta(days=1)
             cur.execute(
                 """
