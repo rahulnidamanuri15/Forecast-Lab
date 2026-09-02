@@ -1,30 +1,26 @@
 name: Daily Pipeline
 
-# One job, one order. The steps are dependent - actuals must be ingested
-# before yesterday's forecast can be scored - so they run sequentially in a
-# single job instead of as three separate crons that only *hoped* the
-# previous one had finished. Any step failing stops the job (Actions default),
-# which is what we want: a bad forecast is worse than no forecast.
-#
-# Replaces the old ingest.yml / daily-prediction.yml / daily-scoring.yml.
+# One job, one order. The steps are dependent - actuals must be ingested before
+# yesterday's forecast can be scored - so they run sequentially rather than as
+# three crons that only *hoped* the previous one had finished. Any step failing
+# stops the job (Actions default): a bad forecast is worse than no forecast.
 #
 # Two crons, not one, because GitHub's scheduler is best-effort on a free public
-# repo: observed drift was 20-32 min through 08-26, then 11 hours on 08-27, then a
-# dropped run on 08-28. Every write below is an `ON CONFLICT ... DO UPDATE` upsert
-# and both score.py files score EVERY pending row, so the second cron is a free
-# no-op when the first landed and a full catch-up when it didn't.
+# repo (observed drift: 20-32 min, once 11 hours, once a dropped run). Every write
+# below upserts and both score.py files score EVERY pending row, so the second
+# cron is a free no-op when the first landed and a full catch-up when it didn't.
 on:
   schedule:
     - cron: "17 5 * * *"  # 05:17 UTC = 10:47 IST; off the top-of-hour minute, which is the most contended slot
     - cron: "42 8 * * *"  # 08:42 UTC = 14:12 IST; retry net if the 05:17 run was dropped
   workflow_dispatch: {}
 
-# The two crons above can overlap once the scheduler drifts by hours, which would
-# run two full-recompute feature passes and two predict.py runs against the same
-# forecast_date at once. Every write upserts so the data still converges, but the
-# race is free to remove. cancel-in-progress: false deliberately - the second cron
-# is a catch-up, not a replacement, and cancelling mid-run could stop a job between
-# predict.py's commit and diagnose.py's gate. Same shape as static.yml.
+# The two crons can overlap once the scheduler drifts by hours, running two
+# feature passes and two predict.py runs against the same forecast_date. Every
+# write upserts so the data converges anyway, but the race is free to remove.
+# cancel-in-progress: false deliberately - the second cron is a catch-up, not a
+# replacement, and cancelling could stop a job between predict.py's commit and
+# diagnose.py's gate.
 concurrency:
   group: daily-pipeline
   cancel-in-progress: false
@@ -43,7 +39,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: "3.11"
+          python-version-file: .python-version
           cache: pip
 
       - name: Install dependencies
@@ -68,9 +64,8 @@ jobs:
         run: python -m vericast.pm25.diagnose
 
   # Deliberately no `needs:` - the two targets share nothing but the database.
-  # The electricity source is a community mirror that lags 2-4 days and can
-  # stall; chaining these would let that stall block the live PM2.5 forecast,
-  # which has its own working upstream. Independent jobs also run in parallel.
+  # The electricity mirror lags 2-4 days and can stall; chaining these would let
+  # that stall block the live PM2.5 forecast, which has its own working upstream.
   electricity:
     runs-on: ubuntu-latest
     env:
@@ -81,7 +76,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: "3.11"
+          python-version-file: .python-version
           cache: pip
 
       - name: Install dependencies

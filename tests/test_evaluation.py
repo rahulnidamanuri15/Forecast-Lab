@@ -1,12 +1,13 @@
 import os
 import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import app
+from conftest import wire_cursor
 from vericast import local_time
 
 CITY = os.getenv("CITY", "Nagpur")
@@ -22,24 +23,10 @@ client = TestClient(app)
 # 'daily' surfaces as `verified` and 'backtest' as `backtest` - see app.PROVENANCE.
 
 
-def _mock_rows(mock_get_db, rows):
-    """Wire a mocked pool connection whose fetchall returns `rows`.
-
-    Every test here needs the same four-line MagicMock dance; it was copied
-    verbatim five times before.
-    """
-    mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_get_db.return_value.__enter__.return_value = mock_conn
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-    mock_cursor.fetchall.return_value = rows
-    return mock_cursor
-
-
 def test_evaluation_endpoint_success():
     """200, one entry per model, metrics nested under their provenance."""
     with patch('app.get_db_connection') as mock_get_db:
-        mock_cursor = _mock_rows(mock_get_db, [
+        mock_cursor = wire_cursor(mock_get_db, [
             ('lightgbm', 'daily', 2, 1, 0.35, 0.3807886553),
             ('naive_baseline', 'daily', 1, 1, 0.2, 0.2),
         ])
@@ -88,7 +75,7 @@ def test_evaluation_splits_provenance_without_averaging():
     reader to quote by mistake.
     """
     with patch('app.get_db_connection') as mock_get_db:
-        _mock_rows(mock_get_db, [
+        wire_cursor(mock_get_db, [
             ('lightgbm', 'daily', 4, 1, 8.0, 9.0),
             ('lightgbm', 'backtest', 300, 0, 2.0, 3.0),
         ])
@@ -112,7 +99,7 @@ def test_evaluation_splits_provenance_without_averaging():
 def test_evaluation_reports_unknown_source_under_its_own_name():
     """A source nobody planned for still has to appear, or the counts stop adding up."""
     with patch('app.get_db_connection') as mock_get_db:
-        _mock_rows(mock_get_db, [('lightgbm', 'shadow', 3, 0, 1.5, 2.0)])
+        wire_cursor(mock_get_db, [('lightgbm', 'shadow', 3, 0, 1.5, 2.0)])
 
         response = client.get("/evaluation")
 
@@ -123,7 +110,7 @@ def test_evaluation_reports_unknown_source_under_its_own_name():
 
 def test_evaluation_endpoint_no_data():
     with patch('app.get_db_connection') as mock_get_db:
-        _mock_rows(mock_get_db, [])
+        wire_cursor(mock_get_db, [])
 
         response = client.get("/evaluation?days=7")
 
@@ -144,7 +131,7 @@ def test_evaluation_endpoint_database_error():
 def test_evaluation_full_record_omits_window():
     """No days= means every prediction ever published, and window_days is null."""
     with patch('app.get_db_connection') as mock_get_db:
-        mock_cursor = _mock_rows(mock_get_db, [
+        mock_cursor = wire_cursor(mock_get_db, [
             ('lightgbm', 'daily', 2, 0, 0.35, 0.3807886553),
         ])
 
@@ -178,7 +165,7 @@ def test_evaluation_sorts_unscored_models_last():
     """A model with no scored rows must not blow up the sort."""
     with patch('app.get_db_connection') as mock_get_db:
         # Both models are entirely pending -> two None maes.
-        _mock_rows(mock_get_db, [
+        wire_cursor(mock_get_db, [
             ('lightgbm', 'daily', 0, 1, None, None),
             ('naive_baseline', 'daily', 0, 1, None, None),
         ])
@@ -198,7 +185,7 @@ def test_evaluation_sorts_on_verified_mae():
     treated as unscored.
     """
     with patch('app.get_db_connection') as mock_get_db:
-        _mock_rows(mock_get_db, [
+        wire_cursor(mock_get_db, [
             ('unscored', 'daily', 0, 2, None, None),
             ('worse', 'daily', 5, 0, 9.0, 10.0),
             ('backtest_only', 'backtest', 40, 0, 4.0, 5.0),

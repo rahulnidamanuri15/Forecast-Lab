@@ -90,10 +90,14 @@ def test_the_middleware_is_wired_and_off_under_the_test_client():
     """The counter being right is worthless if the middleware never consults it,
     and the skip being wrong would 429 the rest of this suite as it grows.
 
-    So both halves: with no pool (every other test's state) a flood stays 200,
-    and with a pool present the same flood ends in a 429 carrying Retry-After.
+    So both halves: outside the lifespan (every other test's state) a flood stays
+    200, and under it the same flood ends in a 429 carrying Retry-After.
+
+    Keyed on `_under_lifespan`, not on `_pool`: the limiter must stay on in a
+    deployment whose pool failed to open, which is precisely when one runaway
+    client does the most damage.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     from fastapi.testclient import TestClient
 
@@ -102,10 +106,11 @@ def test_the_middleware_is_wired_and_off_under_the_test_client():
     client = TestClient(app_module.app)
     flood = RATE_LIMIT_MAX_REQUESTS + 2
 
-    assert app_module._pool is None
+    assert app_module._under_lifespan is False
     assert all(client.get("/").status_code == 200 for _ in range(flood))
 
-    with patch.object(app_module, "_pool", MagicMock()):
+    # No pool, but under the lifespan: still throttled.
+    with patch.object(app_module, "_under_lifespan", True):
         app_module._rate_window_start, app_module._rate_hits = 0.0, {}
         codes = [client.get("/").status_code for _ in range(flood)]
 
@@ -115,3 +120,25 @@ def test_the_middleware_is_wired_and_off_under_the_test_client():
     assert codes[-1] == 429
     limited = client.get("/")  # window state was reset, so this one is fine again
     assert limited.status_code == 200
+
+
+def test_a_missing_pool_under_the_lifespan_is_a_503_not_a_silent_connect():
+    """The flaw the `_under_lifespan` split closes.
+
+    With one flag meaning both "no pool" and "not under the lifespan", a lifespan
+    that failed to build a pool served every request on a fresh direct connection,
+    unthrottled, until Neon's connection cap turned it into a 500 for everyone.
+    """
+    from unittest.mock import patch
+
+    import pytest
+    from fastapi import HTTPException
+
+    import app as app_module
+
+    with patch.object(app_module, "_under_lifespan", True), \
+         patch.object(app_module, "_pool", None):
+        with pytest.raises(HTTPException) as excinfo:
+            app_module.get_db_connection()
+
+    assert excinfo.value.status_code == 503

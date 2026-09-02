@@ -1,16 +1,39 @@
+"""Publish tomorrow's Nagpur PM2.5 forecast for two models.
+
+The forecast is always labelled "the day after the data we actually have", not
+blindly real-world tomorrow, so a stalled ingest produces a correctly-labelled
+forecast rather than a mislabelled one.
+
+Every publish path is gated *before* its commit: staleness, then plausibility.
+diagnose.py (step 6/6) still range-checks what was written and adds the trend
+and sigma checks, but it cannot be the only gate - by the time it runs, a bad
+row is public and /forecast is serving it.
+"""
 import os
 import psycopg
 import lightgbm as lgb
 from datetime import timedelta
 from dotenv import load_dotenv
 
-from vericast import MODEL_PM25 as MODEL_PATH, local_time
+from vericast import (
+    MODEL_PM25 as MODEL_PATH,
+    PM25_MAX,
+    PM25_MIN,
+    PM25_STALE_LIMIT_DAYS,
+    local_time,
+    refuse_implausible,
+    refuse_stale,
+    require_city_of_record,
+)
 from vericast.pm25.train import FEATURE_COLUMNS
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-CITY = os.getenv("CITY", "Nagpur")
+CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
+
+UNIT = "ug/m3"
+
 
 
 def load_lightgbm_model():
@@ -40,14 +63,10 @@ def get_latest_feature_row(cur):
 def make_daily_prediction():
     """Make a daily prediction for the day after the latest observation and store it"""
     # The connection is the context manager, as in score.py: a raise anywhere
-    # below closes it instead of leaking it against Neon's connection limit. No
-    # try/except wrapper - it only relabelled a traceback that already names
-    # this module.
+    # below closes it instead of leaking it against Neon's connection limit.
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
         lgbm_model = load_lightgbm_model()
 
-        # Real-world "today" in the operating timezone (see vericast/local_time.py),
-        # used only to detect staleness in the warning below.
         today = local_time.today()
         yesterday = today - timedelta(days=1)
 
@@ -66,34 +85,29 @@ def make_daily_prediction():
 
         as_of, pm2_5 = row
 
-        # The forecast is always "the day after the data we actually have",
-        # NOT blindly "real-world tomorrow". If ingestion has stalled and
-        # as_of is stale, we still label the forecast correctly relative to
-        # the data it's based on, instead of mislabeling old data as a
-        # forecast for real-world tomorrow.
+        # The forecast is always "the day after the data we actually have", NOT
+        # blindly "real-world tomorrow": if ingestion has stalled, the forecast is
+        # still labelled correctly relative to the data behind it.
         forecast_date = as_of + timedelta(days=1)
 
+        # Raises past the limit, before anything is published. Under the limit
+        # (1 stale day is PM2.5's steady state) it just reports the age.
+        stale_days = refuse_stale(as_of, today, PM25_STALE_LIMIT_DAYS, "PM2.5")
         if as_of != yesterday:
-            staleness_days = (today - as_of).days
-            print(
-                f"[WARN] Warning: most recent observation is from {as_of}, which is "
-                f"{staleness_days} day(s) old (expected data through {yesterday}). "
-                f"Ingestion may not be running. Forecasting for {forecast_date} "
-                f"based on stale data instead of for {today + timedelta(days=1)}."
-            )
+            print(f"[WARN] Most recent observation is from {as_of}, {stale_days} "
+                  f"day(s) old (expected data through {yesterday}). Forecasting "
+                  f"for {forecast_date}, not {today + timedelta(days=1)}.")
+
 
         print(f"Making prediction for {forecast_date} based on {as_of}'s observation")
 
-        # Insert or update the naive baseline prediction for forecast_date.
-        # Note: the unique constraint is (city, forecast_date, model), so
-        # naive and lightgbm rows for the same date coexist rather than
-        # overwriting each other.
+        # The unique constraint is (city, forecast_date, model), so naive and
+        # lightgbm rows for the same date coexist.
         #
-        # `source` omitted from the INSERT (schema.py declares DEFAULT 'daily')
-        # and forced in the DO UPDATE, same reason as score.py's UPSERT_PERF_SQL:
-        # a DEFAULT applies to inserts only, so a real forecast landing on a date
-        # the launch backtest seeded would keep source='backtest' and stay out of
-        # the published-then-verified half of /evaluation forever.
+        # `source` omitted from the INSERT (schema.py declares DEFAULT 'daily') and
+        # forced in the DO UPDATE: a DEFAULT applies to inserts only, so a real
+        # forecast landing on a date the launch backtest seeded would keep
+        # source='backtest' and stay out of /evaluation's verified half forever.
         upsert_sql = """
         INSERT INTO predictions (city, forecast_date, predicted_pm2_5, model)
         VALUES (%s, %s, %s, %s)
@@ -103,27 +117,29 @@ def make_daily_prediction():
             created_at = CURRENT_TIMESTAMP;
         """
 
-        # A thin-hours day is stored as pm2_5 = NULL by vericast/pm25/ingest.py
-        # (under MIN_HOURS_PER_DAY = 18 real hours), so the naive baseline has
-        # nothing to carry forward. Warn and skip the model rather than raise -
-        # same shape as the per-model guards in vericast/elec/predict.py, and
-        # diagnose.py is the step that fails the job when nothing publishable
-        # was written. Publishing NULL instead would commit here and then crash
-        # on the format below, leaving a row that 500s /forecast and scores as a
-        # NaN MAE into model_performance.
+        # A thin-hours day is stored as pm2_5 = NULL by ingest.py, so the naive
+        # baseline has nothing to carry forward. Warn and skip rather than raise -
+        # diagnose.py is the step that fails the job when nothing publishable was
+        # written. Publishing NULL would commit here, crash on the format below,
+        # and leave a row that 500s /forecast and scores as a NaN MAE.
         if pm2_5 is None:
             print(f"[WARN] Latest observation ({as_of}) has NULL pm2_5 (too few "
                   f"hours ingested); skipping naive_baseline rather than "
                   f"publishing a NULL forecast for {forecast_date}.")
         else:
+            # Before the commit, not after: refusing here means nothing was
+            # published. Persistence carries an observation forward, so an
+            # out-of-range value means ingest's own gate let one through - raise
+            # rather than skip, since every model below reads the same source.
+            pm2_5 = refuse_implausible(pm2_5, PM25_MIN, PM25_MAX,
+                                       "naive_baseline", UNIT)
             cur.execute(upsert_sql, (CITY, forecast_date, pm2_5, "naive_baseline"))
             conn.commit()
 
             print(f"[OK] Stored naive_baseline prediction for {forecast_date}: {pm2_5:.2f} PM2.5")
 
-        # LightGBM prediction, if a trained artifact is available.
-        # Uses the latest features row (as_of == as_of of latest observation),
-        # since that row's lag/rolling features are what predict forecast_date.
+        # LightGBM prediction, if a trained artifact is available. Conditions on the
+        # latest features row, whose lag/rolling values are what predict forecast_date.
         if lgbm_model is not None:
             feature_row = get_latest_feature_row(cur)
             if feature_row is None:
@@ -146,15 +162,15 @@ def make_daily_prediction():
                     X = np.array([feature_values], dtype=float)
                     lgbm_pred = float(lgbm_model.predict(X)[0])
 
+                    lgbm_pred = refuse_implausible(lgbm_pred, PM25_MIN, PM25_MAX,
+                                                   "lightgbm", UNIT)
                     cur.execute(upsert_sql, (CITY, forecast_date, lgbm_pred, "lightgbm"))
                     conn.commit()
                     print(f"[OK] Stored lightgbm prediction for {forecast_date}: {lgbm_pred:.2f} PM2.5")
 
-        # Scoring is vericast/pm25/score.py's job, not this script's. It runs as
-        # step 4/6 of the daily pipeline, before this script, and it scores
-        # *every* pending row rather than just yesterday's - so a missed day
-        # self-heals. A second copy of that logic here only gave the same rule
-        # two places to drift apart.
+        # Scoring is score.py's job: it runs as step 4/6, before this script, and
+        # scores *every* pending row rather than just yesterday's, so a missed day
+        # self-heals. A second copy here only gave the rule two places to drift.
 
         return True
 

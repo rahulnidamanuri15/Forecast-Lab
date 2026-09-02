@@ -54,6 +54,36 @@ def test_feature_columns_have_one_definition_per_target():
     assert len(elec_train.FEATURE_COLUMNS) == 14
 
 
+def test_the_publish_gates_check_the_columns_the_model_reads():
+    """diagnose.py's features-NULL check must generate its column list, not copy it.
+
+    pm25/diagnose.py spelled the 15 columns out as a SQL literal. That passed every
+    test here while checking whatever set was current when it was written: rename or
+    reorder a feature and the gate goes on asserting the old one, reporting PASS on
+    the exact NULL that makes predict.py skip its lightgbm arm.
+
+    Imported inside the test, as tests/test_mirror_guards.py does - these modules
+    read CITY at import and refuse a city other than Nagpur.
+    """
+    from vericast.elec import diagnose as elec_diagnose
+    from vericast.pm25 import diagnose as pm25_diagnose
+
+    assert pm25_diagnose.FEATURE_COLUMNS is pm25_train.FEATURE_COLUMNS
+    assert elec_diagnose.FEATURE_COLUMNS is elec_train.FEATURE_COLUMNS
+
+    # And the check itself still exists in both. elec/diagnose.py had no
+    # features-NULL check at all: a date gap left predict.py skipping LightGBM with
+    # a WARN and exit 0, and the only complaint was "lightgbm did not publish" -
+    # the symptom, two checks later, with nothing naming the NULL column.
+    # A text assertion because the logic sits inside main(), which needs a database;
+    # same reason tests/test_features_sql.py asserts against a SQL template.
+    for module in (pm25_diagnose, elec_diagnose):
+        with open(module.__file__, encoding="utf-8") as fh:
+            source = fh.read()
+        assert "Latest features row has no NULLs" in source, (
+            f"{module.__name__} no longer gates on a NULL feature")
+
+
 def test_predict_uses_the_shared_artifact_path():
     assert pm25_predict.MODEL_PATH == MODEL_PM25
     assert elec_predict.MODEL_PATH == MODEL_ELEC

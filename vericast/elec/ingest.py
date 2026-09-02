@@ -36,30 +36,25 @@ DEMAND_CSV_URL = (
 
 REQUIRED_CSV_COLUMNS = {"state", "date", "max_demand_met_mw", "energy_met_mu"}
 
-# Deliberately tracking `main` rather than pinning a commit SHA. A pin would make
-# the fetch reproducible and stop an upstream schema change from reaching us - but
-# it would also freeze the file, and this mirror runs 2-4 days behind and backfills
-# late, so a pinned SHA can only ever serve dates that already existed when it was
-# taken. That is exactly the hole-filling the RESCAN_DAYS re-scan depends on, so a
-# pin would trade a rare guard for a permanent one.
+# Tracking `main`, not a pinned commit SHA. A pin would freeze the file, and this
+# mirror runs 2-4 days behind and backfills late, so a pinned SHA can only ever
+# serve dates that already existed when it was taken - which is exactly the
+# hole-filling the RESCAN_DAYS re-scan depends on.
 #
-# What replaces the pin: the two guards below fail loudly instead of quietly, which
-# is the property a pin was actually wanted for. REQUIRED_CSV_COLUMNS catches a
-# rename or a dropped column before any row is accepted; plausible_mw() catches a
-# changed value - a unit switch to kW or GW, or the column meaning something else -
-# which no column-name check can see. Neither catches a plausible-but-wrong number,
-# and nothing can: the accuracy record rests on this mirror being honest.
+# What replaces it: REQUIRED_CSV_COLUMNS catches a rename or a dropped column before
+# any row is accepted, and plausible_mw() catches a changed *value* - a unit switch
+# to kW or GW - which no column-name check can see. Neither catches a
+# plausible-but-wrong number, and nothing can.
 
 
 def plausible_mw(value):
     """True when `value` could be a whole state's daily peak demand, in MW.
 
     The mirror is a third-party CSV at a mutable branch, so the unit is an
-    assumption, not a guarantee. A switch to kW (x1000) or GW (/1000), or the column
-    coming to mean something else, would otherwise flow straight into the scored
-    record and be indistinguishable from a real forecasting error afterwards.
-    Bounds live in vericast/__init__.py; out-of-range days are skipped, exactly like
-    a blank one, rather than raising and abandoning the rows already accepted.
+    assumption. A switch to kW (x1000) or GW (/1000) would otherwise flow into the
+    scored record and be indistinguishable from a real forecasting error afterwards.
+    Out-of-range days are skipped, exactly like a blank one, rather than raising and
+    abandoning the rows already accepted.
     """
     return ELEC_MIN_MW <= value <= ELEC_MAX_MW
 
@@ -94,9 +89,7 @@ def get_earliest_hole(cur, since):
 
     Only absent rows, unlike the PM2.5 twin: peak_demand_mw is NOT NULL here, so a
     day the mirror served blank was skipped at insert time rather than stored as
-    NULL. Those are exactly the dates worth re-reading, since the mirror backfills
-    late - which is also why 2026-08-24/25/28 have no daily forecast: no
-    observation ever arrived, so predict.py was never asked for one.
+    NULL. Those are the dates worth re-reading, since the mirror backfills late.
     """
     cur.execute(
         """
@@ -113,14 +106,12 @@ def get_earliest_hole(cur, since):
 def resolve_date_range():
     """First run backfills from INITIAL_START; later runs take the earlier of
     "the day after the latest stored observation" and "the earliest missing day in
-    the last RESCAN_DAYS days". End is capped at yesterday - the demand mirror is
-    historical and typically 2-4 days behind, so most runs find nothing new.
+    the last RESCAN_DAYS days". End is capped at yesterday.
 
-    The re-scan is what makes a skipped day temporary. A monotonic resume off
-    MAX(as_of) alone left 2025-05-21 -> 05-24 permanently behind the resume point;
-    RESCAN_DAYS bounds the re-read so it never re-fetches 1,300 days. Filling one
-    is best-effort - the mirror may simply not have that date - and every write is
-    an upsert, so re-fetching a day already stored is a no-op.
+    The re-scan is what makes a skipped day temporary: a monotonic resume off
+    MAX(as_of) alone left 2025-05-21 -> 05-24 permanently behind the resume point.
+    RESCAN_DAYS bounds the re-read so it never re-fetches 1,300 days, and every
+    write is an upsert, so re-fetching a stored day is a no-op.
     """
     last_date = get_last_observed_date()
 
@@ -157,8 +148,7 @@ def fetch_demand(start_date, end_date):
 
     reader = csv.DictReader(io.StringIO(response.text))
     # Fail naming the URL, not with a KeyError mid-loop after some rows have
-    # already been accepted. See the note beside DEMAND_CSV_URL for why the
-    # mirror is tracked at `main` and these guards stand in for a pin.
+    # already been accepted.
     missing = REQUIRED_CSV_COLUMNS - set(reader.fieldnames or ())
     if missing:
         raise RuntimeError(
@@ -173,11 +163,10 @@ def fetch_demand(start_date, end_date):
         if not (start_str <= date_str <= end_str):
             continue
 
-        # peak_demand_mw is NOT NULL in the schema, so a blank one is a skip, not
-        # a NULL row - a demand row without demand has nothing to score against.
-        # Unparseable is the same case as blank: this is a third-party mirror, so
-        # a stray 'N/A' or a thousands separator must skip the day rather than
-        # raise ValueError halfway through and abandon the rows already accepted.
+        # peak_demand_mw is NOT NULL in the schema, so a blank one is a skip, not a
+        # NULL row - a demand row without demand has nothing to score against.
+        # Unparseable is the same case: a stray 'N/A' from a third-party mirror must
+        # skip the day, not raise halfway through and abandon the accepted rows.
         raw_mw = row["max_demand_met_mw"].strip()
         if not raw_mw:
             skipped += 1

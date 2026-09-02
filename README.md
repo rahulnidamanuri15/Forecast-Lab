@@ -196,7 +196,7 @@ the only way the improvement percentage means anything.
 ```
 app.py                            FastAPI service, both targets
 index.html                        dashboard, one tab per target
-verify_deployment_readiness.py    the single go-live gate (17 checks)
+verify_deployment_readiness.py    the single go-live gate (22 checks)
 models/                           committed LightGBM artifacts
 vericast/
 ├── __init__.py                   resolves models/ paths from the package, not cwd
@@ -218,7 +218,7 @@ vericast/
     ├── train.py                  retrain → models/lightgbm_elec_model.txt; owns FEATURE_COLUMNS
     ├── predict.py                three models, per-model publish guards
     ├── score.py                  fill actual_demand_mw, upsert MAE/RMSE/MAPE
-    └── diagnose.py               6-check publish gate (non-zero exit)
+    └── diagnose.py               7-check publish gate (non-zero exit)
 ```
 
 Same eight filenames in both target packages, so `pm25/x.py` and `elec/x.py` always
@@ -389,7 +389,16 @@ would be re-reading only changes once a day.
   The gate deliberately does *not* vote on "challenger beats the artifact on disk":
   that artifact was trained on the held-out rows, which on live data makes it look
   1.5x (PM2.5) to 2.0x (electricity) better than an honest challenger and would freeze
-  the incumbent forever. Its score is printed for drift, not compared.
+  the incumbent forever. Its score is printed for drift, not compared. Each retrain
+  writes a `<artifact>.window.json` sidecar recording the dates it was fit on, and the
+  commit step stages `models/` as a directory so the sidecar travels with its artifact,
+  so that printed line can say *whether*
+  the incumbent saw the holdout instead of assuming it did — after a skipped week its
+  window genuinely ends before the holdout opens and the comparison is fair. Staging
+  the directory rather than the four paths by name is load-bearing: a refused retrain
+  writes no sidecar, and `git add` on a pathspec that matches nothing exits non-zero
+  under `bash -e`, which aborted the step before its own "nothing to commit" branch and
+  discarded the sibling target's accepted artifact.
 
   Both retrain steps and the commit step carry `if: always()`, for the same reason the
   daily pipeline splits into two jobs: a raising PM2.5 retrain used to abort the
@@ -427,6 +436,13 @@ on real pipeline output; against an *empty* one it seeds 40 synthetic days first
 throwaway Postgres still runs the window-frame queries. That seeding refuses any
 non-local host, because writing fabricated observations into the managed instance would
 contaminate the published record.
+
+`verify_deployment_readiness.py` itself is the one script CI cannot run — its checks need
+a populated database and a live server on `API_BASE`. `tests/test_readiness_gate.py`
+covers what is checkable without either: that every `check_*` function is wired into
+`CHECKS`, that both targets get the three database checks, that no check raises instead of
+returning `False` when its dependency is absent, and that the count above still matches
+the code.
 
 First-time electricity setup (one-off, then the daily job takes over):
 

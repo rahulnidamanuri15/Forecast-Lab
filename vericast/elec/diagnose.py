@@ -26,16 +26,15 @@ from vericast import (
     MODEL_ELEC as MODEL_PATH,
     local_time,
 )
+from vericast.elec.train import FEATURE_COLUMNS
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 STATE = os.getenv("STATE", "Maharashtra")
 
-# Imported, not re-stated: elec/ingest.py rejects an implausible *observation* and
-# this rejects an implausible *forecast* against the same claim about the target.
-# When this file owned a second copy of the numbers, tests/test_mirror_guards.py
-# was pinning only the ingest pair - so a change here could have loosened the
-# publish gate with the suite still green. Same fix as STALE_LIMIT_DAYS below.
+# Shared with elec/ingest.py's gate on the incoming observation, so the publish gate
+# cannot drift looser than the ingest one. When this file owned a second copy,
+# tests/test_mirror_guards.py pinned only the ingest pair.
 MIN_MW, MAX_MW = ELEC_MIN_MW, ELEC_MAX_MW
 
 STALE_LIMIT_DAYS = ELEC_STALE_LIMIT_DAYS  # defined in vericast/__init__.py
@@ -47,12 +46,9 @@ EXPECTED_MODELS = {"naive_baseline", "seasonal_naive", "lightgbm"}
 def expected_models(features_current, demand_lag_6):
     """The models predict.py would actually have published for this run.
 
-    It skips seasonal_naive when demand_lag_6 is NULL - a date gap inside the last
-    week, which is the mirror's problem and not this run's - rather than publishing
-    a NULL forecast, so demanding it here would turn a deliberate degradation into
-    a red pipeline. lightgbm is NOT excused for a stale or missing features row:
-    the as_of check already fails on that, and one report of a problem is the right
-    number. Same split as vericast/pm25/diagnose.py.
+    seasonal_naive is excused when demand_lag_6 is NULL - a date gap inside the last
+    week, which predict.py skips deliberately. lightgbm is not excused for a stale or
+    missing features row: the as_of check already fails on that.
     """
     excused = {"seasonal_naive"} if features_current and demand_lag_6 is None else set()
     return EXPECTED_MODELS - excused
@@ -96,15 +92,25 @@ def main():
                 else f"{stale_days} days behind (normal for this source)",
             )
 
-            # demand_lag_6 comes back alongside as_of because it is the one column
-            # predict.py checks on its own: a date gap inside the last week leaves
-            # it NULL and seasonal_naive is skipped while the other two publish.
-            cur.execute("""
-                SELECT as_of, demand_lag_6 FROM electricity_features
+            # One read of the latest features row, three uses: the as_of match, the
+            # demand_lag_6 excuse, and the NULL check below. demand_lag_6 is called
+            # out by name because it is the one column predict.py checks on its own -
+            # a date gap inside the last week leaves it NULL and seasonal_naive is
+            # skipped while the other two publish.
+            #
+            # Columns generated from train.FEATURE_COLUMNS, not spelled out: the model
+            # reads exactly those 14, so a reorder or a rename cannot leave this
+            # checking a stale set. Same generation as vericast/pm25/diagnose.py and
+            # verify_deployment_readiness.py.
+            cur.execute(f"""
+                SELECT as_of, {", ".join(FEATURE_COLUMNS)}
+                FROM electricity_features
                 WHERE state = %s ORDER BY as_of DESC LIMIT 1
             """, (STATE,))
             feat_row = cur.fetchone()
-            latest_feat, demand_lag_6 = feat_row if feat_row else (None, None)
+            latest_feat = feat_row[0] if feat_row else None
+            named = dict(zip(FEATURE_COLUMNS, feat_row[1:])) if feat_row else {}
+            demand_lag_6 = named.get("demand_lag_6")
             print(f"  Latest features date:    {latest_feat}")
             all_ok &= check(
                 "features as_of matches observations as_of",
@@ -114,10 +120,25 @@ def main():
                 if latest_feat != latest_obs else "",
             )
 
+            # The check PM2.5's diagnose had and this one did not. A NULL in any of
+            # the 14 makes predict.py skip LightGBM with a WARN and exit 0, so
+            # without this the only complaint is "lightgbm did not publish" from the
+            # check below - which reports the symptom and not the date gap that
+            # caused it. Nothing is excused here, including demand_lag_6:
+            # expected_models() excuses seasonal_naive on that NULL but never
+            # lightgbm, so the run is already failing and this is what explains it.
+            missing_cols = [c for c, v in named.items() if v is None]
+            all_ok &= check(
+                "Latest features row has no NULLs",
+                feat_row is not None and not missing_cols,
+                "no features row at all" if feat_row is None
+                else str(missing_cols) if missing_cols else "",
+            )
+
             # Every model should have published for the day after the newest
-            # observation - that is what vericast/elec/predict.py labels it.
-            # source = 'daily' so a launch-backtest row seeded on that date, which
-            # was written with the actual already in hand, can't satisfy the gate.
+            # observation - that is what predict.py labels it. source = 'daily' so a
+            # launch-backtest row seeded on that date, written with the actual
+            # already in hand, can't satisfy the gate.
             expected_date = latest_obs + timedelta(days=1)
             cur.execute("""
                 SELECT model, predicted_demand_mw
@@ -140,17 +161,14 @@ def main():
                 f"All {len(expect)} expected models published for {expected_date}",
                 not missing,
                 f"missing: {sorted(missing)}" if missing else
-                # `is not None` for the same reason as the `v is None or` below,
-                # and matching vericast/pm25/diagnose.py: a NULL forecast has to be
-                # reported by the out-of-range check underneath, not crash this
-                # format string on the way there.
+                # A NULL forecast is the out-of-range check's job to report, not
+                # this format string's to crash on.
                 ", ".join(f"{m}={published[m]:.0f} MW" for m in sorted(published)
                           if published[m] is not None),
             )
 
-            # `v is None or` matches vericast/pm25/diagnose.py: predicted_demand_mw
-            # is NOT NULL today, but the comparison must not raise if that ever
-            # changes - the gate has to report the bad forecast, not crash on it.
+            # `v is None or` because predicted_demand_mw is NOT NULL today, but the
+            # comparison must report a bad forecast rather than raise if that changes.
             out_of_range = {m: v for m, v in published.items()
                             if v is None or not (MIN_MW <= v <= MAX_MW)}
             all_ok &= check(

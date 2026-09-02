@@ -1,3 +1,12 @@
+"""Seed the PM2.5 launch record with a walk-forward backtest.
+
+Retrain from scratch at every step, predict strictly the next day, never let a
+model see its own target. Run once at launch so the public leaderboard opens with
+a real measured record instead of an empty table.
+
+Imports FEATURE_COLUMNS / PARAMS / DATASET_SQL from vericast.pm25.train rather than
+re-declaring them, so the backtest cannot drift from the model it characterises.
+"""
 import os
 import sys
 import psycopg
@@ -6,7 +15,10 @@ import lightgbm as lgb
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vericast.pm25.train import FEATURE_COLUMNS, PARAMS, DATASET_SQL, CITY  # noqa: E402
+from vericast import require_city_of_record  # noqa: E402
+from vericast.pm25.train import (  # noqa: E402
+    CITY, DATASET_SQL, FEATURE_COLUMNS, NUM_BOOST_ROUND, PARAMS,
+)
 
 load_dotenv()
 
@@ -14,15 +26,18 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 MIN_TRAIN_SIZE = 30
 
-# Looked up by name, not hardcoded to index 0, so a reorder of
-# FEATURE_COLUMNS cannot silently repoint the baseline.
+# model_performance has no city column, so a run under another CITY would write its
+# scores into Nagpur's row. Same refusal as app.py and vericast/pm25/score.py -
+# train.py already applied it to CITY, this re-states the reason it matters here.
+require_city_of_record(CITY)
+
+# Looked up by name, not index 0, so a FEATURE_COLUMNS reorder cannot silently
+# repoint the baseline.
 NAIVE_COL = FEATURE_COLUMNS.index("pm2_5_lag_1")  # y(t) -> persistence
 
 
 def load_dataset():
     """Load the exact t -> t+1 forecasting dataset."""
-
-
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(DATASET_SQL, (CITY,))
@@ -53,8 +68,10 @@ def calculate_metrics(predictions, actuals):
     predictions = np.asarray(predictions, dtype=float)
     actuals = np.asarray(actuals, dtype=float)
 
-    mae = np.mean(np.abs(actuals - predictions))
-    rmse = np.sqrt(np.mean((actuals - predictions) ** 2))
+    # float(), not the numpy scalar: psycopg has no adapter for np.float64, so an
+    # unwrapped value reaches executemany as an unknown type.
+    mae = float(np.mean(np.abs(actuals - predictions)))
+    rmse = float(np.sqrt(np.mean((actuals - predictions) ** 2)))
 
     return mae, rmse
 
@@ -80,6 +97,14 @@ def run_backtest():
     print(f"Retrieved {len(rows)} samples")
     print(f"Feature matrix shape: {X.shape}")
 
+    # Raised, not asserted: this script writes actuals straight into the published
+    # record, so it gets the same -O-proof gate as vericast/pm25/train.py.
+    if X.shape[1] != len(FEATURE_COLUMNS):
+        raise AssertionError(
+            f"Feature count mismatch: got {X.shape[1]}, expected "
+            f"{len(FEATURE_COLUMNS)}."
+        )
+
     validate_alignment(feature_dates, target_dates)
 
     if len(X) <= MIN_TRAIN_SIZE:
@@ -102,14 +127,10 @@ def run_backtest():
         X_test = X[i:i + 1]
         y_true = y[i]
 
-        # ----------------------------------------
-        # Naive baseline
-        # ----------------------------------------
+        # ---- Naive baseline ----
         naive_prediction = X_test[0][NAIVE_COL]
 
-        # ----------------------------------------
-        # LightGBM
-        # ----------------------------------------
+        # ---- LightGBM ----
         train_data = lgb.Dataset(
             X_train,
             label=y_train,
@@ -118,7 +139,7 @@ def run_backtest():
         model = lgb.train(
             PARAMS,
             train_data,
-            num_boost_round=100,
+            num_boost_round=NUM_BOOST_ROUND,
         )
 
         lightgbm_prediction = model.predict(X_test)[0]
@@ -154,10 +175,9 @@ def save_results(
 
     # source = 'backtest': these rows have their actual at write time, so they are
     # not published-then-verified and /evaluation reports them separately. The
-    # DO UPDATE deliberately does NOT touch actual_pm2_5 or source. This script is
-    # documented as run-once, but a re-run against the live database would
-    # otherwise overwrite a genuinely verified actual with a backtest-computed one
-    # on every overlapping date, and relabel a daily row as a backtest.
+    # DO UPDATE touches neither actual_pm2_5 nor source, and the WHERE keeps it off
+    # daily rows: run-once or not, a re-run must not overwrite a verified actual
+    # with a backtest-computed one, nor relabel a published row.
     insert_sql = """
         INSERT INTO predictions (
             city,
@@ -237,6 +257,11 @@ def save_model_performance(
 
     score_date = evaluation_dates[-1]
 
+    # score_date is the last evaluated day, which the daily scorer has usually
+    # already scored. Same guard as save_results() one table up: without the WHERE
+    # a re-run overwrites that day's real MAE with the backtest aggregate and
+    # relabels the row 'backtest', and /leaderboard's source = 'daily' filter then
+    # drops the newest verified score for good.
     insert_sql = """
         INSERT INTO model_performance (
             score_date,
@@ -252,8 +277,8 @@ def save_model_performance(
             mae = EXCLUDED.mae,
             rmse = EXCLUDED.rmse,
             sample_size = EXCLUDED.sample_size,
-            source = EXCLUDED.source,
-            created_at = CURRENT_TIMESTAMP;
+            created_at = CURRENT_TIMESTAMP
+        WHERE model_performance.source = 'backtest';
     """
 
     records = [

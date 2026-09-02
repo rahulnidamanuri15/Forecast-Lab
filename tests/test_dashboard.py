@@ -51,6 +51,10 @@ def test_backtest_stays_out_of_the_headline_metrics():
     Averaging the launch backtest into the published record is the retro-fitting
     the split exists to prevent, so a `.textContent = ...backtest...` assignment
     is the thing to fail on - a `.title =` is the intended surface.
+
+    Scoped to assignments rather than to the word: the provenance filter below
+    names 'backtest' in its own comment doing the opposite job, and a test that
+    forbade the string outright would fail on the fix.
     """
     for m in re.finditer(r"(textContent|innerHTML)\s*=\s*([^;]{0,200})", SOURCE):
         assert "backtest" not in m.group(2), (
@@ -58,3 +62,53 @@ def test_backtest_stays_out_of_the_headline_metrics():
     assert SOURCE.count("Launch backtest: ") == 2, (
         "the backtest tooltip disappeared from one of the two panels; it is how "
         "the launch record stays discoverable without becoming the headline")
+
+
+def test_backtest_rows_are_filtered_out_of_the_history_tables():
+    """/predictions labels provenance without filtering it, so the page must.
+
+    Both tables are headed "logged before actual outcomes were known" and both
+    derive their within-tolerance and average-accuracy figures from the same rows.
+    A backtest row under that heading is a fitted-after-the-fact number presented
+    as a published one - the retro-fitting claim the whole record rests on.
+
+    The filter must be an allowlist. The API renames source 'daily' to 'verified'
+    on the way out, so `!== 'backtest'` admits every value that is not that one
+    literal - including a third provenance added upstream under a name this page
+    has never seen.
+    """
+    assert "r.source === 'verified'" in SOURCE, (
+        "publishedOnly() no longer allowlists verified rows; the history tables "
+        "would quote the launch record, or any future provenance, as published "
+        "forecasts")
+
+    used = SOURCE.count("publishedOnly(predictions)")
+    assert used == 2, (
+        f"expected both panels to filter their /predictions payload, found "
+        f"{used} call(s) to publishedOnly")
+
+    raw = re.findall(r"(?:const|let)\s+rows\s*=\s*predictions\.predictions", SOURCE)
+    assert not raw, (
+        f"{len(raw)} history render(s) read predictions.predictions directly; "
+        f"route them through publishedOnly() so backtest rows are dropped")
+
+
+def test_the_improvement_callout_never_renders_a_double_sign():
+    """`+${x.toFixed(1)}%` prints "+-4.2%" the first week the model loses.
+
+    Both callouts go through signedPct(), which adds the '+' only when the number
+    is not already carrying a '-'.
+    """
+    assert SOURCE.count("signedPct(improvement)") == 2, (
+        "an improvement callout is formatting its own sign again")
+    assert "`+${improvement" not in SOURCE, (
+        "hardcoded '+' back in front of an improvement figure that can be negative")
+
+
+def test_the_tablist_reports_which_tab_is_selected():
+    """Two tab buttons with no aria-selected announce as neither or both."""
+    assert 'role="tablist"' in SOURCE and SOURCE.count('role="tab"') == 2
+    assert SOURCE.count('aria-selected') >= 3, (
+        "aria-selected must be on both buttons at rest and updated in switchTab; "
+        "the class alone is invisible to a screen reader")
+    assert "setAttribute('aria-selected'" in SOURCE

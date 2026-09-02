@@ -4,14 +4,14 @@ import numpy as np
 import lightgbm as lgb
 from dotenv import load_dotenv
 
-from vericast import MODEL_PM25 as MODEL_PATH
-from vericast.gate import challenger_ships
+from vericast import MODEL_PM25 as MODEL_PATH, require_city_of_record
+from vericast.gate import challenger_ships, record_training_window
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-CITY = os.getenv("CITY", "Nagpur")
+CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
 
 # 15 features, fixed order. Single definition of the feature order for this
 # target: predict.py and the experiments/ backtests import it from here, so
@@ -41,11 +41,10 @@ NUM_BOOST_ROUND = 100
 UNIT = "ug/m3"
 
 
-# The INTERVAL '1 day' join is what makes this a t -> t+1 dataset. Every feature
-# is computed from data at or before f.as_of; the label is the next day's actual.
-# Both the select list and the NOT-NULL filter are generated from
-# FEATURE_COLUMNS, so a reorder or rename cannot silently mislabel the model's
-# features - which the count-only assert below could not catch.
+# The INTERVAL '1 day' join is what makes this a t -> t+1 dataset. Both the select
+# list and the NOT-NULL filter are generated from FEATURE_COLUMNS, so a reorder or
+# rename cannot silently mislabel the features - which the count-only check below
+# could not catch.
 DATASET_SQL = f"""
     SELECT
         f.as_of AS feature_date,
@@ -64,8 +63,8 @@ DATASET_SQL = f"""
 
 
 def load_full_dataset():
-    """Load the full t -> t+1 dataset (unlike backtest scripts, no walk-forward split;
-    this is meant to train one final model on everything we have)."""
+    """Load the full t -> t+1 dataset: one final model on everything we have, no
+    walk-forward split (that is what experiments/save_backtest_results.py is for)."""
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(DATASET_SQL, (CITY,))
@@ -93,9 +92,8 @@ def train_and_save():
     print(f"Training production LightGBM on {len(X)} samples "
           f"({feature_dates[0]} -> {feature_dates[-1]})")
     print(f"Feature matrix shape: {X.shape} ({len(FEATURE_COLUMNS)} columns expected)")
-    # Raised, not asserted, for the reason vericast/elec/train.py gives: python -O
-    # erases `assert`, and a silently-shuffled feature matrix trains a model that
-    # scores plausibly and is wrong every day.
+    # Raised, not asserted: python -O erases `assert`, and a silently-shuffled
+    # feature matrix trains a model that scores plausibly and is wrong every day.
     if X.shape[1] != len(FEATURE_COLUMNS):
         raise AssertionError(
             f"Feature count mismatch: got {X.shape[1]}, expected "
@@ -103,12 +101,12 @@ def train_and_save():
             f"must match."
         )
 
-    # Retrain gate before anything is written. A refused retrain leaves the
-    # incumbent artifact untouched and exits 0 - see vericast/gate.py.
+    # A refused retrain leaves the incumbent artifact untouched and exits 0.
     if not challenger_ships(X, y, PARAMS, NUM_BOOST_ROUND,
                             FEATURE_COLUMNS.index("pm2_5_lag_1"),
                             incumbent_path=MODEL_PATH,
-                            feature_names=FEATURE_COLUMNS, unit=UNIT):
+                            feature_names=FEATURE_COLUMNS, unit=UNIT,
+                            dates=feature_dates):
         print(f"[SKIP] Keeping the existing model at {MODEL_PATH}.")
         return None
 
@@ -117,6 +115,9 @@ def train_and_save():
 
     model.save_model(MODEL_PATH)
     print(f"[OK] Saved production model to {MODEL_PATH}")
+    # Written after the artifact, so a failed save cannot leave a window claiming
+    # a model that is not there.
+    record_training_window(MODEL_PATH, feature_dates, len(X))
 
     # Sanity check: reload and confirm predictions are reproducible
     reloaded = lgb.Booster(model_file=MODEL_PATH)

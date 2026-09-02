@@ -6,14 +6,11 @@ launch so the public leaderboard opens with a real measured record instead of an
 empty table.
 
 Imports FEATURE_COLUMNS / PARAMS / DATASET_SQL from vericast.elec.train rather than
-re-declaring them, so the backtest cannot silently drift from the production
-model it is meant to characterise.
+re-declaring them, so the backtest cannot drift from the model it characterises.
 
-Note on the 2025-05-21 -> 2025-05-24 gap: no special handling is needed. The
-`o.as_of = f.as_of + INTERVAL '1 day'` join drops any pair that would straddle
-the gap, and the NOT NULL filter drops the feature rows whose lags are NULL
-because of it. Walk-forward training needs a set of aligned (features, target)
-pairs, not calendar contiguity.
+The 2025-05-21 -> 2025-05-24 gap needs no special handling: DATASET_SQL's
+`o.as_of = f.as_of + INTERVAL '1 day'` join drops any pair straddling it, and the
+NOT NULL filter drops the feature rows whose lags are NULL because of it.
 """
 import os
 import sys
@@ -23,7 +20,9 @@ import lightgbm as lgb
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vericast.elec.train import FEATURE_COLUMNS, PARAMS, DATASET_SQL, STATE  # noqa: E402
+from vericast.elec.train import (  # noqa: E402
+    DATASET_SQL, FEATURE_COLUMNS, NUM_BOOST_ROUND, PARAMS, STATE,
+)
 
 load_dotenv()
 
@@ -31,8 +30,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 MIN_TRAIN_SIZE = 30
 
-# Which feature column each baseline reads. Looked up by name so a change to
-# FEATURE_COLUMNS' order can't silently repoint a baseline at the wrong series.
+# Looked up by name so a FEATURE_COLUMNS reorder can't repoint a baseline.
 NAIVE_COL = FEATURE_COLUMNS.index("demand_lag_1")      # y(t)   -> persistence
 SEASONAL_COL = FEATURE_COLUMNS.index("demand_lag_6")   # y(t-6) -> same weekday as target
 
@@ -110,7 +108,7 @@ def run_backtest():
         predictions["seasonal_naive"].append(X_test[0][SEASONAL_COL])
 
         model = lgb.train(PARAMS, lgb.Dataset(X_train, label=y_train),
-                          num_boost_round=100)
+                          num_boost_round=NUM_BOOST_ROUND)
         predictions["lightgbm"].append(model.predict(X_test)[0])
 
         actuals.append(y[i])
@@ -123,13 +121,12 @@ def run_backtest():
 
 
 def save_results(evaluation_dates, predictions, actuals):
-    """Store every individual prediction *with* its actual - these are verified
-    historical results, not pending forecasts.
+    """Store every individual prediction *with* its actual - verified historical
+    results, not pending forecasts.
 
     source = 'backtest' so /electricity/evaluation can separate them from rows
-    published before their actual existed. The DO UPDATE deliberately does not
-    touch actual_demand_mw or source, and the WHERE keeps a re-run from
-    overwriting a real daily forecast on an overlapping date.
+    published before their actual existed. The DO UPDATE touches neither
+    actual_demand_mw nor source, and the WHERE keeps a re-run off daily rows.
     """
     insert_sql = """
         INSERT INTO electricity_predictions
@@ -157,7 +154,13 @@ def save_results(evaluation_dates, predictions, actuals):
 
 
 def save_model_performance(evaluation_dates, predictions, actuals):
-    """One aggregate row per model at the last evaluated date - the launch record."""
+    """One aggregate row per model at the last evaluated date - the launch record.
+
+    score_date is the last evaluated day, which the daily scorer has usually already
+    scored, so the DO UPDATE carries the same source guard as save_results(): a
+    re-run must not replace a verified MAE with the backtest aggregate, nor relabel
+    the row out of /electricity/leaderboard's source = 'daily' filter.
+    """
     insert_sql = """
         INSERT INTO electricity_model_performance
             (state, score_date, model, mae, rmse, mape, sample_size, source)
@@ -167,8 +170,8 @@ def save_model_performance(evaluation_dates, predictions, actuals):
             rmse = EXCLUDED.rmse,
             mape = EXCLUDED.mape,
             sample_size = EXCLUDED.sample_size,
-            source = EXCLUDED.source,
-            created_at = CURRENT_TIMESTAMP;
+            created_at = CURRENT_TIMESTAMP
+        WHERE electricity_model_performance.source = 'backtest';
     """
 
     score_date = evaluation_dates[-1]

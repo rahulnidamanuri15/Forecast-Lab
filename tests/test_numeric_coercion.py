@@ -19,7 +19,7 @@ import os
 import sys
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,22 +27,15 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import app
+from conftest import wire_cursor
 
 client = TestClient(app)
-
-
-def _mock_cursor(mock_get_db):
-    mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_get_db.return_value.__enter__.return_value = mock_conn
-    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
-    return mock_cursor
 
 
 def test_predictions_survives_a_half_migrated_numeric_column():
     """predicted_pm2_5 as NUMERIC, actual_pm2_5 still FLOAT: `error` still computes."""
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = [
             (date(2026, 8, 28), 'lightgbm', Decimal("15.5"), 18.0,
              datetime.now(timezone.utc), 'daily'),
@@ -59,7 +52,7 @@ def test_predictions_survives_a_half_migrated_numeric_column():
 def test_electricity_predictions_survives_a_half_migrated_numeric_column():
     """Same, plus error_pct - which divides by the coerced actual."""
     with patch('app.get_db_connection') as mock_get_db:
-        cur = _mock_cursor(mock_get_db)
+        cur = wire_cursor(mock_get_db)
         cur.fetchall.return_value = [
             (date(2026, 8, 28), 'lightgbm', 27000.0, Decimal("28000.0"),
              datetime.now(timezone.utc), 'daily'),

@@ -1,28 +1,23 @@
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from datetime import date
 
-# Import the app
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import app
+from conftest import wire_cursor
 
 client = TestClient(app)
 
 def test_leaderboard_endpoint_success():
     """Test that the leaderboard endpoint returns 200 with model performance data."""
-    # Mock database connection and cursor
     with patch('app.get_db_connection') as mock_get_db:
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_get_db.return_value.__enter__.return_value = mock_conn
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor = wire_cursor(mock_get_db)
 
-        # Mock the database response - model performance data.
-        # sample_size 1 because /leaderboard now filters on source = 'daily', and a
+        # sample_size 1 because /leaderboard filters on source = 'daily', and a
         # daily row is one scored day against a UNIQUE(city, forecast_date, model)
         # table. The backtest-seeded rows (sample_size in the hundreds) are exactly
         # what that filter exists to exclude: they carry the newest score_date on a
@@ -32,23 +27,20 @@ def test_leaderboard_endpoint_success():
             ('naive_baseline', 3.1, 4.0, 1, date(2026, 8, 17))
         ]
 
-        # Make the request
         response = client.get("/leaderboard")
 
-        # Assertions
         assert response.status_code == 200
         data = response.json()
         assert "leaderboard" in data
         assert len(data["leaderboard"]) == 2
 
-        # Check that lightgbm comes first (lower MAE)
+        # lightgbm first on the lower MAE, naive_baseline second.
         assert data["leaderboard"][0]["model"] == "lightgbm"
         assert data["leaderboard"][0]["mae"] == 2.5
         assert data["leaderboard"][0]["rmse"] == 3.2
         assert data["leaderboard"][0]["sample_size"] == 1
         assert data["leaderboard"][0]["as_of"] == date(2026, 8, 17).isoformat()
 
-        # Check that naive_baseline comes second
         assert data["leaderboard"][1]["model"] == "naive_baseline"
         assert data["leaderboard"][1]["mae"] == 3.1
         assert data["leaderboard"][1]["rmse"] == 4.0
@@ -62,20 +54,13 @@ def test_leaderboard_endpoint_success():
 
 def test_leaderboard_endpoint_no_data():
     """Test that the leaderboard endpoint handles missing model performance data."""
-    # Mock database connection to return no data
     with patch('app.get_db_connection') as mock_get_db:
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_get_db.return_value.__enter__.return_value = mock_conn
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor = wire_cursor(mock_get_db)
 
-        # Mock the database response - no data
         mock_cursor.fetchall.return_value = []
 
-        # Make the request
         response = client.get("/leaderboard")
 
-        # Assertions
         assert response.status_code == 404
         data = response.json()
         assert "detail" in data
@@ -83,14 +68,11 @@ def test_leaderboard_endpoint_no_data():
 
 def test_leaderboard_endpoint_database_error():
     """Test that the leaderboard endpoint handles database errors."""
-    # Mock database connection to raise an exception
     with patch('app.get_db_connection') as mock_get_db:
         mock_get_db.side_effect = Exception("Database connection failed")
 
-        # Make the request
         response = client.get("/leaderboard")
 
-        # Assertions
         assert response.status_code == 500
         data = response.json()
         assert "detail" in data
@@ -166,3 +148,27 @@ def test_backtest_seeder_cannot_overwrite_a_daily_row(script, table, actual_col)
     assert f"{actual_col} = EXCLUDED" not in source, (
         f"{script} updates the actual on conflict; that is the data loss the "
         f"guard above exists to prevent")
+
+
+# The aggregate tables need the same guard for a different loss. A seeder writes one
+# row per model at score_date = evaluation_dates[-1], the last evaluated day - which
+# the daily scorer has usually already scored. Unguarded, a re-run replaces that
+# day's real MAE with the backtest aggregate and relabels the row 'backtest', so
+# /leaderboard's source = 'daily' filter drops the newest verified score and falls
+# back to an older one. The daily scorer never revisits a past score_date, so it
+# never comes back.
+@pytest.mark.parametrize("script,table", [
+    ("experiments/save_backtest_results.py", "model_performance"),
+    ("experiments/save_elec_backtest_results.py", "electricity_model_performance"),
+])
+def test_backtest_seeder_cannot_relabel_a_daily_perf_row(script, table):
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), script)
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
+
+    assert f"WHERE {table}.source = 'backtest'" in source, (
+        f"{script}'s {table} upsert has no source guard; a re-run would overwrite "
+        f"a verified score with the backtest aggregate")
+    assert "source = EXCLUDED.source" not in source, (
+        f"{script} relabels source on conflict; combined with the guard above that "
+        f"is dead code, without it the row leaves the leaderboard permanently")
