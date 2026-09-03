@@ -522,10 +522,11 @@ def check_api_electricity_endpoints():
 # the list is intact - every entry callable, every TARGETS key the parameterised
 # checks read present - with no database and no running server.
 #
-# That test is the only CI coverage this file can have: its DB checks need a
-# populated instance and its HTTP checks a live API_BASE, so ci.yml cannot run the
-# gate itself. Without the test, a renamed check or a dropped descriptor key
-# surfaces as a traceback on the one run that is supposed to catch problems.
+# That test is the wiring half of this file's coverage. The checks themselves need
+# a populated instance and a live API_BASE, which ci.yml has neither of, so they
+# run in .github/workflows/readiness-gate.yml against the live database and the
+# deployed API instead. Without the test, a renamed check or a dropped descriptor
+# key surfaces as a traceback on the one run that is supposed to catch problems.
 CHECKS = [
     ("DATABASE_URL exists", check_database_url),
     ("PostgreSQL connectivity", check_postgres_connectivity),

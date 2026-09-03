@@ -1,7 +1,9 @@
 import os
+import re
 import sys
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,6 +23,11 @@ client = TestClient(app)
 # provenance split, the window/full-record branch, and the sort.
 #
 # 'daily' surfaces as `verified` and 'backtest' as `backtest` - see app.PROVENANCE.
+#
+# `pending` counts published-and-unscored rows only: the SQL requires
+# predicted_* IS NOT NULL, because score.py requires it too and a NULL-prediction
+# row can therefore never be scored. See
+# test_pending_counts_only_rows_that_can_still_be_scored below.
 
 
 def test_evaluation_endpoint_success():
@@ -159,6 +166,42 @@ def test_evaluation_rejects_negative_days():
     answered 422 while this answered 400.
     """
     assert client.get("/evaluation?days=-1").status_code == 422
+
+
+# The pending predicate, on both endpoints. A text assertion on the executed SQL
+# because the mocked cursor returns whatever rows it was handed regardless of the
+# query: a wrong predicate is invisible to every other test in this file.
+PENDING_FILTER = re.compile(
+    r"COUNT\(\*\)\s+FILTER\s+\(WHERE\s+predicted_(?P<col>\w+)\s+IS\s+(?P<pred>NOT\s+NULL|NULL)"
+    r"\s+(?P<join>AND|OR)\s+actual_\w+\s+IS\s+(?P<act>NOT\s+NULL|NULL)\)\s+AS\s+pending")
+
+
+@pytest.mark.parametrize("path, rows", [
+    ("/evaluation", [('lightgbm', 'daily', 2, 1, 0.35, 0.38)]),
+    ("/electricity/evaluation", [('lightgbm', 'daily', 2, 1, 700.0, 900.0, 2.8)]),
+])
+def test_pending_counts_only_rows_that_can_still_be_scored(path, rows):
+    """`predicted IS NULL OR actual IS NULL` over-counted, on both endpoints.
+
+    score.py fills an actual only where predicted_* IS NOT NULL - a NULL
+    prediction makes np.mean return NaN and 500s /leaderboard on serialisation,
+    so SCORE_SQL excludes it deliberately. A row with no prediction is therefore
+    unscoreable, not pending, and counting it as pending advertised work the
+    pipeline will never do. It counts in neither column now, so scored + pending
+    is deliberately <= the row total.
+    """
+    with patch('app.get_db_connection') as mock_get_db:
+        mock_cursor = wire_cursor(mock_get_db, rows)
+
+        assert client.get(path).status_code == 200
+
+        sql = mock_cursor.execute.call_args[0][0]
+        m = PENDING_FILTER.search(sql)
+        assert m, f"{path} no longer has a recognisable pending FILTER clause"
+        assert (m["pred"], m["join"], m["act"]) == ("NOT NULL", "AND", "NULL"), (
+            f"{path} counts pending as predicted_{m['col']} IS {m['pred']} "
+            f"{m['join']} actual IS {m['act']}; a row with no prediction can "
+            f"never be scored, so it is not pending")
 
 
 def test_evaluation_sorts_unscored_models_last():

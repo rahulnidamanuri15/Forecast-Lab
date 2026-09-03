@@ -1,0 +1,65 @@
+name: Readiness Gate
+
+# Runs verify_deployment_readiness.py — the 22-check go-live gate — against the
+# live database and the deployed API.
+#
+# It used to be the one gate nothing automated. Its DB checks need a populated
+# instance and its HTTP checks a reachable API_BASE, so ci.yml (throwaway
+# Postgres, no server) cannot run it, and tests/test_readiness_gate.py can only
+# assert the list is wired up correctly rather than execute the checks. That left
+# the script whose whole job is to catch a broken deployment depending on someone
+# remembering to run it by hand.
+#
+# Read-only: every DB check is a SELECT, every API check a GET, and the two
+# leakage tests it shells out to only read. Nothing here writes, so a failing run
+# reports a problem rather than causing one.
+on:
+  schedule:
+    # Sundays 06:23 UTC: after weekly-retrain.yml's 04:00 commit and before the
+    # daily pipeline's 08:42 catch-up cron, so it checks the artifact that was
+    # just committed. Off the top of the hour for the reason daily-pipeline.yml
+    # gives.
+    - cron: '23 6 * * 0'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# A second run while one is in flight would duplicate the HTTP checks against the
+# same deploy for no new information.
+concurrency:
+  group: readiness-gate
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      CITY: Nagpur      # require_city_of_record refuses anything else at import
+      STATE: Maharashtra
+      # The deployed API. Set the API_BASE repository variable to point this at a
+      # different host; the default is the one index.html and the CSP already pin.
+      API_BASE: ${{ vars.API_BASE || 'https://forecast-lab-2l0q.onrender.com' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+
+      # requirements.txt alone: the gate imports httpx and psycopg, both of which
+      # are production deps. It needs no test runner.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Render free tier sleeps after 15 minutes idle and answers the first
+      # request with a cold start, which outlasts the gate's 10s httpx timeout and
+      # would FAIL every HTTP check on a service that is fine. One throwaway
+      # request wakes it; `|| true` because this step is not the check.
+      - name: Wake the deployed API
+        run: curl -sS -m 120 -o /dev/null "$API_BASE/health" || true
+
+      - name: Run the go-live gate
+        run: python verify_deployment_readiness.py
