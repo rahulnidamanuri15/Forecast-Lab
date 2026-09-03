@@ -179,12 +179,16 @@ DEFAULT — a DEFAULT applies to inserts only, so a daily score landing on a
 `score_date` a backtest already wrote would otherwise stay labelled `'backtest'`
 and be filtered out permanently.
 
-The frozen walk-forward benchmark above (n=1062, MAE 9.3567 vs 10.7975) is reproduced by
+The frozen walk-forward benchmark (n=1062, MAE 9.3567 vs 10.7975) is reproduced by
 `python experiments/save_backtest_results.py`, which runs the walk-forward loop *and*
-persists it. Its sample count is smaller than the 1,092-row dataset because the first 30
-days seed the walk-forward window rather than being scored. A console-only twin of that
-loop (`compare_models.py`) used to live beside it and was deleted: it re-derived the same
-dataset with the same 30-day warmup and printed the same comparison without writing
+persists it. Those are the **`backtest` block alone**, which is why they differ from the
+711/712 and 9.49 in the table above: that table is the union of both blocks at the
+snapshot date, so it carries the verified days the daily job had added by then. Neither
+figure is wrong; they answer different questions, and `/evaluation` is the one that
+separates them. Its sample count is smaller than the 1,092-row dataset because the first
+30 days seed the walk-forward window rather than being scored. A console-only twin of
+that loop (`compare_models.py`) used to live beside it and was deleted: it re-derived the
+same dataset with the same 30-day warmup and printed the same comparison without writing
 anything, so the two could drift apart while both looked authoritative. The single-model
 scripts they superseded (`naive_baseline_backtest.py`, `train_lightgbm.py`,
 `train_sarima.py`) each hardcoded their own city and their own baseline to beat, which is
@@ -400,12 +404,30 @@ would be re-reading only changes once a day.
   under `bash -e`, which aborted the step before its own "nothing to commit" branch and
   discarded the sibling target's accepted artifact.
 
+  **No sidecar exists yet.** `models/` holds the two `.txt` artifacts and nothing else:
+  the committed models predate `record_training_window()`, and the sidecar is written by
+  an *accepted* retrain, so the first one appears the first Sunday a challenger ships.
+  Until then the gate prints "no recorded training window, assume it saw them" and
+  compares conservatively. This is deliberately not backfilled — the dates those two
+  artifacts were fit on are not recoverable from the files, and a hand-written window
+  would be a claim about the record that nothing verified.
+
   Both retrain steps and the commit step carry `if: always()`, for the same reason the
   daily pipeline splits into two jobs: a raising PM2.5 retrain used to abort the
   electricity retrain *and* throw away whichever artifact had already been written. The
   push is a rebase-and-retry loop rather than a bare `git push` — `concurrency:` stops
   this workflow racing itself but not an unrelated push to `main` landing during the
   minutes of training, and a rejected push would discard the retrain.
+- `.github/workflows/readiness-gate.yml` — Sundays 06:23 UTC: runs
+  `verify_deployment_readiness.py`'s 22 checks against the live database and the deployed
+  API. Scheduled between the weekly retrain's 04:00 commit and the daily pipeline's 08:42
+  catch-up cron, so it gates the artifact that was just committed. This is the one gate
+  nothing used to automate: `ci.yml` has a throwaway Postgres and no server, so the script
+  whose whole job is catching a broken deployment depended on someone running it by hand.
+  Read-only — every check is a `SELECT` or a `GET`, and the two leakage tests it shells
+  out to only read. It wakes the API with one throwaway request first, because Render's
+  free tier cold-starts past the gate's 10s timeout and would FAIL every HTTP check on a
+  service that is fine.
 
 Both scoring scripts score *every* pending row, not just yesterday's, so a missed run
 self-heals on the next one instead of leaving a permanent NULL. Ingest self-heals the
@@ -437,12 +459,16 @@ throwaway Postgres still runs the window-frame queries. That seeding refuses any
 non-local host, because writing fabricated observations into the managed instance would
 contaminate the published record.
 
-`verify_deployment_readiness.py` itself is the one script CI cannot run — its checks need
-a populated database and a live server on `API_BASE`. `tests/test_readiness_gate.py`
-covers what is checkable without either: that every `check_*` function is wired into
-`CHECKS`, that both targets get the three database checks, that no check raises instead of
-returning `False` when its dependency is absent, and that the count above still matches
-the code.
+`verify_deployment_readiness.py` cannot run in `ci.yml` — its checks need a populated
+database and a live server on `API_BASE`, and CI has a throwaway Postgres and no server.
+It runs instead in `.github/workflows/readiness-gate.yml`, Sundays at 06:23 UTC against
+the live database and the deployed API, after the weekly retrain has committed its
+artifact and before the daily pipeline's catch-up cron. Every check is a `SELECT` or a
+`GET`, so a failing run reports a problem rather than causing one. `tests/test_readiness_gate.py`
+still covers what is checkable with neither dependency: that every `check_*` function is
+wired into `CHECKS`, that both targets get the four database checks, that no check raises
+instead of returning `False` when its dependency is absent, and that the count above still
+matches the code.
 
 First-time electricity setup (one-off, then the daily job takes over):
 

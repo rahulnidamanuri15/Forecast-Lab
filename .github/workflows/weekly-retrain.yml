@@ -93,7 +93,7 @@ jobs:
               echo "Pushed on attempt $attempt."
               exit 0
             fi
-            echo "Push rejected (attempt $attempt); rebasing onto origin/main."
+            echo "Push rejected (attempt $attempt); rebasing onto origin/${GITHUB_REF_NAME}."
             git pull --rebase origin "${GITHUB_REF_NAME}" || exit 1
           done
           echo "Push still rejected after 3 attempts."

@@ -542,12 +542,20 @@ async def get_evaluation(days: Optional[int] = Query(None, ge=0)):
                 # published grew with the record itself. COUNT/AVG return one row per
                 # model regardless of size, and AVG(...) FILTER skips pending rows
                 # without a second query. GROUP BY model, source keeps it to one scan.
+                #
+                # `pending` means "published, still waiting for its actual", so it
+                # requires a prediction - the same predicted_* IS NOT NULL that
+                # vericast/pm25/score.py's SCORE_SQL requires before it will ever fill
+                # one in. Counting `predicted IS NULL OR actual IS NULL` instead
+                # labelled a NULL-prediction row as pending when nothing can ever
+                # score it. Such a row is unscoreable and counts in neither column, so
+                # scored + pending is deliberately <= the row total.
                 metrics = """
                     SELECT model, source,
                            COUNT(*) FILTER (WHERE predicted_pm2_5 IS NOT NULL
                                               AND actual_pm2_5 IS NOT NULL) AS scored,
-                           COUNT(*) FILTER (WHERE predicted_pm2_5 IS NULL
-                                               OR actual_pm2_5 IS NULL) AS pending,
+                           COUNT(*) FILTER (WHERE predicted_pm2_5 IS NOT NULL
+                                              AND actual_pm2_5 IS NULL) AS pending,
                            AVG(ABS(actual_pm2_5 - predicted_pm2_5)) AS mae,
                            SQRT(AVG(POWER(actual_pm2_5 - predicted_pm2_5, 2))) AS rmse
                     FROM predictions
@@ -865,14 +873,17 @@ async def get_electricity_evaluation(days: Optional[int] = Query(None, ge=0)):
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 # Window anchored to the app timezone, not Postgres CURRENT_DATE
-                # (GMT on Neon). Aggregated in SQL for the reason /evaluation gives.
-                # MAPE's FILTER drops actual = 0 rather than dividing by it.
+                # (GMT on Neon). Aggregated in SQL for the reason /evaluation gives,
+                # and `pending` requires a prediction for the same reason: only a row
+                # with predicted_demand_mw set can ever be scored by
+                # vericast/elec/score.py. MAPE's FILTER drops actual = 0 rather than
+                # dividing by it.
                 metrics = """
                     SELECT model, source,
                            COUNT(*) FILTER (WHERE predicted_demand_mw IS NOT NULL
                                               AND actual_demand_mw IS NOT NULL) AS scored,
-                           COUNT(*) FILTER (WHERE predicted_demand_mw IS NULL
-                                               OR actual_demand_mw IS NULL) AS pending,
+                           COUNT(*) FILTER (WHERE predicted_demand_mw IS NOT NULL
+                                              AND actual_demand_mw IS NULL) AS pending,
                            AVG(ABS(actual_demand_mw - predicted_demand_mw)) AS mae,
                            SQRT(AVG(POWER(actual_demand_mw - predicted_demand_mw, 2))) AS rmse,
                            AVG(ABS(actual_demand_mw - predicted_demand_mw)

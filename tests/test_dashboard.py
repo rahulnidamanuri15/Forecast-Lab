@@ -112,3 +112,39 @@ def test_the_tablist_reports_which_tab_is_selected():
         "aria-selected must be on both buttons at rest and updated in switchTab; "
         "the class alone is invisible to a screen reader")
     assert "setAttribute('aria-selected'" in SOURCE
+
+
+def test_the_lag_suffix_survives_a_zero():
+    """`health.stale_days ?` drops the suffix when stale_days === 0.
+
+    Falsy-zero, on exactly the day the data is freshest: the pill read
+    "LIVE - NAGPUR 2026-09-03" with no lag note, which is indistinguishable from
+    the field being absent. Both readers use != null now.
+    """
+    assert "health.stale_days ?" not in SOURCE, (
+        "a stale_days read is back on truthiness; 0 days behind is the freshest "
+        "case and would print no suffix at all")
+    assert SOURCE.count("health.stale_days != null") == 2, (
+        "expected both the shared status pill and the electricity lag note to "
+        "test stale_days against null")
+
+
+def test_the_window_scoped_metrics_say_which_window_they_are():
+    """Two denominators sat side by side in one card with nothing marking them.
+
+    "Total Forecasts" comes from the full-record /evaluation; the within-tolerance
+    row and the accuracy figure are computed over /predictions?limit=15. Both
+    within-rows relabel themselves with the count they actually used.
+    """
+    for element in ("metric-within-5-name", "el-metric-within-3-name"):
+        assert f"getElementById('{element}')" in SOURCE, (
+            f"{element} is no longer relabelled with its own sample size, so it "
+            f"reads as a figure over the full record")
+    # The electricity accuracy headline said "recent avg accuracy" while the
+    # PM2.5 one already named its count. Both name it now, in the rendered
+    # headline and in the em-dash placeholder that stands in before it loads.
+    assert "recent avg accuracy" not in SOURCE, (
+        "an accuracy headline is back to an unquantified 'recent'")
+    assert SOURCE.count("scored</span>`") == 2, (
+        "expected both accuracy headlines to interpolate the count they averaged "
+        "over; one is back to a fixed or unstated denominator")

@@ -799,7 +799,7 @@
         <span class="metric-val" id="metric-total-scored">—</span>
       </div>
       <div class="metric-row">
-        <span class="metric-name">Within ±5 μg/m³</span>
+        <span class="metric-name" id="metric-within-5-name">Within ±5 μg/m³</span>
         <span class="metric-val" id="metric-within-5">—</span>
       </div>
       <div class="metric-row">
@@ -1001,7 +1001,7 @@
           <span class="metric-val" id="el-metric-total-scored">—</span>
         </div>
         <div class="metric-row">
-          <span class="metric-name">Within ±3%</span>
+          <span class="metric-name" id="el-metric-within-3-name">Within ±3%</span>
           <span class="metric-val" id="el-metric-within-3">—</span>
         </div>
         <div class="metric-row">
@@ -1034,7 +1034,7 @@
           <div class="card-title">Absolute % Error</div>
         </div>
         <div class="accuracy-number" id="el-acc-big-num">
-          — <span>recent avg accuracy</span>
+          — <span>last 15 scored</span>
         </div>
         <div class="chart-container" style="height: 120px;">
           <canvas id="elErrorChart"></canvas>
@@ -1242,7 +1242,10 @@
   function setStatusPill(health, label) {
     const pill = document.getElementById('status-pill');
     const statusText = document.getElementById('status-text');
-    const behind = health && health.stale_days ? ` · ${health.stale_days}d behind` : '';
+    // != null, not truthiness: stale_days === 0 is falsy, so a bare truthiness
+    // test dropped the suffix on exactly the day the data is freshest. The
+    // electricity panel's own lag note already reads it this way.
+    const behind = health && health.stale_days != null ? ` · ${health.stale_days}d behind` : '';
     if (health && health.status === 'ok' && health.source_lag_expected) {
       pill.className = 'live-pill';
       statusText.textContent = `LIVE · ${label} ${health.latest_observation}${behind}`;
@@ -1424,6 +1427,12 @@
         if (totalScored > 0) {
           const withinPct = ((within5Count / totalScored) * 100).toFixed(0);
           document.getElementById('metric-within-5').textContent = `${withinPct}%`;
+          // Say which denominator this is. "Total Forecasts" above comes from the
+          // full-record /evaluation; this row and the accuracy figure below are
+          // computed over the /predictions?limit=15 window, so the two sat side by
+          // side over different sample sizes with nothing saying so.
+          document.getElementById('metric-within-5-name').textContent =
+            `Within ±5 μg/m³ (last ${totalScored} scored)`;
         }
         if (accScored > 0) {
           const avgAcc = (totalAccuracySum / accScored).toFixed(0);
@@ -1712,8 +1721,12 @@
         if (totalScored > 0) {
           document.getElementById('el-metric-within-3').textContent =
             `${((within3 / totalScored) * 100).toFixed(0)}%`;
+          // Same denominator note as the PM2.5 panel: this row is the limit=15
+          // window, "Total Forecasts" above is the full record.
+          document.getElementById('el-metric-within-3-name').textContent =
+            `Within ±3% (last ${totalScored} scored)`;
           document.getElementById('el-acc-big-num').innerHTML =
-            `${(accSum / totalScored).toFixed(1)}% <span>recent avg accuracy</span>`;
+            `${(accSum / totalScored).toFixed(1)}% <span>last ${totalScored} scored</span>`;
         }
 
         const scored = rows.filter(r => r.error_pct != null).slice().reverse();

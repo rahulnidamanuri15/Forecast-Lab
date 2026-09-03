@@ -1,16 +1,17 @@
 """The go-live gate's own wiring, checked without a database or a live server.
 
 verify_deployment_readiness.py cannot run in ci.yml: its DB checks need a
-populated instance and its HTTP checks a server on API_BASE, so the one script
-whose job is to catch problems before a deploy is the one script nothing ever
-exercised. A renamed check, a check written and never wired into the list, or a
-TARGETS key dropped from the descriptor all surfaced as a traceback on the run
-that was supposed to be the safety net.
+populated instance and its HTTP checks a server on API_BASE. It runs weekly in
+.github/workflows/readiness-gate.yml against the live database and the deployed
+API; what is left over for CI is this file. A renamed check, a check written and
+never wired into the list, or a TARGETS key dropped from the descriptor all
+surfaced as a traceback on the run that was supposed to be the safety net.
 
 What is checkable here is everything except the queries themselves: the list is
 complete, both targets get the four DB checks the elec half used to lack, every
-check degrades to False rather than raising when its dependency is absent, and
-the README's advertised count still matches the code.
+check degrades to False rather than raising when its dependency is absent, the
+gate is actually scheduled somewhere, and the README's advertised count still
+matches the code.
 """
 import os
 import re
@@ -96,6 +97,31 @@ def test_no_check_raises_when_its_dependency_is_missing(monkeypatch):
         for name, check in gate.CHECKS:
             result = check()
             assert isinstance(result, bool), f"{name} returned {result!r}, not a bool"
+
+
+def test_the_gate_is_actually_scheduled_somewhere():
+    """A 22-check gate nothing runs is documentation, not a gate.
+
+    This file can only assert the list is wired correctly; the checks themselves
+    need a populated database and a live API_BASE, which is why they run in their
+    own workflow rather than in ci.yml. If that workflow stops invoking the
+    script, every test here still passes and nothing executes a single check.
+    """
+    workflow = ROOT / ".github" / "workflows" / "readiness-gate.yml"
+    assert workflow.is_file(), "readiness-gate.yml is gone; nothing runs the gate"
+
+    text = workflow.read_text(encoding="utf-8")
+    assert os.path.basename(gate.__file__) in text, (
+        "readiness-gate.yml no longer invokes the gate script")
+    # Both halves of what makes the run meaningful: a schedule so it happens
+    # unattended, and API_BASE so the HTTP checks reach the deploy rather than a
+    # localhost that isn't listening.
+    assert "schedule:" in text and "cron:" in text, (
+        "the gate workflow has no schedule; it would only ever run by hand, "
+        "which is the state having a workflow was meant to fix")
+    assert "API_BASE" in text, (
+        "no API_BASE in the gate workflow: the six HTTP checks would hit the "
+        "localhost default and FAIL on a healthy deploy")
 
 
 def test_the_readme_advertises_the_number_of_checks_that_exist():
