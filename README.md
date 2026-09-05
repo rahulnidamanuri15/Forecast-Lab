@@ -98,9 +98,12 @@ to state plainly rather than bury:
   after the newest observation", not real-world tomorrow, and its freshness thresholds
   are 5 days rather than PM2.5's 1. A 2–4 day lag is the normal case here, not an
   incident — `GET /electricity/health` reports `source_lag_expected` for exactly this.
-- **It is treated as untrusted input.** Blank *or unparseable* demand values are skipped
-  rather than coerced — one bad cell loses its day, not the rows already accepted — and
-  `vericast/elec/diagnose.py` refuses to publish outside 15,000–40,000 MW.
+- **It is treated as untrusted input.** Blank *or unparseable* peak-demand values are
+  skipped rather than coerced — one bad cell loses its day, not the rows already
+  accepted — and `vericast/elec/diagnose.py` refuses to publish outside
+  15,000–40,000 MW. A bad `energy_met_mu` degrades to NULL instead, since it is
+  nullable and nothing is scored against it; losing the day over it would discard a
+  peak that *is* scored.
 
 If the mirror stops updating, the electricity job fails its own freshness gate and
 publishes nothing. It cannot affect the PM2.5 record.
@@ -110,54 +113,91 @@ across Mumbai, Pune and Nagpur for the state-level demand model.
 
 ## Model performance
 
-The tables below are a **dated snapshot, taken 2026-08-28** — the counts and MAEs are
-frozen numbers checked into this file, not generated output. For current numbers call
-`GET /evaluation` and `GET /electricity/evaluation` with no `days` parameter; the record
-only grows, so the live figures move as days are scored.
+Both endpoints return **two separate blocks per model**, `verified` and `backtest`, and
+no combined figure at all. `verified` is the published-then-verified record: rows written
+before the actual was knowable. `backtest` is the walk-forward launch record, computed
+with the actual already in hand. They are never averaged, because averaging them is
+exactly the retro-fitting this project exists to avoid — a 1,238-day backtest would swamp
+a few dozen verified days and the headline number would silently become a backtest
+average. So the tables below carry both blocks side by side, exactly as the endpoints do.
 
-Both endpoints now return **two separate blocks per model**, `verified` and `backtest`,
-and no combined figure at all. `verified` is the published-then-verified record: rows
-written before the actual was knowable. `backtest` is the walk-forward launch record,
-computed with the actual already in hand. They are never averaged, because averaging
-them is exactly the retro-fitting this project exists to avoid — a 1,239-day backtest
-would swamp a few dozen verified days and the headline number would silently become a
-backtest average. The columns below say which block each figure came from.
+**The two halves age differently, so read them differently.** The `backtest` block is a
+closed set — a fixed span of dates, seeded once, never appended to — so its figures here
+are exact and stay exact. The `verified` block grows by one day per model per run, which
+means the numbers below are **as read from the live API on 2026-09-04** and will have
+moved by the time you read them. Call `GET /evaluation` and `GET /electricity/evaluation`
+with no `days` parameter for the current values; that endpoint, not this file, is the
+record.
 
-**PM2.5, Nagpur** (2023-09-02 → present):
+**PM2.5, Nagpur** — backtest 2023-09-02 → 2025-08-01, verified 2026-08-16 → present
+(plus one earlier day, explained below):
 
-| Model | Scored | MAE (μg/m³) | RMSE (μg/m³) | Description |
-|-------|--------|------|------|-------------|
-| lightgbm | 711 | **9.49** | 12.42 | LightGBM on lagged + rolling + weather features |
-| naive_baseline | 712 | 10.99 | 14.38 | Predict tomorrow's PM2.5 as today's PM2.5 |
+| Model | Block | Scored | MAE (μg/m³) | RMSE (μg/m³) | Description |
+|-------|-------|--------|------|------|-------------|
+| lightgbm | backtest | 700 | **9.58** | 12.51 | LightGBM on lagged + rolling + weather features |
+| naive_baseline | backtest | 700 | 11.10 | 14.49 | Predict tomorrow's PM2.5 as today's PM2.5 |
+| lightgbm | verified | 19 | **4.15** | 4.75 | same model, published before the actual existed |
+| naive_baseline | verified | 20 | 4.39 | 5.28 | same baseline, published before the actual existed |
 
-LightGBM beats the naive baseline by **~13.7% MAE**. That margin is the whole point:
-persistence is a genuinely hard baseline for daily air quality, and a model that
-can't beat it isn't worth deploying.
+Over the 700-day backtest LightGBM beats the naive baseline by **13.7% MAE**. That margin
+is the whole point: persistence is a genuinely hard baseline for daily air quality, and a
+model that can't beat it isn't worth deploying. The verified block agrees on the ranking
+but at a smaller margin (**5.5%**) and a much lower absolute error for both — 19 days is a
+sample, not a record, and it has so far landed in a calm stretch. Read it as directional
+until it has a season behind it.
 
-Those counts are the **union of both blocks** as of the snapshot date — the launch
-backtest seeded most of them and the daily job has been adding verified days since.
-`GET /evaluation` splits them; this table does not, because the split moves every day
-and a frozen number for it would be wrong within a week. Read the endpoint for the
-verified-only figure.
+The two verified counts differ by one on purpose: `naive_baseline` has a day (`2026-08-17`)
+that `lightgbm` does not. `vericast/pm25/predict.py` publishes the LightGBM forecast only
+when the newest `features` row matches the newest observation and carries no NULLs —
+otherwise it skips that model rather than conditioning on stale or hole-punched lags —
+while persistence needs nothing but the observation itself. A model publishing fewer days
+than the baseline it is measured against shows up in the counts instead of being averaged
+away.
 
-**Peak demand, Maharashtra** (2023-03-02 → present, seeded by a walk-forward backtest):
+One verified row is worth naming rather than leaving for someone to find: `2025-08-02`,
+written on 2026-08-16 by the first daily run, the day after the backtest's last date.
+`predict.py` anchors `forecast_date` to `latest_observation + 1 day`, and at that moment
+the observations table still ended at 2025-08-01, so the forecast is correctly labelled
+for the data behind it — just a year behind wall-clock. Its ordering inside this record is
+intact (the prediction rows were committed at 17:26:51Z, the 2025-08-02 observation
+arrived at 17:29:28Z), and the model saw only 2025-08-01 features, so there is no leakage.
+But the honest caveat is that the actual was already *retrievable upstream* when the
+forecast was written — a year old at CAMS — which makes this one row weaker evidence than
+the days that followed. It stays in the record because removing an inconvenient published
+row is the failure mode this project exists to prevent, and its weight is disclosed:
+dropping it moves verified LightGBM MAE from 4.15 to 4.05 and leaves `naive_baseline` at
+4.39. `refuse_stale()` now raises past `PM25_STALE_LIMIT_DAYS = 2`, so a gap that size
+cannot produce another one.
 
-| Model | Scored | MAE (MW) | RMSE (MW) | MAPE | Description |
-|-------|--------|----------|-----------|------|-------------|
-| lightgbm | 1239 | **773.90** | 1036.46 | **3.00%** | 14 features: lagged demand, rolling aggregates, thermal, calendar |
-| naive_baseline | 1239 | 981.46 | 1309.49 | 3.79% | Tomorrow's peak = today's peak |
-| seasonal_naive | 1239 | 1154.95 | 1590.89 | 4.49% | Tomorrow's peak = the same weekday last week |
+**Peak demand, Maharashtra** — backtest 2023-03-02 → 2026-08-22, verified 2026-08-23 →
+present:
 
-LightGBM beats persistence by **21.2% MAE** here — a wider margin than PM2.5's.
+| Model | Block | Scored | MAE (MW) | RMSE (MW) | MAPE | Description |
+|-------|-------|--------|----------|-----------|------|-------------|
+| lightgbm | backtest | 1238 | **773.54** | 1036.30 | **3.00%** | 14 features: lagged demand, rolling aggregates, thermal, calendar |
+| naive_baseline | backtest | 1238 | 981.15 | 1309.45 | 3.79% | Tomorrow's peak = today's peak |
+| seasonal_naive | backtest | 1238 | 1154.08 | 1590.27 | 4.48% | Tomorrow's peak = the same weekday last week |
+| seasonal_naive | verified | 7 | **1025.00** | 1270.34 | **3.60%** | as above, published before the actual existed |
+| lightgbm | verified | 7 | 1106.60 | 1319.01 | 3.84% | as above, published before the actual existed |
+| naive_baseline | verified | 7 | 1171.14 | 1340.19 | 4.11% | as above, published before the actual existed |
 
-Two results worth reading carefully:
+Over the 1,238-day backtest LightGBM beats persistence by **21.2% MAE** — a wider margin
+than PM2.5's. **The verified block partly disagrees, and that is reported rather than
+smoothed:** LightGBM still beats persistence there (by 5.5%), but `seasonal_naive` — last
+of the three over 1,238 days — currently leads it by 7.4%. Seven days cannot overturn
+1,238, and the honest reading is that the verified electricity record is too short to rank
+anything yet. It is published in this state because the alternative — withholding the
+verified block until it flatters the production model — is the exact failure this project
+was built to make impossible.
+
+Two results from the backtest worth reading carefully:
 
 - **MAPE is the metric that travels.** A 774 MW error on a ~26 GW system is 3%; the
   same absolute number would be meaningless next to a PM2.5 figure. Cross-target
   comparisons should use MAPE, never MAE.
 - **`seasonal_naive` came last, not first.** The design expectation was that a power
   grid's same-weekday-last-week value would beat plain persistence, because Sunday
-  looks more like last Sunday than like Saturday. Measured over 1,239 days it is the
+  looks more like last Sunday than like Saturday. Measured over 1,238 days it is the
   worst of the three — a 6-day-old value carries too much drift for the weekly cycle
   to pay for. The weekly cycle is real (`day_of_week` ranks 3rd in feature importance,
   behind `demand_roll_7_mean` and `demand_lag_1`); LightGBM just extracts it better
@@ -179,21 +219,30 @@ DEFAULT — a DEFAULT applies to inserts only, so a daily score landing on a
 `score_date` a backtest already wrote would otherwise stay labelled `'backtest'`
 and be filtered out permanently.
 
-The frozen walk-forward benchmark (n=1062, MAE 9.3567 vs 10.7975) is reproduced by
-`python experiments/save_backtest_results.py`, which runs the walk-forward loop *and*
-persists it. Those are the **`backtest` block alone**, which is why they differ from the
-711/712 and 9.49 in the table above: that table is the union of both blocks at the
-snapshot date, so it carries the verified days the daily job had added by then. Neither
-figure is wrong; they answer different questions, and `/evaluation` is the one that
-separates them. Its sample count is smaller than the 1,092-row dataset because the first
-30 days seed the walk-forward window rather than being scored. A console-only twin of
-that loop (`compare_models.py`) used to live beside it and was deleted: it re-derived the
-same dataset with the same 30-day warmup and printed the same comparison without writing
-anything, so the two could drift apart while both looked authoritative. The single-model
-scripts they superseded (`naive_baseline_backtest.py`, `train_lightgbm.py`,
-`train_sarima.py`) each hardcoded their own city and their own baseline to beat, which is
-how the drift started. Scoring both models on identical prediction dates in one pass is
-the only way the improvement percentage means anything.
+The `backtest` block in both tables is the persisted output of the seeding scripts —
+`python experiments/save_backtest_results.py` for PM2.5 and
+`experiments/save_elec_backtest_results.py` for demand. Each retrains from scratch at
+every step, predicts strictly the next day, and discards the first `MIN_TRAIN_SIZE = 30`
+dataset rows as the seeding window, so its sample count is 30 fewer than the dataset it
+read. The counts are what those runs actually wrote: 700 days ending 2025-08-01 for PM2.5,
+1,238 ending 2026-08-22 for demand.
+
+**Re-running either script would not reproduce those counts, and that is why they are
+run-once.** Both datasets have grown since the seed run — 1,100 rows for PM2.5 and 1,279
+for demand as of 2026-09-04 — so a re-run would walk forward over days the daily job has
+since published, extending the backtest block into them and moving every backtest figure
+above. It cannot corrupt the verified half: both writers guard their upserts with
+`WHERE source = 'backtest'`, so a conflicting `'daily'` row keeps its published prediction
+and its verified label. What a re-run does change is the size and span of the block it
+owns, which is a claim about the launch record and should not move after launch.
+
+A console-only twin of the PM2.5 loop (`compare_models.py`) used to live beside it and was
+deleted: it re-derived the same dataset with the same 30-day warmup and printed the same
+comparison without writing anything, so the two could drift apart while both looked
+authoritative. The single-model scripts they superseded (`naive_baseline_backtest.py`,
+`train_lightgbm.py`, `train_sarima.py`) each hardcoded their own city and their own
+baseline to beat, which is how the drift started. Scoring every model on identical
+prediction dates in one pass is the only way the improvement percentage means anything.
 
 ## Layout
 
@@ -310,8 +359,8 @@ combined figure**:
 ```json
 {"model": "lightgbm",
  "window_days": null,
- "verified": {"scored_count": 41, "pending_count": 1, "mae": 9.8, "rmse": 12.6},
- "backtest": {"scored_count": 1062, "pending_count": 0, "mae": 9.36, "rmse": 12.1}}
+ "verified": {"scored_count": 19, "pending_count": 1, "mae": 4.15, "rmse": 4.75},
+ "backtest": {"scored_count": 700, "pending_count": 0, "mae": 9.58, "rmse": 12.51}}
 ```
 
 A model with no rows of one provenance simply has no block for it, rather than a

@@ -17,7 +17,11 @@ The diagnose modules gate the outgoing *forecast* on the same two pairs, so thos
 are asserted to be the same objects: a publish gate looser than its ingest guard
 would let a value into the record that the record's own ingest would have refused.
 """
+from datetime import date
+from unittest.mock import MagicMock, patch
+
 from vericast import ELEC_MAX_MW, ELEC_MIN_MW, PM25_MAX, PM25_MIN
+from vericast.elec import ingest as elec_ingest
 from vericast.elec.ingest import REQUIRED_CSV_COLUMNS, plausible_mw
 from vericast.pm25.ingest import plausible_pm25
 
@@ -96,3 +100,52 @@ def test_the_model_allowlists_agree():
             == set(app.MODEL_DESCRIPTIONS))
     assert (elec_diagnose.EXPECTED_MODELS == app.ELEC_MODELS
             == set(app.ELEC_MODEL_DESCRIPTIONS))
+
+
+# --- Which bad cell loses the day ------------------------------------------------
+#
+# peak_demand_mw is the scored target and NOT NULL, so a bad one has to lose its
+# day. energy_met_mu is nullable and nothing scores against it, so a bad one must
+# NOT - discarding the row would throw away a peak that is scored, and the
+# RESCAN_DAYS re-read would fail identically every run until the upstream cell
+# changed, making the loss permanent.
+
+CSV_HEADER = "state,date,max_demand_met_mw,energy_met_mu\n"
+
+
+def fetch_rows(csv_body):
+    """fetch_demand() over a synthetic mirror covering 2026-08-01 -> 08-31."""
+    response = MagicMock()
+    response.text = CSV_HEADER + csv_body
+    with patch.object(elec_ingest.httpx, "get", return_value=response):
+        return elec_ingest.fetch_demand(date(2026, 8, 1), date(2026, 8, 31))
+
+
+def test_an_unparseable_energy_value_keeps_the_scored_peak():
+    """The failure this guards: one stray 'N/A' in a column nothing scores against
+    discarding the NOT NULL peak the whole electricity target is measured on."""
+    rows = fetch_rows(f"{elec_ingest.STATE},2026-08-02,25000.0,N/A\n")
+
+    assert rows == {"2026-08-02": (25_000.0, None)}
+
+
+def test_a_blank_energy_value_is_already_null_not_a_skip():
+    rows = fetch_rows(f"{elec_ingest.STATE},2026-08-03,26000.0,\n")
+
+    assert rows == {"2026-08-03": (26_000.0, None)}
+
+
+def test_an_unparseable_peak_still_loses_its_day():
+    """The other direction: a demand row without demand has nothing to score."""
+    assert fetch_rows(f"{elec_ingest.STATE},2026-08-04,N/A,512.0\n") == {}
+
+
+def test_one_bad_cell_does_not_abandon_the_rows_around_it():
+    rows = fetch_rows(
+        f"{elec_ingest.STATE},2026-08-05,25000.0,500.0\n"
+        f"{elec_ingest.STATE},2026-08-06,N/A,501.0\n"
+        f"{elec_ingest.STATE},2026-08-07,27000.0,oops\n"
+    )
+
+    assert rows == {"2026-08-05": (25_000.0, 500.0),
+                    "2026-08-07": (27_000.0, None)}

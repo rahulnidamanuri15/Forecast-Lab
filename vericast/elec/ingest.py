@@ -72,16 +72,14 @@ CITIES = [
 INITIAL_START = "2023-01-01"
 
 
-def get_last_observed_date():
+def get_last_observed_date(cur):
     """Return the most recent as_of already stored for this state, or None."""
-    with psycopg.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MAX(as_of) FROM electricity_observations WHERE state = %s",
-                (STATE,),
-            )
-            row = cur.fetchone()
-            return row[0] if row else None
+    cur.execute(
+        "SELECT MAX(as_of) FROM electricity_observations WHERE state = %s",
+        (STATE,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def get_earliest_hole(cur, since):
@@ -112,15 +110,17 @@ def resolve_date_range():
     MAX(as_of) alone left 2025-05-21 -> 05-24 permanently behind the resume point.
     RESCAN_DAYS bounds the re-read so it never re-fetches 1,300 days, and every
     write is an upsert, so re-fetching a stored day is a no-op.
+
+    One connection for both queries, as in the PM2.5 twin.
     """
-    last_date = get_last_observed_date()
-
-    if last_date is None:
-        return (datetime.strptime(INITIAL_START, "%Y-%m-%d").date(),
-                local_time.yesterday())
-
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            last_date = get_last_observed_date(cur)
+
+            if last_date is None:
+                return (datetime.strptime(INITIAL_START, "%Y-%m-%d").date(),
+                        local_time.yesterday())
+
             hole = get_earliest_hole(
                 cur, local_time.yesterday() - timedelta(days=RESCAN_DAYS))
 
@@ -172,7 +172,6 @@ def fetch_demand(start_date, end_date):
             skipped += 1
             continue
 
-        raw_mu = row["energy_met_mu"].strip()
         try:
             peak_mw = float(raw_mw)
         except ValueError:
@@ -187,10 +186,20 @@ def fetch_demand(start_date, end_date):
             skipped += 1
             continue
 
+        # energy_met_mu is nullable and nothing scores against it - /electricity/history
+        # only echoes it - so an unparseable one degrades to NULL rather than throwing
+        # away the NOT NULL peak_demand_mw that the whole target is scored on. Skipping
+        # here would also be permanent in practice: the RESCAN_DAYS re-read fails the
+        # same way every run until the upstream cell changes.
+        raw_mu = row["energy_met_mu"].strip()
         try:
-            demand[date_str] = (peak_mw, float(raw_mu) if raw_mu else None)
+            energy_mu = float(raw_mu) if raw_mu else None
         except ValueError:
-            skipped += 1
+            print(f"  [null] {date_str}: energy_met_mu {raw_mu!r} is unparseable; "
+                  f"storing NULL and keeping the {peak_mw:,.0f} MW peak.")
+            energy_mu = None
+
+        demand[date_str] = (peak_mw, energy_mu)
 
     print(f"{STATE} demand days in range: {len(demand)}"
           + (f" ({skipped} skipped for missing, unparseable or implausible MW)"

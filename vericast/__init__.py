@@ -68,13 +68,16 @@ def require_city_of_record(city):
     """Return `city`, refusing any value the published record cannot hold.
 
     Hoisted out of the three modules that had this check (app.py,
-    vericast/pm25/score.py, experiments/save_backtest_results.py) and into the
-    six that did not. The invariant is a property of the schema described above,
-    so it belongs beside it rather than copied per caller - and it has to fire in
-    every module, not just the ones that write model_performance: under another
-    CITY, ingest and features and predict would happily populate a second city's
-    rows that score.py then refuses to score and app.py refuses to serve. One
-    loud failure at import beats a pipeline that half-runs.
+    vericast/pm25/score.py, experiments/save_backtest_results.py) and into every
+    other PM2.5-side module. The invariant is a property of the schema described
+    above, so it belongs beside it rather than copied per caller - and it has to
+    fire in every module, not just the ones that write model_performance: under
+    another CITY, ingest and features and predict would happily populate a second
+    city's rows that score.py then refuses to score and app.py refuses to serve.
+    One loud failure at import beats a pipeline that half-runs.
+
+    The elec modules deliberately do not call it: electricity_model_performance is
+    keyed on `state`, so that target has no equivalent single-key collision.
     """
     if city != PM25_CITY_OF_RECORD:
         raise RuntimeError(
