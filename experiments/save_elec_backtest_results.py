@@ -189,7 +189,12 @@ def save_model_performance(evaluation_dates, predictions, actuals):
 
     print(f"\n[OK] Model performance saved (n={sample_size}, score_date={score_date})")
     for model, (mae, rmse, mape) in sorted(metrics.items(), key=lambda kv: kv[1][0]):
-        print(f"   {model:15s} MAE={mae:8.2f} MW  RMSE={rmse:8.2f} MW  MAPE={mape:5.2f}%")
+        # calculate_metrics returns None when no actual is non-zero, and the commit
+        # above has already landed - so formatting it unguarded kills the run *after*
+        # the write, skipping verify_saved_results() and reporting a success it never
+        # confirmed. Same guard as vericast/elec/score.py.
+        mape_str = f"{mape:5.2f}%" if mape is not None else "   n/a"
+        print(f"   {model:15s} MAE={mae:8.2f} MW  RMSE={rmse:8.2f} MW  MAPE={mape_str}")
 
     return metrics
 

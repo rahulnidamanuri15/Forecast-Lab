@@ -42,16 +42,14 @@ def plausible_pm25(value):
     return PM25_MIN <= value <= PM25_MAX
 
 
-def get_last_observed_date():
+def get_last_observed_date(cur):
     """Return the most recent as_of date already stored for this city, or None."""
-    with psycopg.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MAX(as_of) FROM observations WHERE city = %s",
-                (CITY,),
-            )
-            row = cur.fetchone()
-            return row[0] if row else None
+    cur.execute(
+        "SELECT MAX(as_of) FROM observations WHERE city = %s",
+        (CITY,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def get_earliest_hole(cur, since):
@@ -83,14 +81,17 @@ def resolve_date_range():
     alone left every skipped or NULL day permanently behind the resume point.
     Still best-effort - if the upstream never serves that date, the next run
     starts from it again, and every write is an upsert.
+
+    One connection for both queries: they are sequential and read the same table.
     """
-    last_date = get_last_observed_date()
-
-    if last_date is None:
-        return datetime.strptime(INITIAL_START, "%Y-%m-%d").date(), local_time.yesterday()
-
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            last_date = get_last_observed_date(cur)
+
+            if last_date is None:
+                return (datetime.strptime(INITIAL_START, "%Y-%m-%d").date(),
+                        local_time.yesterday())
+
             hole = get_earliest_hole(
                 cur, local_time.yesterday() - timedelta(days=RESCAN_DAYS))
 
@@ -198,8 +199,11 @@ def fetch_and_aggregate_data(start_date, end_date):
                      if data['pm2_5_count'] >= MIN_HOURS_PER_DAY else None)
         pm10_avg = (data['pm10_sum'] / data['pm10_count']
                     if data['pm10_count'] >= MIN_HOURS_PER_DAY else None)
+        # [null], not [skip]: the row is still appended below, with NULLs. The
+        # date has to exist for get_earliest_hole()'s LEFT JOIN to distinguish
+        # "thin day, already fetched" from "never fetched".
         if pm2_5_avg is None or pm10_avg is None:
-            print(f"  [skip] {date_str}: only {data['pm2_5_count']}h pm2_5 / "
+            print(f"  [null] {date_str}: only {data['pm2_5_count']}h pm2_5 / "
                   f"{data['pm10_count']}h pm10 (need {MIN_HOURS_PER_DAY})")
 
         # Implausible is the third form of the same case, and the only one that
