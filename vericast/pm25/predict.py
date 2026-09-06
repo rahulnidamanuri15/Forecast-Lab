@@ -18,6 +18,7 @@ from vericast import (
     refuse_implausible,
     refuse_stale,
     require_city_of_record,
+    require_database_url,
 )
 from vericast.pm25.train import FEATURE_COLUMNS
 
@@ -56,6 +57,7 @@ def get_latest_feature_row(cur):
 
 def make_daily_prediction():
     """Make a daily prediction for the day after the latest observation and store it"""
+    require_database_url(DATABASE_URL)
     # The connection is the context manager, as in score.py: a raise anywhere
     # below closes it instead of leaking it against Neon's connection limit.
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
@@ -106,7 +108,6 @@ def make_daily_prediction():
             pm2_5 = refuse_implausible(pm2_5, PM25_MIN, PM25_MAX,
                                        "naive_baseline", UNIT)
             cur.execute(upsert_sql, (CITY, forecast_date, pm2_5, "naive_baseline"))
-            conn.commit()
             print(f"[OK] Stored naive_baseline prediction for {forecast_date}: {pm2_5:.2f} PM2.5")
 
         # LightGBM prediction, if a trained artifact is available. Conditions on the
@@ -136,12 +137,10 @@ def make_daily_prediction():
                     lgbm_pred = refuse_implausible(lgbm_pred, PM25_MIN, PM25_MAX,
                                                    "lightgbm", UNIT)
                     cur.execute(upsert_sql, (CITY, forecast_date, lgbm_pred, "lightgbm"))
-                    conn.commit()
                     print(f"[OK] Stored lightgbm prediction for {forecast_date}: {lgbm_pred:.2f} PM2.5")
 
-        # Scoring is score.py's job: it runs as step 4/6, before this script, and
-        # scores *every* pending row rather than just yesterday's, so a missed day
-        # self-heals. A second copy here only gave the rule two places to drift.
+        # Atomic commit for the forecast date across all models.
+        conn.commit()
 
         return True
 

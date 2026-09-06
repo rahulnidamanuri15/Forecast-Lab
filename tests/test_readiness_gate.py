@@ -150,11 +150,7 @@ def test_the_cors_check_fails_when_no_browser_origin_is_allowed(monkeypatch):
 
 
 def test_the_readme_advertises_the_number_of_checks_that_exist():
-    """The count drifted from 17 to 21 unnoticed, because it is hand-copied prose.
-
-    ponytail: a regex over the README rather than generating that line. One
-    sentence in one file; a docs generator for it would be the larger thing.
-    """
+    """Verify that README advertises the exact count of readiness gate checks."""
     with open(ROOT / "README.md", encoding="utf-8") as fh:
         readme = fh.read()
 

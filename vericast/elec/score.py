@@ -5,11 +5,12 @@ self-heals - plus MAPE, the metric that actually travels for demand: 400 MW of
 error means something different at 20,000 MW than a PM2.5 error of 400 would.
 """
 import os
+import math
 import numpy as np
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import reopen_revised_actuals, revision_sql
+from vericast import reopen_revised_actuals, require_database_url, revision_sql
 
 load_dotenv()
 
@@ -29,6 +30,7 @@ WHERE o.state = p.state
   AND p.actual_demand_mw IS NULL
   AND p.predicted_demand_mw IS NOT NULL
   AND o.peak_demand_mw IS NOT NULL
+  AND o.peak_demand_mw != 'NaN'::float
 RETURNING p.forecast_date, p.model, p.predicted_demand_mw, o.peak_demand_mw;
 """
 
@@ -59,6 +61,7 @@ def score_pending_predictions():
     Re-opens revised days first, in the same transaction, so a day the mirror corrected
     is re-scored rather than keeping an error computed against the old value.
     """
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             reopened = reopen_revised_actuals(
@@ -81,6 +84,14 @@ def score_pending_predictions():
 
             groups = {}
             for forecast_date, model, predicted, actual in scored:
+                if predicted is None or actual is None:
+                    continue
+                if isinstance(predicted, float) and math.isnan(predicted):
+                    print(f"  [skip] {forecast_date} {model}: predicted is NaN; not scoring")
+                    continue
+                if isinstance(actual, float) and math.isnan(actual):
+                    print(f"  [skip] {forecast_date} {model}: actual is NaN; not scoring")
+                    continue
                 groups.setdefault((forecast_date, model), []).append((predicted, actual))
 
             for (score_date, model), pairs in sorted(groups.items()):
@@ -95,6 +106,12 @@ def score_pending_predictions():
                 mape = (float(np.mean(np.abs((predicted[nonzero] - actual[nonzero])
                                              / actual[nonzero])) * 100)
                         if nonzero.any() else None)
+
+                if math.isnan(mae) or math.isnan(rmse) or (mape is not None and math.isnan(mape)):
+                    raise RuntimeError(
+                        f"Computed metric is NaN for {score_date} {model}; "
+                        "aborting transaction to avoid committing unmeasured actuals"
+                    )
 
                 cur.execute(UPSERT_PERF_SQL,
                             (STATE, score_date, model, mae, rmse, mape, len(pairs)))

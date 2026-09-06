@@ -7,6 +7,7 @@ a real measured record instead of an empty table.
 Imports FEATURE_COLUMNS / PARAMS / DATASET_SQL from vericast.pm25.train rather than
 re-declaring them, so the backtest cannot drift from the model it characterises.
 """
+import argparse
 import os
 import sys
 from datetime import timedelta
@@ -16,7 +17,7 @@ import lightgbm as lgb
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vericast import require_city_of_record  # noqa: E402
+from vericast import require_city_of_record, require_database_url  # noqa: E402
 from vericast.pm25.train import (  # noqa: E402
     CITY, DATASET_SQL, FEATURE_COLUMNS, NUM_BOOST_ROUND, PARAMS,
 )
@@ -39,6 +40,7 @@ NAIVE_COL = FEATURE_COLUMNS.index("pm2_5_lag_1")  # y(t) -> persistence
 
 def load_dataset():
     """Load the exact t -> t+1 forecasting dataset."""
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(DATASET_SQL, (CITY,))
@@ -171,9 +173,10 @@ def save_results(
     naive_predictions,
     lightgbm_predictions,
     actuals,
+    conn=None,
 ):
     """Save all individual predictions to PostgreSQL."""
-
+    require_database_url(DATABASE_URL)
     # source = 'backtest': these rows have their actual at write time, so they are
     # not published-then-verified and /evaluation reports them separately. The
     # DO UPDATE touches neither actual_pm2_5 nor source, and the WHERE keeps it off
@@ -224,11 +227,19 @@ def save_results(
             )
         )
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    should_close = False
+    if conn is None:
+        conn = psycopg.connect(DATABASE_URL)
+        should_close = True
+
+    try:
         with conn.cursor() as cur:
             cur.executemany(insert_sql, records)
-
-        conn.commit()
+        if should_close:
+            conn.commit()
+    finally:
+        if should_close:
+            conn.close()
 
     print(f"[OK] Saved {len(records)} prediction records")
     print(
@@ -241,8 +252,10 @@ def save_model_performance(
     naive_predictions,
     lightgbm_predictions,
     actuals,
+    conn=None,
 ):
     """Save aggregate model performance."""
+    require_database_url(DATABASE_URL)
 
     naive_mae, naive_rmse = calculate_metrics(
         naive_predictions,
@@ -278,7 +291,12 @@ def save_model_performance(
     """
     delete_sql = "DELETE FROM model_performance WHERE source = 'backtest';"
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    should_close = False
+    if conn is None:
+        conn = psycopg.connect(DATABASE_URL)
+        should_close = True
+
+    try:
         with conn.cursor() as cur:
             cur.execute("SELECT MIN(score_date) FROM model_performance WHERE source = 'daily'")
             row = cur.fetchone()
@@ -308,7 +326,11 @@ def save_model_performance(
             stale = cur.rowcount
             cur.executemany(insert_sql, records)
 
-        conn.commit()
+        if should_close:
+            conn.commit()
+    finally:
+        if should_close:
+            conn.close()
 
     print("\n[OK] Model performance saved")
 
@@ -362,9 +384,33 @@ def verify_saved_results():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Seed the PM2.5 launch record with a walk-forward backtest.")
+    parser.add_argument("--confirm", "--force", action="store_true",
+                        help="Confirm re-seeding/overwriting backtest launch record")
+    parser.add_argument("--refuse-if-exists", action="store_true", default=True,
+                        help="Refuse if backtest records already exist (default: True)")
+    args = parser.parse_args()
+
     print("=" * 60)
     print("           VERICAST BACKTEST PERSISTENCE")
     print("=" * 60)
+
+    require_database_url(DATABASE_URL)
+    confirmed = args.confirm or os.getenv("ALLOW_RESEED") == "1"
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*), MAX(forecast_date) FROM predictions "
+                "WHERE city = %s AND source = 'backtest'",
+                (CITY,),
+            )
+            count, max_date = cur.fetchone()
+            if count and count > 0 and not confirmed:
+                raise RuntimeError(
+                    f"Backtest already seeded for {CITY} ({count} predictions through {max_date}). "
+                    "Re-running would alter launch history. Pass --confirm or set ALLOW_RESEED=1 to override."
+                )
 
     (
         evaluation_dates,
@@ -373,19 +419,23 @@ def main():
         actuals,
     ) = run_backtest()
 
-    save_results(
-        evaluation_dates,
-        naive_predictions,
-        lightgbm_predictions,
-        actuals,
-    )
+    with psycopg.connect(DATABASE_URL) as conn:
+        save_results(
+            evaluation_dates,
+            naive_predictions,
+            lightgbm_predictions,
+            actuals,
+            conn=conn,
+        )
 
-    save_model_performance(
-        evaluation_dates,
-        naive_predictions,
-        lightgbm_predictions,
-        actuals,
-    )
+        save_model_performance(
+            evaluation_dates,
+            naive_predictions,
+            lightgbm_predictions,
+            actuals,
+            conn=conn,
+        )
+        conn.commit()
 
     verify_saved_results()
 

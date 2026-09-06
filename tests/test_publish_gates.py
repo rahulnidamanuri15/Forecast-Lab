@@ -70,11 +70,10 @@ def elec_feature_row(as_of, **overrides):
 
 
 def test_an_out_of_range_pm25_model_forecast_is_not_published():
-    """The naive row lands, the model's -/+ absurdity does not.
+    """An out-of-range LightGBM forecast aborts the transaction without committing.
 
-    A booster predicting 900 ug/m3 means a broken artifact or corrupt features, and
-    before this gate moved ahead of the commit it would have been public until
-    diagnose.py failed the job two steps later.
+    Single-transaction commit ensures a failure in any model arm rolls back the
+    entire day rather than leaving a half-published day with only naive_baseline.
     """
     as_of = local_time.today()
     broken_model = MagicMock()
@@ -88,10 +87,7 @@ def test_an_out_of_range_pm25_model_forecast_is_not_published():
         with pytest.raises(RuntimeError, match="outside the plausible range"):
             pm25_predict.make_daily_prediction()
 
-    written = upserts(cur, "predictions")
-    assert len(written) == 1, "only the naive baseline should have been published"
-    assert written[0][1][-1] == "naive_baseline"
-    assert conn.commit.call_count == 1
+    assert not conn.commit.called, "transaction must roll back rather than committing partial day"
 
 
 def test_a_stalled_pm25_source_publishes_nothing_at_all():
@@ -115,8 +111,8 @@ def test_a_stalled_pm25_source_publishes_nothing_at_all():
 
 def test_an_out_of_range_elec_feature_is_not_published():
     """demand_lag_6 is a stored observation carried forward, so an absurd value
-    means ingest's own guard let one through - and seasonal_naive would have
-    published it verbatim."""
+    means ingest's own guard let one through. The single-transaction commit
+    ensures naive_baseline is rolled back and not committed alone."""
     as_of = local_time.today()
 
     with patch("psycopg.connect") as mock_connect, \
@@ -129,10 +125,7 @@ def test_an_out_of_range_elec_feature_is_not_published():
         with pytest.raises(RuntimeError, match="outside the plausible range"):
             elec_predict.make_daily_prediction()
 
-    written = upserts(cur, "electricity_predictions")
-    assert len(written) == 1, "only the naive baseline should have been published"
-    assert written[0][1][-1] == "naive_baseline"
-    assert conn.commit.call_count == 1
+    assert not conn.commit.called, "transaction must roll back rather than committing partial day"
 
 
 def test_a_stalled_elec_source_publishes_nothing_at_all():

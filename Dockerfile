@@ -19,10 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Drop root before the app runs. Nothing here writes to the image at runtime -
-# the API is read-only and models/ is baked in at build time - so an unwritable
-# /app is correct, not a limitation. ponytail: a fixed uid, no home directory
-# and no gosu; add them only if something in here ever needs to write.
+# Drop root before the app runs for container security.
 RUN useradd --system --uid 10001 vericast
 USER 10001
 
@@ -45,4 +42,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ['PORT']+'/health',timeout=4).status==200 else 1)" \
     || exit 1
 
-CMD uvicorn app:app --host 0.0.0.0 --port ${PORT}
+CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port ${PORT}"]

@@ -1,3 +1,4 @@
+from datetime import date
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -5,7 +6,7 @@ from time import monotonic
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import psycopg
 from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
@@ -50,6 +51,7 @@ async def lifespan(_app: FastAPI):
             timeout=10,                              # wait for a free slot, then fail
             check=ConnectionPool.check_connection,   # verify connection health on checkout
             open=False,
+            kwargs={"options": "-c statement_timeout=10000"},  # 10s statement timeout to protect pool
         )
         _pool.open()
         yield
@@ -156,6 +158,7 @@ async def root():
     return {
         "message": "ML Forecasting API",
         "docs": "/docs",
+        "dashboard": "/dashboard",
         "endpoints": {
             "health": "/health",
             "forecast": "/forecast",
@@ -173,6 +176,33 @@ async def root():
             },
         }
     }
+
+
+DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def serve_dashboard():
+    """Serve the VeriCast dashboard with backend-enforced security headers."""
+    if not os.path.exists(DASHBOARD_FILE):
+        raise HTTPException(status_code=404, detail="Dashboard file not found")
+    with open(DASHBOARD_FILE, "r", encoding="utf-8") as fh:
+        content = fh.read()
+    response = HTMLResponse(content=content)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self' https://forecast-lab-2l0q.onrender.com http://localhost:8000 http://127.0.0.1:8000; "
+        "base-uri 'none'; "
+        "form-action 'none'"
+    )
+    return response
 
 # The two published PM2.5 models. Module-level so /forecast and /predictions
 # validate against the same set instead of two literals drifting apart; the
@@ -370,16 +400,21 @@ async def get_leaderboard():
 async def get_predictions(
     model: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     scored_only: bool = False,
     source: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ):
     """
     Get individual prediction rows from the predictions table.
 
     - model: filter to a single model (e.g. 'lightgbm'). Omit for all models.
     - limit: max rows returned (1-500), most recent forecast_date first.
+    - offset: rows to skip for pagination (default: 0).
     - scored_only: if true, only return rows where actual_pm2_5 is known.
     - source: filter to one provenance, 'daily' or 'backtest'. Omit for both.
+    - start_date / end_date: filter forecast_date range (YYYY-MM-DD).
 
     `source` filters in SQL, before the LIMIT. That distinction is the whole
     point of the parameter: a caller that wants only published rows and filters
@@ -398,6 +433,19 @@ async def get_predictions(
     """
     if model is not None and model not in PM25_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
+
+    if start_date:
+        try:
+            date.fromisoformat(start_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid start_date format. Expected YYYY-MM-DD.")
+    if end_date:
+        try:
+            date.fromisoformat(end_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid end_date format. Expected YYYY-MM-DD.")
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date cannot be after end_date.")
 
     # Allowlisted rather than passed through: an unrecognised source is a 400
     # here instead of an empty `predictions` list, which a caller cannot tell
@@ -425,20 +473,24 @@ async def get_predictions(
                 if scored_only:
                     clauses.append("actual_pm2_5 IS NOT NULL")
 
-                # ponytail: f-string WHERE, not a query builder. Safe because every
-                # fragment joined here is a literal in this file and both user
-                # values (`model`, `source`) are allowlisted above; real values
-                # still go through %s. Revisit if a caller-supplied column or
-                # operator reaches this.
+                if start_date:
+                    clauses.append("forecast_date >= %s")
+                    params.append(start_date)
+
+                if end_date:
+                    clauses.append("forecast_date <= %s")
+                    params.append(end_date)
+
+                # Safe parameterized query with allowlisted clauses
                 where_clause = " AND ".join(clauses)
-                params.append(limit)
+                params.extend([limit, offset])
 
                 cur.execute(f"""
                     SELECT forecast_date, model, predicted_pm2_5, actual_pm2_5, created_at, source
                     FROM predictions
                     WHERE {where_clause}
                     ORDER BY forecast_date DESC, model
-                    LIMIT %s
+                    LIMIT %s OFFSET %s
                 """, params)
 
                 rows = cur.fetchall()
@@ -760,10 +812,20 @@ async def get_electricity_forecast(model: str = "lightgbm"):
 async def get_electricity_predictions(
     model: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     scored_only: bool = False,
     source: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ):
     """Individual prediction rows from electricity_predictions.
+
+    - model: filter to a single model. Omit for all models.
+    - limit: max rows returned (1-500), most recent forecast_date first.
+    - offset: rows to skip for pagination (default: 0).
+    - scored_only: if true, only return rows where actual_demand_mw is known.
+    - source: filter to one provenance, 'daily' or 'backtest'. Omit for both.
+    - start_date / end_date: filter forecast_date range (YYYY-MM-DD).
 
     `error_pct` is the per-row absolute percentage error, which is what the
     dashboard's status badges are banded on.
@@ -777,6 +839,19 @@ async def get_electricity_predictions(
     """
     if model is not None and model not in ELEC_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
+
+    if start_date:
+        try:
+            date.fromisoformat(start_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid start_date format. Expected YYYY-MM-DD.")
+    if end_date:
+        try:
+            date.fromisoformat(end_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid end_date format. Expected YYYY-MM-DD.")
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date cannot be after end_date.")
 
     if source is not None and source not in PROVENANCE:
         raise HTTPException(
@@ -801,9 +876,17 @@ async def get_electricity_predictions(
                 if scored_only:
                     clauses.append("actual_demand_mw IS NOT NULL")
 
-                # ponytail: f-string WHERE, safe for the reason /predictions gives.
+                if start_date:
+                    clauses.append("forecast_date >= %s")
+                    params.append(start_date)
+
+                if end_date:
+                    clauses.append("forecast_date <= %s")
+                    params.append(end_date)
+
+                # Safe parameterized query with allowlisted clauses
                 where_clause = " AND ".join(clauses)
-                params.append(limit)
+                params.extend([limit, offset])
 
                 cur.execute(f"""
                     SELECT forecast_date, model, predicted_demand_mw,
@@ -811,7 +894,7 @@ async def get_electricity_predictions(
                     FROM electricity_predictions
                     WHERE {where_clause}
                     ORDER BY forecast_date DESC, model
-                    LIMIT %s
+                    LIMIT %s OFFSET %s
                 """, params)
 
                 rows = cur.fetchall()

@@ -199,8 +199,7 @@ def check_features_no_nulls(target="PM2.5"):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                # ponytail: f-string table/column names as in check_prediction_exists
-                # - every value comes from the TARGETS literal above, never a caller.
+                # Table and column identifiers from internal TARGETS mapping
                 cur.execute(f"""
                     SELECT {", ".join(columns)} FROM {t['features']}
                     WHERE {t['key']} = %s
@@ -214,13 +213,11 @@ def check_features_no_nulls(target="PM2.5"):
                     return False
 
                 null_cols = [col for col, val in zip(columns, row) if val is None]
-
                 if not null_cols:
                     print(f"PASS: Latest {target} features have no NULL values")
                     return True
                 else:
-                    print(f"FAIL: Latest {target} features have NULL values in "
-                          f"columns: {null_cols}")
+                    print(f"FAIL: Latest {target} features have NULL values in columns: {null_cols}")
                     return False
     except Exception as e:
         print(f"FAIL: Error checking {target} features for NULLs: {e}")
@@ -289,8 +286,7 @@ def check_prediction_exists(model="lightgbm", target="PM2.5"):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                # ponytail: f-string table/column names - every value comes from the
-                # TARGETS literal above, never from a caller. Key values are bound.
+                # Table and column identifiers from internal TARGETS mapping
                 cur.execute(
                     f"SELECT MAX(as_of) FROM {t['observations']} WHERE {t['key']} = %s",
                     (t["key_value"],),
@@ -525,6 +521,9 @@ def check_api_electricity_endpoints():
     try:
         for path, key in endpoints:
             response = httpx.get(f'{API_BASE}{path}', timeout=10.0)
+            if response.status_code == 404 and 'seasonal_naive' in path:
+                print(f"WARN: {path} returns 404 (seasonal_naive allowed missing across a date gap)")
+                continue
             if response.status_code != 200:
                 print(f"FAIL: {path} returns status {response.status_code}")
                 return False

@@ -25,6 +25,8 @@ from vericast import (
     ELEC_STALE_LIMIT_DAYS,
     MODEL_ELEC as MODEL_PATH,
     local_time,
+    require_database_url,
+    send_alert,
 )
 from vericast.elec.train import FEATURE_COLUMNS
 
@@ -71,6 +73,7 @@ def main():
     all_ok &= check(f"Model file found at ./{MODEL_PATH}", exists,
                     f"cwd={os.getcwd()}" if not exists else "")
 
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT MAX(as_of) FROM electricity_observations WHERE state = %s",
@@ -102,13 +105,16 @@ def main():
             # reads exactly those 14, so a reorder or a rename cannot leave this
             # checking a stale set. Same generation as vericast/pm25/diagnose.py and
             # verify_deployment_readiness.py.
+            cur.execute("SELECT MAX(as_of) FROM electricity_features WHERE state = %s",
+                        (STATE,))
+            latest_feat = cur.fetchone()[0]
+
             cur.execute(f"""
                 SELECT as_of, {", ".join(FEATURE_COLUMNS)}
                 FROM electricity_features
-                WHERE state = %s ORDER BY as_of DESC LIMIT 1
-            """, (STATE,))
+                WHERE state = %s AND as_of = %s
+            """, (STATE, latest_obs))
             feat_row = cur.fetchone()
-            latest_feat = feat_row[0] if feat_row else None
             named = dict(zip(FEATURE_COLUMNS, feat_row[1:])) if feat_row else {}
             demand_lag_6 = named.get("demand_lag_6")
             print(f"  Latest features date:    {latest_feat}")
@@ -204,6 +210,11 @@ def main():
     print("=" * 62)
     print("Overall:", "READY" if all_ok else "NEEDS ATTENTION (see FAILs above)")
     print("=" * 62)
+    if not all_ok:
+        send_alert(
+            "VeriCast Electricity Diagnostic Gate FAILED",
+            f"Daily electricity pipeline diagnostic checks failed for {STATE}. One or more verification gates were not met. Do not publish."
+        )
     return all_ok
 
 

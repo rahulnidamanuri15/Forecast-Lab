@@ -30,6 +30,7 @@ from datetime import timedelta
 import psycopg
 from dotenv import load_dotenv
 
+from vericast import require_database_url
 from vericast.elec.features import COOLING_BASE
 
 load_dotenv()
@@ -73,9 +74,9 @@ def mismatch(a, b, tol=TOLERANCE):
 
 
 def run_leakage_test():
-    # ponytail: whole-table fetch and a Python comparison, as in the PM2.5 twin.
-    # ~1,279 rows a side, one per calendar day; chunk by as_of (or move the checks
-    # into a SQL self-join) if this ever reaches six figures.
+    # Compare entire observation and feature tables in-memory to verify
+    # calendar date alignment and rolling window invariants independently of SQL.
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(

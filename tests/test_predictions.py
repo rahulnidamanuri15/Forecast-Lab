@@ -117,6 +117,30 @@ def test_predictions_model_filter_reaches_sql():
         assert "lightgbm" not in sql   # bound, never interpolated
 
 
+@pytest.mark.parametrize("path", ["/predictions", "/electricity/predictions"])
+def test_predictions_date_and_offset_filters(path):
+    with patch('app.get_db_connection') as mock_get_db:
+        mock_cursor = wire_cursor(mock_get_db, rows=[])
+        res = client.get(f"{path}?start_date=2026-08-01&end_date=2026-08-15&offset=20&limit=10")
+        assert res.status_code == 200
+        sql, params = mock_cursor.execute.call_args[0]
+        assert "forecast_date >= %s" in sql
+        assert "forecast_date <= %s" in sql
+        assert "2026-08-01" in params
+        assert "2026-08-15" in params
+        assert params[-2:] == [10, 20]  # LIMIT 10 OFFSET 20
+
+
+@pytest.mark.parametrize("path", ["/predictions", "/electricity/predictions"])
+def test_predictions_invalid_date_format(path):
+    assert client.get(f"{path}?start_date=not-a-date").status_code == 400
+    assert client.get(f"{path}?end_date=2026-13-45").status_code == 400
+    res = client.get(f"{path}?start_date=2026-09-10&end_date=2026-09-01")
+    assert res.status_code == 400
+    assert "start_date cannot be after end_date" in res.json()["detail"]
+
+
+
 def test_predictions_rejects_unknown_model():
     """An unallowlisted model is a 400 before any query runs - that allowlist is
     what makes the f-string WHERE clause in app.py safe."""

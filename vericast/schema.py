@@ -1,13 +1,10 @@
-"""DDL for every table in both targets. Idempotent: CREATE TABLE IF NOT EXISTS
-plus ADD COLUMN IF NOT EXISTS only, so running it against the live database
-cannot touch the published record.
+"""Database schema DDL and idempotent migrations for VeriCast tables.
 
+Idempotent: uses CREATE TABLE IF NOT EXISTS and ADD COLUMN IF NOT EXISTS so
+running it against production will not modify existing published records.
+
+Usage:
     python -m vericast.schema
-
-Replaces the four one-table-per-file create_*_table.py scripts. ponytail: no
-migration tool - MIGRATIONS below is an idempotent tuple of statements, not a
-versioned history, so it has no down-migration and no ordering guarantees beyond
-"top to bottom". Add Alembic when a column needs to change rather than be added.
 """
 import os
 import psycopg

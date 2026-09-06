@@ -26,10 +26,7 @@
   base-uri 'none';
   form-action 'none'">
 <title>VeriCast · Published-then-verified PM2.5 &amp; Electricity Demand Forecasts</title>
-<!-- Inline data: URI, not a file: a static host answers a missing /favicon.ico
-     with the 404 the browser logs on every load, and img-src already allows
-     data:. ponytail: a real .ico would need a binary asset in the repo for one
-     16px glyph - add one only if the tab icon needs to be more than a mark. -->
+<!-- Inline SVG favicon data URI to avoid separate asset request -->
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230B0E14'/><path d='M7 11l5.5 12h2L21 9' fill='none' stroke='%2300E5A3' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 <!-- Version-pinned AND hash-pinned: the tag stops a silent major-version bump,
      the integrity hash stops a tampered CDN response from running as script on
@@ -1139,18 +1136,36 @@
 
   document.getElementById('api-docs-link').href = `${API_BASE}/docs`;
 
-  async function fetchJSON(path) {
-    const res = await fetch(`${API_BASE}${path}`);
-    if (!res.ok) throw new Error(`${path} failed: ${res.status}`);
-    return res.json();
+  async function fetchJSON(path, retries = 2, timeoutMs = 15000) {
+    let lastErr;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(`${API_BASE}${path}`, { signal: controller.signal });
+        clearTimeout(timer);
+        if (!res.ok) {
+          const err = new Error(`${path} failed: ${res.status}`);
+          err.status = res.status;
+          throw err;
+        }
+        return await res.json();
+      } catch (err) {
+        clearTimeout(timer);
+        lastErr = err;
+        // Do not retry client errors (4xx, e.g. 404 on optional/unseeded models)
+        if (err.status && err.status >= 400 && err.status < 500) {
+          throw err;
+        }
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        }
+      }
+    }
+    throw lastErr;
   }
 
-  // Thresholds are CPCB's PM2.5 sub-index breakpoints (30/60/90/120 ug/m3), but
-  // the labels deliberately describe the concentration rather than borrowing AQI's
-  // health wording: this page publishes one pollutant's 24h mean, and "GOOD" or
-  // "UNHEALTHY" would be a health claim about an AQI it never computes.
-  // ponytail: a real AQI needs the other pollutants' sub-indices and a max() over
-  // them - add that only if the page starts ingesting them.
+  // PM2.5 concentration bands aligned with CPCB sub-index breakpoints (30/60/90/120 ug/m3).
   function getBand(val) {
     if (val <= 30) return { label: 'LOW CONCENTRATION', cls: 'cat-low' };
     if (val <= 60) return { label: 'MODERATE', cls: 'cat-mod' };
@@ -1585,6 +1600,8 @@
 
   async function initElectricity() {
     try {
+      const elErr = document.getElementById('el-error');
+      if (elErr) elErr.hidden = true;
       const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
         fetchJSON('/electricity/health').catch(() => null),
         fetchJSON('/electricity/forecast?model=lightgbm').catch(() => null),
@@ -1624,7 +1641,7 @@
         document.getElementById('el-hero-date').textContent =
           `FORECAST FOR ${forecast.forecast_date} · MAHARASHTRA`;
 
-        if (latestObs) {
+        if (latestObs && latestObs.peak_demand_mw !== null && latestObs.peak_demand_mw !== undefined && latestObs.peak_demand_mw !== 0) {
           const diff = fVal - latestObs.peak_demand_mw;
           const pct = (diff / latestObs.peak_demand_mw * 100).toFixed(1);
           document.getElementById('el-hero-change-desc').innerHTML =
@@ -1808,6 +1825,7 @@
       }
     } catch (err) {
       console.error('Failed to initialize electricity panel:', err);
+      elLoaded = false;
       showPanelError('el-error', err);
     }
   }

@@ -1,29 +1,15 @@
-"""Engineer the point-in-time electricity feature store.
+"""Engineer point-in-time electricity feature store in PostgreSQL.
 
-One idempotent INSERT ... SELECT. Postgres window frames carry the guarantees:
-
-  * `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND INTERVAL '1 day' PRECEDING` is
-    date-addressed, not row-addressed, so it returns NULL across a date gap on
-    its own - no explicit gap guard to forget. (Maharashtra has one such gap:
-    2025-05-21 -> 2025-05-24.)
-  * `COUNT(peak_demand_mw) OVER w7 = 7` refuses to call an incomplete window a
-    7-day mean. It counts the averaged column rather than `*` so a NULL value
-    counts as absent, which matters for temp_roll_7: temperature_2m_mean is
-    nullable and `AVG` skips NULLs.
-  * Look-ahead leakage is structurally unexpressible - a `RANGE ... PRECEDING`
-    frame cannot reference a future row. That is a claim about this SQL, not about
-    the rows in the table, so leakage_test.py re-derives every stored value from
-    the observations by calendar date as its own pipeline step, and
-    verify_alignment() below checks the complementary features(t) -> target(t+1)
-    *join* at the end of every engineer_features() call.
-
-Full recompute every run, so changing a feature definition needs no backfill.
+Idempotent INSERT ... SELECT using window frames with strict point-in-time guarantees:
+  - RANGE BETWEEN INTERVAL '1 day' PRECEDING: date-addressed to null across gaps.
+  - COUNT(col) OVER wN = N: ensures full calendar window coverage before taking averages.
+  - No lookahead: all rolling/lag frames strictly precede the target date.
 """
 import os
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import alignment_sql, verify_alignment as check_alignment
+from vericast import alignment_sql, require_database_url, verify_alignment as check_alignment
 
 load_dotenv()
 
@@ -104,6 +90,7 @@ def verify_alignment(cur):
 
 
 def engineer_features():
+    require_database_url(DATABASE_URL)
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:

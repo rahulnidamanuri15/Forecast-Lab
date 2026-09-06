@@ -7,6 +7,7 @@ Model artifact paths are resolved from this file, not from the working
 directory, so `python -m ...`, a cron job and the container all find the same
 file. They stay committed to the repo (weekly-retrain.yml pushes them back).
 """
+import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -20,6 +21,14 @@ MODEL_ELEC = str(ROOT / "models" / "lightgbm_elec_model.txt")
 # Electricity (Grid-Sentinel) lags real-time by 2-4 days (limit: 5 days).
 PM25_STALE_LIMIT_DAYS = 2
 ELEC_STALE_LIMIT_DAYS = 5
+
+
+def require_database_url(url=None):
+    """Fail fast with the real problem instead of a psycopg parse error on None."""
+    resolved = url if url is not None else os.getenv("DATABASE_URL")
+    if not resolved:
+        raise RuntimeError("DATABASE_URL environment variable is not set")
+    return resolved
 
 
 def refuse_stale(as_of, today, limit_days, target):
@@ -212,4 +221,33 @@ def verify_alignment(cur, gap_sql, orphan_sql, key_value):
         )
     print(f"  Alignment OK: {orphans} orphan row(s), all explained by "
           f"{gaps} observation gap(s)")
+
+
+def send_alert(subject, message):
+    """Emit diagnostic failure alert to GITHUB_STEP_SUMMARY and ALERT_WEBHOOK_URL if configured."""
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as f:
+                f.write(f"\n### 🚨 {subject}\n\n{message}\n")
+        except Exception as exc:
+            print(f"[alert] Failed to write to GITHUB_STEP_SUMMARY: {exc}")
+
+    webhook_url = os.getenv("ALERT_WEBHOOK_URL")
+    if webhook_url:
+        try:
+            import httpx
+            # Support both Slack ("text") and Discord ("content") payload conventions
+            payload = {
+                "text": f"🚨 *{subject}*\n\n{message}",
+                "content": f"🚨 **{subject}**\n\n{message}",
+            }
+            resp = httpx.post(webhook_url, json=payload, timeout=10)
+            if resp.is_success:
+                print(f"[alert] Alert webhook dispatched successfully")
+            else:
+                print(f"[alert] Webhook returned HTTP {resp.status_code}: {resp.text[:100]}")
+        except Exception as exc:
+            print(f"[alert] Failed to send alert webhook: {exc}")
+
 

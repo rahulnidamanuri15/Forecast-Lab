@@ -121,6 +121,17 @@ def test_the_improvement_callout_never_renders_a_double_sign():
         "hardcoded '+' back in front of an improvement figure that can be negative")
 
 
+def test_dashboard_endpoint_serves_html_and_csp():
+    from app import app
+    from fastapi.testclient import TestClient
+    c = TestClient(app)
+    res = c.get("/dashboard")
+    assert res.status_code == 200
+    assert "Content-Security-Policy" in res.headers
+    assert "X-Content-Type-Options" in res.headers
+    assert "VeriCast" in res.text
+
+
 def test_the_tablist_reports_which_tab_is_selected():
     """Two tab buttons with no aria-selected announce as neither or both."""
     assert 'role="tablist"' in SOURCE and SOURCE.count('role="tab"') == 2

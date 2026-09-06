@@ -12,6 +12,7 @@ The 2025-05-21 -> 2025-05-24 gap needs no special handling: DATASET_SQL's
 `o.as_of = f.as_of + INTERVAL '1 day'` join drops any pair straddling it, and the
 NOT NULL filter drops the feature rows whose lags are NULL because of it.
 """
+import argparse
 import os
 import sys
 from datetime import timedelta
@@ -21,6 +22,7 @@ import lightgbm as lgb
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from vericast import require_database_url
 from vericast.elec.train import (  # noqa: E402
     DATASET_SQL, FEATURE_COLUMNS, NUM_BOOST_ROUND, PARAMS, STATE,
 )
@@ -37,6 +39,7 @@ SEASONAL_COL = FEATURE_COLUMNS.index("demand_lag_6")   # y(t-6) -> same weekday 
 
 
 def load_dataset():
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(DATASET_SQL, (STATE,))
@@ -121,7 +124,7 @@ def run_backtest():
     return evaluation_dates, predictions, actuals
 
 
-def save_results(evaluation_dates, predictions, actuals):
+def save_results(evaluation_dates, predictions, actuals, conn=None):
     """Store every individual prediction *with* its actual - verified historical
     results, not pending forecasts.
 
@@ -145,16 +148,26 @@ def save_results(evaluation_dates, predictions, actuals):
         for idx, date in enumerate(evaluation_dates)
     ]
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    should_close = False
+    if conn is None:
+        require_database_url(DATABASE_URL)
+        conn = psycopg.connect(DATABASE_URL)
+        should_close = True
+
+    try:
         with conn.cursor() as cur:
             cur.executemany(insert_sql, records)
-        conn.commit()
+        if should_close:
+            conn.commit()
+    finally:
+        if should_close:
+            conn.close()
 
     print(f"[OK] Saved {len(records)} prediction records")
     print(f"   {len(evaluation_dates)} target dates x {len(predictions)} models")
 
 
-def save_model_performance(evaluation_dates, predictions, actuals):
+def save_model_performance(evaluation_dates, predictions, actuals, conn=None):
     """One aggregate row per model at the last evaluated date - the launch record.
 
     score_date is the last evaluated day, which the daily scorer has usually already
@@ -187,7 +200,13 @@ def save_model_performance(evaluation_dates, predictions, actuals):
     metrics = {model: calculate_metrics(preds, actuals)
                for model, preds in predictions.items()}
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    should_close = False
+    if conn is None:
+        require_database_url(DATABASE_URL)
+        conn = psycopg.connect(DATABASE_URL)
+        should_close = True
+
+    try:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT MIN(score_date) FROM electricity_model_performance "
@@ -204,7 +223,11 @@ def save_model_performance(evaluation_dates, predictions, actuals):
             cur.execute(delete_sql, (STATE,))
             stale = cur.rowcount
             cur.executemany(insert_sql, records)
-        conn.commit()
+        if should_close:
+            conn.commit()
+    finally:
+        if should_close:
+            conn.close()
 
     print(f"\n[OK] Model performance saved (n={sample_size}, score_date={score_date})")
     if stale:
@@ -244,13 +267,41 @@ def verify_saved_results():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Seed electricity launch record with walk-forward backtest.")
+    parser.add_argument("--confirm", "--force", action="store_true",
+                        help="Confirm re-seeding/overwriting backtest launch record")
+    parser.add_argument("--refuse-if-exists", action="store_true", default=True,
+                        help="Refuse if backtest records already exist (default: True)")
+    args = parser.parse_args()
+
     print("=" * 62)
     print("      VERICAST ELECTRICITY BACKTEST PERSISTENCE (Maharashtra)")
     print("=" * 62)
 
+    require_database_url(DATABASE_URL)
+    confirmed = args.confirm or os.getenv("ALLOW_RESEED") == "1"
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*), MAX(forecast_date) FROM electricity_predictions "
+                "WHERE state = %s AND source = 'backtest'",
+                (STATE,),
+            )
+            count, max_date = cur.fetchone()
+            if count and count > 0 and not confirmed:
+                raise RuntimeError(
+                    f"Backtest already seeded for {STATE} ({count} predictions through {max_date}). "
+                    "Re-running would alter launch history. Pass --confirm or set ALLOW_RESEED=1 to override."
+                )
+
     evaluation_dates, predictions, actuals = run_backtest()
-    save_results(evaluation_dates, predictions, actuals)
-    save_model_performance(evaluation_dates, predictions, actuals)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        save_results(evaluation_dates, predictions, actuals, conn=conn)
+        save_model_performance(evaluation_dates, predictions, actuals, conn=conn)
+        conn.commit()
+
     verify_saved_results()
 
     print("\n[OK] Electricity backtest results successfully persisted.")

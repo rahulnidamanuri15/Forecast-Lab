@@ -18,6 +18,8 @@ from vericast import (
     PM25_STALE_LIMIT_DAYS,
     local_time,
     require_city_of_record,
+    require_database_url,
+    send_alert,
 )
 from vericast.pm25.train import FEATURE_COLUMNS
 
@@ -75,6 +77,7 @@ def main():
         f"cwd={os.getcwd()}" if not exists else "",
     )
 
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             # 2. Latest observation date, and its value: a thin-hours day is a
@@ -134,9 +137,9 @@ def main():
             cur.execute(
                 f"""
                 SELECT {", ".join(FEATURE_COLUMNS)}
-                FROM features WHERE city = %s ORDER BY as_of DESC LIMIT 1
+                FROM features WHERE city = %s AND as_of = %s
                 """,
-                (CITY,),
+                (CITY, latest_obs),
             )
             row = cur.fetchone()
             # Name the NULL columns rather than dumping the tuple: predict.py's
@@ -242,6 +245,11 @@ def main():
     print("=" * 60)
     print("Overall:", "READY" if all_ok else "NEEDS ATTENTION (see FAILs above)")
     print("=" * 60)
+    if not all_ok:
+        send_alert(
+            "VeriCast PM2.5 Diagnostic Gate FAILED",
+            f"Daily PM2.5 pipeline diagnostic checks failed for {CITY}. One or more verification gates were not met. Do not publish."
+        )
     return all_ok
 
 

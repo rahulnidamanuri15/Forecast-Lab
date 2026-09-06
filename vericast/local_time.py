@@ -21,8 +21,7 @@ def yesterday():
 
 
 if __name__ == "__main__":
-    # ponytail: smallest check that fails if the tz database is missing from
-    # the image (python:*-slim ships without it) or the offset is wrong.
+    # Verify timezone database is available and IST offset (+05:30) is correct.
     assert (today() - yesterday()).days == 1
     now = datetime.now(TZ)
     assert now.utcoffset() == timedelta(hours=5, minutes=30), now.utcoffset()

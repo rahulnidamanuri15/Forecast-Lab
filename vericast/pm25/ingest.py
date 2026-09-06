@@ -1,4 +1,5 @@
 import os
+import time
 import httpx
 import psycopg
 from datetime import datetime, timedelta
@@ -11,6 +12,7 @@ from vericast import (
     RESCAN_DAYS,
     local_time,
     require_city_of_record,
+    require_database_url,
     resume_start,
 )
 
@@ -21,10 +23,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 LAT, LON = 21.1463, 79.0849          # Nagpur, India
 CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
 
-# Hours of hourly data a day needs before its mean is called a daily mean. One
-# hour averaged alone is indistinguishable downstream from 24, and it feeds the
-# lag and rolling features. ponytail: a flat threshold, not a coverage-weighted
-# average - go weighted only if partial days turn out to be common.
+# Minimum hourly samples required to compute a valid daily mean (>= 75% day coverage).
 MIN_HOURS_PER_DAY = 18
 
 # Fallback start date used only when the observations table is empty
@@ -85,6 +84,7 @@ def resolve_date_range():
 
     One connection for both queries: they are sequential and read the same table.
     """
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             last_date = get_last_observed_date(cur)
@@ -127,34 +127,59 @@ def fetch_and_aggregate_data(start_date, end_date):
     """
     START, END = start_date.isoformat(), end_date.isoformat()
 
+    def _get_with_retry(url, params, timeout, attempts=3):
+        last_exc = None
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = httpx.get(url, params=params, timeout=timeout)
+                resp.raise_for_status()
+                return resp
+            except Exception as exc:  # noqa: BLE001 - retry then raise
+                last_exc = exc
+                if attempt < attempts:
+                    backoff = 2 ** (attempt - 1)
+                    print(f"  [retry] GET {url} attempt {attempt}/{attempts} failed: {exc}; sleeping {backoff}s...")
+                    time.sleep(backoff)
+                else:
+                    print(f"  [retry] GET {url} attempt {attempt}/{attempts} failed: {exc}")
+        raise RuntimeError(f"GET {url} failed after {attempts} attempts: {last_exc}")
+
     print("Fetching air quality data...")
-    aq_response = httpx.get("https://air-quality-api.open-meteo.com/v1/air-quality", params={
+    aq_response = _get_with_retry("https://air-quality-api.open-meteo.com/v1/air-quality", params={
         "latitude": LAT, "longitude": LON, "hourly": "pm2_5,pm10",
         "start_date": START, "end_date": END, "timezone": "UTC",
     }, timeout=60)
-    aq_response.raise_for_status()
-    aq_data = aq_response.json()
+    try:
+        aq_data = aq_response.json()
+        times = aq_data["hourly"]["time"]
+        pm2_5_values = aq_data["hourly"]["pm2_5"]
+        pm10_values = aq_data["hourly"]["pm10"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(f"Open-Meteo AQ payload missing hourly fields: {exc}")
+    if not (len(times) == len(pm2_5_values) == len(pm10_values)):
+        raise RuntimeError(
+            f"Open-Meteo AQ length mismatch: {len(times)} times vs "
+            f"{len(pm2_5_values)} pm2_5 vs {len(pm10_values)} pm10")
 
     print("Fetching weather data...")
-    wx_response = httpx.get("https://archive-api.open-meteo.com/v1/archive", params={
+    wx_response = _get_with_retry("https://archive-api.open-meteo.com/v1/archive", params={
         "latitude": LAT, "longitude": LON,
         "daily": "temperature_2m_mean,wind_speed_10m_max,precipitation_sum",
         "start_date": START, "end_date": END, "timezone": "UTC",
     }, timeout=60)
-    wx_response.raise_for_status()
-    wx_data = wx_response.json()
-
-    # Extract hourly data
-    times = aq_data["hourly"]["time"]
-    pm2_5_values = aq_data["hourly"]["pm2_5"]
-    pm10_values = aq_data["hourly"]["pm10"]
+    try:
+        wx_data = wx_response.json()
+        wx_daily = wx_data["daily"]
+        wx_times = wx_daily["time"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(f"Open-Meteo archive payload missing daily fields: {exc}")
 
     # Keyed on the date string the loop below looks up. A dict rather than
     # wx_times.index(date_str): that is O(n^2) on a 700-day backfill.
-    weather = dict(zip(wx_data["daily"]["time"], zip(
-        wx_data["daily"]["temperature_2m_mean"],
-        wx_data["daily"]["wind_speed_10m_max"],
-        wx_data["daily"]["precipitation_sum"],
+    weather = dict(zip(wx_times, zip(
+        wx_daily["temperature_2m_mean"],
+        wx_daily["wind_speed_10m_max"],
+        wx_daily["precipitation_sum"],
     )))
 
     print(f"AQI hours: {len(pm2_5_values)}, missing: {sum(v is None for v in pm2_5_values)}")
@@ -164,7 +189,11 @@ def fetch_and_aggregate_data(start_date, end_date):
     daily_data = {}
 
     for i, timestamp in enumerate(times):
-        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        try:
+            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        except ValueError:
+            print(f"  [skip] unparseable hourly timestamp {timestamp!r}; skipping hour")
+            continue
         date_str = dt.date().isoformat()
 
         if date_str not in daily_data:
@@ -217,6 +246,21 @@ def fetch_and_aggregate_data(start_date, end_date):
                   f"upstream?)")
             pm2_5_avg = None
 
+        # Aux plausibility: a -999 sentinel or unit change in a non-scored
+        # column still poisons lags/rolls and training. Null it, keep the row.
+        if pm10_avg is not None and not (1.0 <= pm10_avg <= 1000.0):
+            print(f"  [null] {date_str}: pm10 {pm10_avg:.1f} outside 1-1000 ug/m3; nulling")
+            pm10_avg = None
+        if temp is not None and not (-10.0 <= temp <= 55.0):
+            print(f"  [null] {date_str}: temp {temp:.1f}C implausible; nulling")
+            temp = None
+        if wind is not None and not (0.0 <= wind <= 60.0):
+            print(f"  [null] {date_str}: wind {wind:.1f} implausible; nulling")
+            wind = None
+        if precip is not None and not (0.0 <= precip <= 500.0):
+            print(f"  [null] {date_str}: precip {precip:.1f} implausible; nulling")
+            precip = None
+
         records_to_insert.append((
             CITY,      # city
             date_str,  # as_of
@@ -234,6 +278,7 @@ def insert_observations(records):
     """Insert aggregated observations into the database."""
     if not records:
         return
+    require_database_url(DATABASE_URL)
 
     insert_sql = """
     INSERT INTO observations (city, as_of, pm2_5, pm10, temperature_2m_mean, wind_speed_10m_max, precipitation_sum)

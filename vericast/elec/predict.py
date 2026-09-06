@@ -18,6 +18,7 @@ from vericast import (
     local_time,
     refuse_implausible,
     refuse_stale,
+    require_database_url,
 )
 from vericast.elec.train import FEATURE_COLUMNS
 
@@ -64,6 +65,7 @@ def get_latest_feature_row(cur):
 
 def make_daily_prediction():
     """Predict peak demand for the day after the latest observation and store it."""
+    require_database_url(DATABASE_URL)
     # Connection as context manager, as in score.py: a raise anywhere below
     # closes it instead of leaking it against Neon's connection limit.
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
@@ -100,7 +102,6 @@ def make_daily_prediction():
                                             "naive_baseline", UNIT)
         cur.execute(UPSERT_SQL, (STATE, forecast_date, peak_demand_mw, "naive_baseline"))
 
-        conn.commit()
         print(f"[OK] Stored naive_baseline prediction for {forecast_date}: "
               f"{peak_demand_mw:.0f} MW")
 
@@ -132,7 +133,6 @@ def make_daily_prediction():
                                               "seasonal_naive", UNIT)
                 cur.execute(UPSERT_SQL, (STATE, forecast_date, seasonal, "seasonal_naive"))
 
-                conn.commit()
                 print(f"[OK] Stored seasonal_naive prediction for {forecast_date}: "
                       f"{seasonal:.0f} MW")
 
@@ -153,12 +153,11 @@ def make_daily_prediction():
                     lgbm_pred = refuse_implausible(lgbm_pred, ELEC_MIN_MW, ELEC_MAX_MW,
                                                    "lightgbm", UNIT)
                     cur.execute(UPSERT_SQL, (STATE, forecast_date, lgbm_pred, "lightgbm"))
-                    conn.commit()
                     print(f"[OK] Stored lightgbm prediction for {forecast_date}: "
                           f"{lgbm_pred:.0f} MW")
 
-        # Scoring is vericast/elec/score.py's job (step 4, before this one). It
-        # scores *every* pending row, so a missed day self-heals.
+        # Atomic commit for the forecast date across all models.
+        conn.commit()
 
         return True
 

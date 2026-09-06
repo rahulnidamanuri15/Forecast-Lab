@@ -4,8 +4,8 @@ import numpy as np
 import lightgbm as lgb
 from dotenv import load_dotenv
 
-from vericast import MODEL_PM25 as MODEL_PATH, require_city_of_record
-from vericast.gate import challenger_ships, record_training_window
+from vericast import MODEL_PM25 as MODEL_PATH, require_city_of_record, require_database_url
+from vericast.gate import challenger_ships, read_training_window, save_atomic_artifact
 
 load_dotenv()
 
@@ -65,6 +65,7 @@ DATASET_SQL = f"""
 def load_full_dataset():
     """Load the full t -> t+1 dataset: one final model on everything we have, no
     walk-forward split (that is what experiments/save_backtest_results.py is for)."""
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(DATASET_SQL, (CITY,))
@@ -107,17 +108,20 @@ def train_and_save():
                             incumbent_path=MODEL_PATH,
                             feature_names=FEATURE_COLUMNS, unit=UNIT,
                             dates=feature_dates):
-        print(f"[SKIP] Keeping the existing model at {MODEL_PATH}.")
+        print(f"[ALERT] Quality gate REJECTED challenger model! Retrain refused.")
+        window = read_training_window(MODEL_PATH)
+        if window:
+            print(f"[ALERT] Stale incumbent remains active at {MODEL_PATH} "
+                  f"(trained through {window['last']}, {window['rows']} rows).")
+        else:
+            print(f"[ALERT] No incumbent training window found for {MODEL_PATH}!")
         return None
 
     train_data = lgb.Dataset(X, label=y, feature_name=FEATURE_COLUMNS)
     model = lgb.train(PARAMS, train_data, num_boost_round=NUM_BOOST_ROUND)
 
-    model.save_model(MODEL_PATH)
-    print(f"[OK] Saved production model to {MODEL_PATH}")
-    # Written after the artifact, so a failed save cannot leave a window claiming
-    # a model that is not there.
-    record_training_window(MODEL_PATH, feature_dates, len(X))
+    # Save model artifact and window sidecar atomically
+    save_atomic_artifact(model, MODEL_PATH, feature_dates, len(X))
 
     # Sanity check: reload and confirm predictions are reproducible
     reloaded = lgb.Booster(model_file=MODEL_PATH)

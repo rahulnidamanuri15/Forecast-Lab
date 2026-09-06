@@ -9,8 +9,7 @@ name: CI
 # The two `- run:` self-checks after pytest are assert-based __main__ blocks that
 # already exist in those modules; running them is cheaper than a second copy.
 #
-# ponytail: no matrix, no coverage gate, no lint job. Add a matrix when a second
-# Python version is actually supported.
+# Fast CI pipeline running unit and integration test suite.
 on:
   push:
     branches: [main]

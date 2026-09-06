@@ -14,6 +14,7 @@ exposes a reachable machine-readable endpoint, fetch_demand() below is the only
 function that needs to change.
 """
 import os
+import time
 import csv
 import io
 import httpx
@@ -27,6 +28,7 @@ from vericast import (
     ELEC_MIN_MW,
     RESCAN_DAYS,
     local_time,
+    require_database_url,
     resume_start,
 )
 
@@ -65,9 +67,7 @@ def plausible_mw(value):
     """
     return ELEC_MIN_MW <= value <= ELEC_MAX_MW
 
-# Maharashtra's temperature as the unweighted mean of its three largest cities.
-# ponytail: unweighted 3-city mean. Population-weight it (or add a 4th city) only
-# if temp features top LightGBM's importance and the margin over seasonal_naive stalls.
+# Regional temperature representative coordinates across Maharashtra
 CITIES = [
     (19.0760, 72.8777),  # Mumbai
     (18.5204, 73.8567),  # Pune
@@ -120,6 +120,7 @@ def resolve_date_range():
 
     One connection for both queries, as in the PM2.5 twin.
     """
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             last_date = get_last_observed_date(cur)
@@ -144,10 +145,24 @@ def fetch_demand(start_date, end_date):
     for Maharashtra rows inside the range. The only function that touches the
     demand source."""
     print(f"Fetching demand mirror ({DEMAND_CSV_URL.rsplit('/', 1)[-1]})...")
-    # ponytail: refetches the whole ~6MB mirror each run to pull a handful of rows.
-    # Byte-range or a local cache only if the daily job starts timing out.
-    response = httpx.get(DEMAND_CSV_URL, timeout=180, follow_redirects=True)
-    response.raise_for_status()
+    # Fetch full CSV mirror (~6MB) with exponential backoff retries.
+    last_exc = None
+    response = None
+    for attempt in range(1, 4):
+        try:
+            response = httpx.get(DEMAND_CSV_URL, timeout=180, follow_redirects=True)
+            response.raise_for_status()
+            break
+        except Exception as exc:  # noqa: BLE001 - retry then raise
+            last_exc = exc
+            if attempt < 3:
+                backoff = 2 ** (attempt - 1)
+                print(f"  [retry] demand mirror attempt {attempt}/3 failed: {exc}; sleeping {backoff}s...")
+                time.sleep(backoff)
+            else:
+                print(f"  [retry] demand mirror attempt {attempt}/3 failed: {exc}")
+    if response is None:
+        raise RuntimeError(f"Demand mirror fetch failed after 3 attempts: {last_exc}")
 
     start_str, end_str = start_date.isoformat(), end_date.isoformat()
     demand = {}
@@ -221,25 +236,50 @@ def fetch_temperature(start_date, end_date):
     Comma-separated coordinates make Open-Meteo return a JSON *array* of
     per-location objects, each with its own `daily` block."""
     print("Fetching regional temperature...")
-    response = httpx.get("https://archive-api.open-meteo.com/v1/archive", params={
-        "latitude": ",".join(str(lat) for lat, _ in CITIES),
-        "longitude": ",".join(str(lon) for _, lon in CITIES),
-        "daily": "temperature_2m_mean,temperature_2m_max",
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
-        "timezone": "UTC",
-    }, timeout=60)
-    response.raise_for_status()
-    payload = response.json()
+    last_exc = None
+    response = None
+    for attempt in range(1, 4):
+        try:
+            response = httpx.get("https://archive-api.open-meteo.com/v1/archive", params={
+                "latitude": ",".join(str(lat) for lat, _ in CITIES),
+                "longitude": ",".join(str(lon) for _, lon in CITIES),
+                "daily": "temperature_2m_mean,temperature_2m_max",
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "timezone": "UTC",
+            }, timeout=60)
+            response.raise_for_status()
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < 3:
+                backoff = 2 ** (attempt - 1)
+                print(f"  [retry] temperature attempt {attempt}/3 failed: {exc}; sleeping {backoff}s...")
+                time.sleep(backoff)
+            else:
+                print(f"  [retry] temperature attempt {attempt}/3 failed: {exc}")
+    if response is None:
+        raise RuntimeError(f"Temperature fetch failed after 3 attempts: {last_exc}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"Temperature payload is not JSON: {exc}")
 
     # A single location returns a bare object; multiple return a list.
     locations = payload if isinstance(payload, list) else [payload]
 
     sums = {}
     for location in locations:
-        daily = location["daily"]
-        for i, date_str in enumerate(daily["time"]):
-            mean_v, max_v = daily["temperature_2m_mean"][i], daily["temperature_2m_max"][i]
+        try:
+            daily = location["daily"]
+            loc_times = daily["time"]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(f"Temperature payload missing daily block: {exc}")
+        for i, date_str in enumerate(loc_times):
+            try:
+                mean_v, max_v = daily["temperature_2m_mean"][i], daily["temperature_2m_max"][i]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise RuntimeError(f"Temperature payload malformed for {date_str}: {exc}")
             acc = sums.setdefault(date_str, [0.0, 0, 0.0, 0])
             if mean_v is not None:
                 acc[0] += mean_v
@@ -248,13 +288,22 @@ def fetch_temperature(start_date, end_date):
                 acc[2] += max_v
                 acc[3] += 1
 
-    temps = {
-        date_str: (
-            acc[0] / acc[1] if acc[1] else None,
-            acc[2] / acc[3] if acc[3] else None,
-        )
-        for date_str, acc in sums.items()
-    }
+    def _plausible_temp(v, lo=-10.0, hi=55.0):
+        return v is not None and lo <= v <= hi
+
+    temps = {}
+    for date_str, acc in sums.items():
+        mean = acc[0] / acc[1] if acc[1] else None
+        mx = acc[2] / acc[3] if acc[3] else None
+        if acc[1] and acc[1] < len(locations):
+            print(f"  [warn] {date_str}: temp mean from {acc[1]}/{len(locations)} cities")
+        if mean is not None and not _plausible_temp(mean):
+            print(f"  [null] {date_str}: temp mean {mean:.1f}C implausible; nulling")
+            mean = None
+        if mx is not None and not _plausible_temp(mx, hi=60.0):
+            print(f"  [null] {date_str}: temp max {mx:.1f}C implausible; nulling")
+            mx = None
+        temps[date_str] = (mean, mx)
     print(f"Temperature days: {len(temps)} (mean of {len(locations)} cities)")
     return temps
 
@@ -263,6 +312,7 @@ def insert_observations(records):
     """Write the day's rows, skipping unchanged rows and reporting revisions."""
     if not records:
         return
+    require_database_url(DATABASE_URL)
 
     insert_sql = """
     INSERT INTO electricity_observations

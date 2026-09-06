@@ -31,6 +31,39 @@ def window_path(model_path):
     return f"{model_path}.window.json"
 
 
+def save_atomic_artifact(model, model_path, dates, rows):
+    """Atomically save the model artifact and its training window sidecar.
+
+    Writes both to temporary files first, then replaces into place so a crash
+    never leaves a mismatched artifact or half-written sidecar.
+    """
+    if not dates:
+        raise ValueError(f"Cannot save model artifact {model_path} without training dates")
+    tmp_model = f"{model_path}.tmp"
+    tmp_window = f"{window_path(model_path)}.tmp"
+
+    try:
+        model.save_model(tmp_model)
+        payload = {"first": str(dates[0]), "last": str(dates[-1]), "rows": int(rows)}
+        with open(tmp_window, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+
+        os.replace(tmp_model, model_path)
+        os.replace(tmp_window, window_path(model_path))
+    except Exception:
+        for p in (tmp_model, tmp_window):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        raise
+
+    print(f"[gate] Atomically saved model and training window {payload['first']} -> "
+          f"{payload['last']} ({payload['rows']} rows) to {model_path}.")
+    return payload
+
+
 def record_training_window(model_path, dates, rows):
     """Record the date range and sample count used to train the model artifact."""
     if not dates:
@@ -58,13 +91,18 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
                      incumbent_path=None, feature_names=None,
                      holdout_days=HOLDOUT_DAYS, unit="", dates=None):
     """Validate challenger model on holdout set against quality bars before shipping."""
-    if len(X) < MIN_TRAIN_ROWS + holdout_days:
-        print(f"[gate] Only {len(X)} rows; need "
-              f"{MIN_TRAIN_ROWS + holdout_days} to hold out {holdout_days}. "
-              "Accepting without a gate.")
+    MIN_ABSOLUTE_ROWS = 25
+    if len(X) < MIN_ABSOLUTE_ROWS:
+        print(f"[gate] [WARN] Only {len(X)} rows (< {MIN_ABSOLUTE_ROWS}); "
+              "too few samples to reliably hold out. Accepting with warning.")
         return True
 
-    split = len(X) - holdout_days
+    effective_holdout = holdout_days
+    if len(X) < (MIN_TRAIN_ROWS + holdout_days):
+        effective_holdout = max(5, int(len(X) * 0.2))
+        print(f"[gate] Small dataset ({len(X)} rows): adapting holdout to "
+              f"{effective_holdout} rows (fit on {len(X) - effective_holdout}) to vet early-life model.")
+    split = len(X) - effective_holdout
     X_head, y_head = X[:split], y[:split]
     X_hold, y_hold = X[split:], y[split:]
 
@@ -76,7 +114,7 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
     pred = challenger.predict(X_hold)
 
     suffix = f" {unit}" if unit else ""
-    print(f"[gate] Last {holdout_days} rows held out (fit on {len(X_head)}):")
+    print(f"[gate] Last {effective_holdout} rows held out (fit on {len(X_head)}):")
 
     checks = []
 
@@ -115,10 +153,7 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
         incumbent = lgb.Booster(model_file=incumbent_path)
         if incumbent.num_feature() == X.shape[1]:
             incumbent_mae = _mae(incumbent.predict(X_hold), y_hold)
-            # The sidecar is what makes this line honest. Without it every
-            # incumbent score had to be caveated as not comparable; with it, an
-            # incumbent whose window ends before the holdout starts never saw
-            # these rows and its number means what it looks like.
+            # Sidecar window comparison: only comparable if incumbent finished before holdout opens
             window = read_training_window(incumbent_path)
             holdout_start = str(dates[split]) if dates is not None else None
             comparable = bool(window and holdout_start
@@ -144,14 +179,8 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
 
 
 def demo():
-    """Self-check: the six broken models the bars were calibrated against must
-    all be refused, and a fit on real signal must pass.
-
-    ponytail: bare `assert` is right here and wrong in the pipeline gates. This is
-    a __main__ self-check whose whole job is to fail loudly under CI's plain
-    `python -m vericast.gate`; under -O it simply is not the check anymore. The
-    gates that guard *data* raise instead, since there -O would silently turn them
-    into no-ops that still exit 0.
+    """Self-check: verify that degraded/degenerate model patterns are rejected
+    by the gate bars and an informative signal model passes.
     """
     rng = np.random.default_rng(0)
     n = 300

@@ -1,9 +1,10 @@
 import os
+import math
 import numpy as np
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import reopen_revised_actuals, require_city_of_record, revision_sql
+from vericast import reopen_revised_actuals, require_city_of_record, require_database_url, revision_sql
 
 load_dotenv()
 
@@ -12,8 +13,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # model_performance has no city column, so CITY is constrained to Nagpur.
 CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
 
-# Attach arriving ground-truth observations to pending predictions.
-# Scoped to source='daily' and non-null predictions to preserve backtest provenance.
+# Attach arriving ground-truth observations to pending predictions (source='daily').
+# `o.pm2_5 != 'NaN'::float` ensures PostgreSQL NaN values are not attached as actuals.
 SCORE_SQL = """
 UPDATE predictions p
 SET actual_pm2_5 = o.pm2_5
@@ -25,6 +26,7 @@ WHERE o.city = p.city
   AND p.actual_pm2_5 IS NULL
   AND p.predicted_pm2_5 IS NOT NULL
   AND o.pm2_5 IS NOT NULL
+  AND o.pm2_5 != 'NaN'::float
 RETURNING p.forecast_date, p.model, p.predicted_pm2_5, o.pm2_5;
 """
 
@@ -53,6 +55,7 @@ def score_pending_predictions():
     moved upstream is re-scored here rather than keeping an error computed against a
     value the observations table no longer holds.
     """
+    require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             reopened = reopen_revised_actuals(
@@ -81,6 +84,14 @@ def score_pending_predictions():
             # matching the UNIQUE(score_date, model) constraint.
             groups = {}
             for forecast_date, model, predicted, actual in scored:
+                if predicted is None or actual is None:
+                    continue
+                if isinstance(predicted, float) and math.isnan(predicted):
+                    print(f"  [skip] {forecast_date} {model}: predicted is NaN; not scoring")
+                    continue
+                if isinstance(actual, float) and math.isnan(actual):
+                    print(f"  [skip] {forecast_date} {model}: actual is NaN; not scoring")
+                    continue
                 groups.setdefault((forecast_date, model), []).append((predicted, actual))
 
             for (score_date, model), pairs in sorted(groups.items()):
@@ -88,6 +99,12 @@ def score_pending_predictions():
                 actual = np.array([a for _, a in pairs], dtype=float)
                 mae = float(np.mean(np.abs(predicted - actual)))
                 rmse = float(np.sqrt(np.mean((predicted - actual) ** 2)))
+
+                if math.isnan(mae) or math.isnan(rmse):
+                    raise RuntimeError(
+                        f"Computed metric is NaN for {score_date} {model}; "
+                        "aborting transaction to avoid committing unmeasured actuals"
+                    )
 
                 cur.execute(UPSERT_PERF_SQL, (score_date, model, mae, rmse, len(pairs)))
                 print(f"Scored {model} for {score_date}: MAE={mae:.4f}, RMSE={rmse:.4f} (n={len(pairs)})")

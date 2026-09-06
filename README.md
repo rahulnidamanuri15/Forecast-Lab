@@ -669,6 +669,34 @@ Deliberately not built. Each line names the ceiling and what would justify cross
   only cost self-checks, never a gate. Crossing this means dropping `assert` from the
   self-checks too, which buys nothing until something actually sets the flag.
 
+## Backup & Point-in-Time Recovery (PITR)
+
+VeriCast's historical forecasts and ground-truth observations represent a tamper-evident record that must be protected against data loss or accidental mutation.
+
+### Point-in-Time Recovery (Neon)
+Neon PostgreSQL maintains automated write-ahead logs allowing recovery to any timestamp within the branch retention window:
+```bash
+# Create an isolated branch at a specific past timestamp for verification/restore:
+neon branches create --from-point-in-time "2026-09-01T12:00:00Z" --name pitr-drill
+```
+
+### Scheduled Logical Backups (pg_dump)
+For long-term, off-platform archives independent of Neon:
+```bash
+# Export compressed custom-format backup:
+pg_dump "$DATABASE_URL" --no-owner --no-privileges -F c -f "vericast_$(date +%Y%m%d_%H%M%S).dump"
+
+# Dry-run restore drill to a verification database:
+pg_restore -d "$VERIFY_DATABASE_URL" --clean --if-exists --no-owner "vericast_$(date +%Y%m%d_%H%M%S).dump"
+```
+
+## Observability & Alerting
+
+- **Pipeline diagnostic gates**: Both `vericast.pm25.diagnose` and `vericast.elec.diagnose` run at step 6/6 of daily pipelines. If any verification check fails, the job immediately halts with exit code 1, formats a summary to `$GITHUB_STEP_SUMMARY`, and posts an outbound webhook if `ALERT_WEBHOOK_URL` is configured in repository secrets (supports Slack, Discord, or custom alerting endpoints).
+- **Application health checks**: `GET /health` and `GET /electricity/health` provide JSON uptime status, last observation date, and staleness metrics checked by Docker healthcheck and external monitors.
+- **Connection pool statement timeout**: `psycopg_pool` enforces `statement_timeout = 10000ms` (10 seconds) on all queries, preventing runaway queries from exhausting the serverless connection pool.
+- **Backend dashboard with CSP**: The FastAPI backend serves the dashboard directly at `GET /dashboard` with server-enforced HTTP security headers (`Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`).
+
 ## Security
 
 Report vulnerabilities privately — see [`.github/SECURITY.md`](.github/SECURITY.md).
