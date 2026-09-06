@@ -1,6 +1,6 @@
 name: Readiness Gate
 
-# Runs verify_deployment_readiness.py — the 22-check go-live gate — against the
+# Runs verify_deployment_readiness.py — the 23-check go-live gate — against the
 # live database and the deployed API.
 #
 # It used to be the one gate nothing automated. Its DB checks need a populated
@@ -41,6 +41,7 @@ jobs:
       # The deployed API. Set the API_BASE repository variable to point this at a
       # different host; the default is the one index.html and the CSP already pin.
       API_BASE: ${{ vars.API_BASE || 'https://forecast-lab-2l0q.onrender.com' }}
+      FRONTEND_ORIGIN: ${{ vars.FRONTEND_ORIGIN || 'https://rahulnidamanuri15.github.io' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 

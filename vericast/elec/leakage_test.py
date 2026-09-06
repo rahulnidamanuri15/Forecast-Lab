@@ -73,6 +73,9 @@ def mismatch(a, b, tol=TOLERANCE):
 
 
 def run_leakage_test():
+    # ponytail: whole-table fetch and a Python comparison, as in the PM2.5 twin.
+    # ~1,279 rows a side, one per calendar day; chunk by as_of (or move the checks
+    # into a SQL self-join) if this ever reaches six figures.
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(

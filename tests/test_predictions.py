@@ -124,6 +124,44 @@ def test_predictions_rejects_unknown_model():
     assert response.status_code == 400
 
 
+@pytest.mark.parametrize("path", ["/predictions", "/electricity/predictions"])
+def test_source_filter_is_applied_before_the_limit(path):
+    """?source=daily has to reach the WHERE clause, not just the payload.
+
+    The dashboard asks for 15 published rows. Without this parameter the server
+    spent the LIMIT on `ORDER BY forecast_date DESC` across both provenances and
+    the page dropped the backtest rows client-side, so the panel headed "logged
+    before actual outcomes were known" ran on whatever fraction of 15 the
+    interleave happened to leave - roughly half, on the electricity side, whose
+    backtest tail is ~2 weeks behind the daily record rather than a year.
+
+    Asserted on the position in the SQL as well as on the clause: a filter that
+    landed after the LIMIT would be the bug this fixes, spelled differently.
+    """
+    with patch('app.get_db_connection') as mock_get_db:
+        mock_cursor = wire_cursor(mock_get_db, rows=[])
+
+        assert client.get(f"{path}?limit=15&source=daily").status_code == 200
+
+        sql, params = mock_cursor.execute.call_args[0]
+        assert "source = %s" in sql
+        assert "daily" in params
+        assert "daily" not in sql          # bound, never interpolated
+        assert sql.index("source = %s") < sql.index("LIMIT")
+
+
+@pytest.mark.parametrize("path", ["/predictions", "/electricity/predictions"])
+def test_unknown_source_is_a_400_not_an_empty_list(path):
+    """?source=verified is the renamed value, not the stored one.
+
+    A pass-through filter would answer 200 with zero rows, which a caller cannot
+    tell apart from "nothing published yet" - so the allowlist that already
+    guards `model` guards `source` too.
+    """
+    assert client.get(f"{path}?source=verified").status_code == 400
+    assert client.get(f"{path}?source=daily' OR '1'='1").status_code == 400
+
+
 def test_predictions_endpoint_no_data():
     """Test that the predictions endpoint handles missing prediction data."""
     with patch('app.get_db_connection') as mock_get_db:
@@ -138,6 +176,41 @@ def test_predictions_endpoint_no_data():
         assert "predictions" in data
         assert len(data["predictions"]) == 0
         assert data["count"] == 0
+
+
+# The empty-result contract, both halves in one place. It was per-route and
+# undocumented: these two answer 200 with an empty list while the six below 404,
+# the same inconsistency class the project already closed for `days` validation
+# (400 -> 422). The split is deliberate, so it is pinned rather than left to the
+# next reader to guess at - a "consistency" fix in either direction fails here.
+#
+# The rule: a *filtered log* answers about the filter the caller composed, so no
+# matching rows is 200 and `count: 0`. A *record* route returns the one current
+# answer, so its absence is the pipeline not having produced one - a 404.
+@pytest.mark.parametrize("path", ["/predictions", "/electricity/predictions"])
+def test_a_filtered_log_answers_200_with_an_empty_list(path):
+    with patch('app.get_db_connection') as mock_get_db:
+        wire_cursor(mock_get_db, rows=[])
+
+        response = client.get(f"{path}?model=lightgbm&limit=5&source=daily")
+
+        assert response.status_code == 200
+        assert response.json() == {"predictions": [], "count": 0}
+
+
+@pytest.mark.parametrize("path", [
+    "/history", "/leaderboard", "/evaluation",
+    "/electricity/history", "/electricity/leaderboard", "/electricity/evaluation",
+])
+def test_a_record_route_404s_when_there_is_no_record(path):
+    """Every route here reads its rows with fetchall, so one empty list covers all
+    six. /forecast and /electricity/forecast are the same contract on fetchone and
+    are covered in tests/test_forecast.py."""
+    with patch('app.get_db_connection') as mock_get_db:
+        wire_cursor(mock_get_db, rows=[])
+
+        assert client.get(path).status_code == 404
+
 
 def test_predictions_endpoint_database_error():
     """Test that the predictions endpoint handles database errors."""

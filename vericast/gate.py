@@ -1,42 +1,12 @@
-"""Retrain gate: refuse to ship a model that is broken.
+"""Retrain evaluation gate: validate candidate model against calibrated quality bars.
 
-Holds out the tail of the series, fits a challenger on the head only, and scores
-it on rows it has never seen. A refused retrain is not a failure: the caller keeps
-the old artifact, prints why, and exits 0, so weekly-retrain.yml's existing
-`git diff --cached --quiet` branch reports "nothing to commit" on its own.
+Evaluates a challenger model trained on the training head against a 30-day holdout block.
+Rejects degraded or broken models using three calibrated criteria:
+  1. MAE vs persistence baseline <= 2.0x (prevents massive error regressions).
+  2. Prediction spread >= 0.2x of actuals spread (rejects constant/collapsed predictions).
+  3. Pearson correlation r > 0.0 with actuals (rejects sign-inverted predictions).
 
-Why this does NOT vote on "challenger beats the incumbent artifact", which is the
-obvious design: the incumbent on disk was trained on *all* rows, including the
-ones held out. Measured on the live data that advantage is 1.5x on PM2.5 (3.33 vs
-4.93 ug/m3) and 2.0x on electricity (585 vs 1148 MW), so an honest challenger
-essentially cannot win and the gate would freeze the incumbent forever instead of
-protecting against a bad one. Its number is still printed, for drift, but it does
-not vote.
-
-record_training_window() now writes the window each artifact was fit on, so the
-printout can at least say *whether* the incumbent saw the holdout instead of
-assuming it did. After a retrain is skipped for a week or more the incumbent's
-window genuinely ends before the holdout begins and the comparison is fair;
-ponytail: it still does not vote, because a vote needs the same six-broken-model
-calibration the three bars below got and only becomes measurable once artifacts
-carrying a window have been through a few cycles. Upgrade path: when
-`comparable` below has been true for a few retrains, add ratio-vs-incumbent as a
-fourth check with its own bar.
-
-What votes instead is three absolute checks, calibrated against six
-deliberately-broken models (shuffled labels, 1-round stump, constant label,
-sign-flipped, 3x-scaled) on both live targets. No single check covers both
-targets: MAE-vs-persistence misses every degenerate elec model (a constant-label
-fit scores 0.78x of persistence there), and correlation misses a pure scale bug.
-Together, each of the six fails at least one check while both honest fits pass
-all three with margin.
-
-ponytail: MAE on one trailing block, not k-fold or a significance test. 30 days
-is enough to catch garbage, which is what this gate is for. Head-only rather
-than walk-forward for the same reason: refitting per holdout day costs 30 fits
-(2s PM2.5, 6s elec) and moved the ratio by 0.02x. Reach for walk-forward
-(experiments/save_elec_backtest_results.py has the mechanics) only if borderline
-retrains start getting refused for noise.
+If rejected, the pipeline keeps the incumbent artifact and exits 0 cleanly.
 """
 import json
 import os
@@ -47,17 +17,10 @@ import lightgbm as lgb
 HOLDOUT_DAYS = 30
 MIN_TRAIN_ROWS = 60      # below this a 30-day holdout leaves too little to fit
 
-# Bars, with the measured margins that set them. Honest fits land at 1.03x
-# (PM2.5) and 0.85x (elec) of persistence; the worst garbage that MAE is the
-# only check to catch is 7.7x / 37x. 2.0x sits clear of both, and covers the
-# 2.1x window-to-window swing an honest fit shows across 8 past holdouts.
-MAX_BASELINE_RATIO = 2.0
-# Honest predictions vary by 1.22x (PM2.5) / 0.48x (elec) of the holdout
-# actuals' own spread; a constant fit gives 0.00x, a 1-round stump 0.08x / 0.05x.
-MIN_SPREAD_FRACTION = 0.2
-# Honest r is +0.32 / +0.51; shuffled and sign-flipped fits go negative (-0.26
-# to -0.51). Sign alone separates them, so the bar is zero.
-MIN_CORRELATION = 0.0
+# Calibrated acceptance bars:
+MAX_BASELINE_RATIO = 2.0     # Challenger MAE must not exceed 2x persistence baseline
+MIN_SPREAD_FRACTION = 0.2    # Standard deviation of predictions must be >= 20% of actuals std dev
+MIN_CORRELATION = 0.0        # Pearson correlation between predictions and actuals must be positive
 
 def _mae(pred, y):
     return float(np.mean(np.abs(np.asarray(pred) - np.asarray(y))))
@@ -69,17 +32,7 @@ def window_path(model_path):
 
 
 def record_training_window(model_path, dates, rows):
-    """Note which dates an artifact was fit on, beside the artifact itself.
-
-    A sidecar rather than a DB table or LightGBM metadata: the artifact is a file
-    that CI commits, so the fact travels with it through the same git diff, and a
-    missing sidecar is exactly as informative as a missing artifact. `dates` is the
-    feature-date sequence, oldest-first, as DATASET_SQL returns it.
-
-    ponytail: last-write-wins, no history. The gate only ever asks about the one
-    artifact on disk; if per-retrain history is wanted later, append to a JSONL
-    instead of overwriting.
-    """
+    """Record the date range and sample count used to train the model artifact."""
     if not dates:
         return None
     payload = {"first": str(dates[0]), "last": str(dates[-1]), "rows": int(rows)}
@@ -91,11 +44,7 @@ def record_training_window(model_path, dates, rows):
 
 
 def read_training_window(model_path):
-    """The recorded window, or None when there is no readable sidecar.
-
-    Returns None rather than raising on a corrupt or hand-edited file: this only
-    ever feeds a printed line, and a broken sidecar must not take down a retrain.
-    """
+    """Read the recorded training window sidecar, or None if unavailable."""
     try:
         with open(window_path(model_path), encoding="utf-8") as fh:
             payload = json.load(fh)
@@ -108,20 +57,7 @@ def read_training_window(model_path):
 def challenger_ships(X, y, params, num_boost_round, baseline_col,
                      incumbent_path=None, feature_names=None,
                      holdout_days=HOLDOUT_DAYS, unit="", dates=None):
-    """True if a model retrained today is fit to overwrite the artifact on disk.
-
-    `baseline_col` is the column index of the persistence feature - y(t), used to
-    forecast y(t+1) - which is the do-nothing forecast every model must beat.
-    Callers pass `FEATURE_COLUMNS.index("pm2_5_lag_1")` or its elec equivalent.
-
-    `dates` is the feature-date sequence behind X, oldest-first. Optional, and only
-    used to say whether the incumbent's recorded training window overlaps the
-    holdout - i.e. whether its printed score is comparable at all.
-
-    Passes (True) when there is too little data to hold anything out; refusing
-    then would mean never shipping a first model. X must be ordered oldest-first,
-    which DATASET_SQL's `ORDER BY f.as_of` already guarantees.
-    """
+    """Validate challenger model on holdout set against quality bars before shipping."""
     if len(X) < MIN_TRAIN_ROWS + holdout_days:
         print(f"[gate] Only {len(X)} rows; need "
               f"{MIN_TRAIN_ROWS + holdout_days} to hold out {holdout_days}. "

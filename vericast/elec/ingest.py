@@ -21,7 +21,14 @@ import psycopg
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from vericast import ELEC_MAX_MW, ELEC_MIN_MW, RESCAN_DAYS, local_time, resume_start
+from vericast import (
+    ACTUAL_TOLERANCE,
+    ELEC_MAX_MW,
+    ELEC_MIN_MW,
+    RESCAN_DAYS,
+    local_time,
+    resume_start,
+)
 
 load_dotenv()
 
@@ -253,6 +260,10 @@ def fetch_temperature(start_date, end_date):
 
 
 def insert_observations(records):
+    """Write the day's rows, skipping unchanged rows and reporting revisions."""
+    if not records:
+        return
+
     insert_sql = """
     INSERT INTO electricity_observations
         (state, as_of, peak_demand_mw, energy_met_mu, temperature_2m_mean, temperature_2m_max)
@@ -262,14 +273,32 @@ def insert_observations(records):
         energy_met_mu = EXCLUDED.energy_met_mu,
         temperature_2m_mean = EXCLUDED.temperature_2m_mean,
         temperature_2m_max = EXCLUDED.temperature_2m_max,
-        created_at = CURRENT_TIMESTAMP;
+        created_at = CURRENT_TIMESTAMP
+    WHERE electricity_observations.peak_demand_mw IS DISTINCT FROM EXCLUDED.peak_demand_mw
+       OR electricity_observations.energy_met_mu IS DISTINCT FROM EXCLUDED.energy_met_mu
+       OR electricity_observations.temperature_2m_mean IS DISTINCT FROM EXCLUDED.temperature_2m_mean
+       OR electricity_observations.temperature_2m_max IS DISTINCT FROM EXCLUDED.temperature_2m_max;
     """
+
+    # Query existing observation values in range to log upstream revisions.
+    before_sql = """
+    SELECT as_of, peak_demand_mw FROM electricity_observations
+    WHERE state = %s AND as_of BETWEEN %s AND %s
+    """
+
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
+                dates = [as_of for _, as_of, *_ in records]
+                cur.execute(before_sql, (STATE, min(dates), max(dates)))
+                before = {as_of.isoformat(): mw for as_of, mw in cur.fetchall()}
+
                 cur.executemany(insert_sql, records)
                 conn.commit()
-                print(f"Successfully inserted {cur.rowcount} records")
+                print(f"Wrote {cur.rowcount} new or changed record(s) of "
+                      f"{len(records)} submitted")
+
+                report_revisions(before, records)
 
                 cur.execute(
                     "SELECT COUNT(*), MIN(as_of), MAX(as_of) FROM electricity_observations "
@@ -279,6 +308,21 @@ def insert_observations(records):
     except Exception as e:
         print(f"Error inserting electricity observations: {e}")
         raise
+
+
+def report_revisions(before, records):
+    """Log days where peak demand ground truth was revised from prior stored observations."""
+    revised = [(as_of, before[as_of], new)
+               for _, as_of, new, *_ in records
+               if before.get(as_of) is not None and abs(new - before[as_of]) > ACTUAL_TOLERANCE]
+    if not revised:
+        return
+
+    print(f"  {len(revised)} day(s) had their peak_demand_mw REVISED upstream:")
+    for as_of, old, new in sorted(revised):
+        print(f"    [revised] {as_of}: {old:,.0f} -> {new:,.0f} MW")
+    print("  Any of these already scored against are re-opened and re-scored by "
+          "vericast.elec.score, so the published error follows the observation.")
 
 
 def main():

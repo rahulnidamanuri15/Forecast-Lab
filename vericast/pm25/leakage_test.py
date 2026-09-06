@@ -62,6 +62,11 @@ def mismatch(a, b, tol=TOLERANCE):
 
 
 def run_leakage_test():
+    # ponytail: both tables come back whole and the comparison runs in Python.
+    # ~1,100 rows a side today, one row per calendar day, so the ceiling is years
+    # away - at ~100k rows this wants chunking by as_of, or the checks pushed into
+    # SQL as a self-join. Deliberately not SQL now: check 4's full-window rule is
+    # asserted here precisely because it is derived independently of features.py.
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(

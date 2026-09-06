@@ -1,17 +1,8 @@
-"""Publish tomorrow's Maharashtra peak demand forecast for three models.
+"""Publish tomorrow's Maharashtra peak electricity demand forecast (MW).
 
-The forecast is always labelled "the day after the data we actually have", not
-blindly real-world tomorrow - same rule as vericast/pm25/predict.py, and it matters
-more here: the upstream demand mirror runs 2-4 days behind, so a stale-data run
-is the normal case rather than an incident. The staleness WARN threshold is
-therefore looser than PM2.5's.
-
-Three models compete: naive_baseline (persistence), seasonal_naive (same weekday
-last week, which in a power grid beats persistence on Sundays), and lightgbm.
-
-Every publish path is gated *before* its commit: staleness, then plausibility.
-diagnose.py (step 6/6) still range-checks what was written, but it cannot be the
-only gate - by the time it runs, a bad row is public.
+Anchors predictions to the day after the newest observation (latest_obs + 1 day).
+Three models compete: naive_baseline (persistence), seasonal_naive (same weekday last week),
+and LightGBM. All predictions pass staleness and physical plausibility gates before commit.
 """
 import os
 import psycopg
@@ -37,8 +28,7 @@ STATE = os.getenv("STATE", "Maharashtra")
 
 UNIT = "MW"
 
-# `source` forced in the DO UPDATE for the reason vericast/pm25/predict.py's
-# upsert_sql explains: schema.py's DEFAULT 'daily' applies to inserts only.
+# Upsert electricity predictions with source='daily'.
 UPSERT_SQL = """
 INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model)
 VALUES (%s, %s, %s, %s)

@@ -28,27 +28,12 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is not set")
 
-# model_performance has no city column (see vericast/__init__.py), so another CITY
-# would serve Nagpur's accuracy record under its name. Refused at import: a wrong
-# label on a published accuracy claim is worse than a dead deployment. One guard
-# in vericast/__init__.py, called by all nine modules that read CITY.
+# Validate single-city constraint for PM2.5 (Nagpur).
 CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
-STATE = os.getenv("STATE", "Maharashtra")  # target #2: regional electricity demand
+STATE = os.getenv("STATE", "Maharashtra")  # Target #2: regional electricity demand
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
 
-# Connect + TLS handshake + auth per request is the largest slice of this API's
-# latency, and Neon is a network hop away; the pool hands out an already-open
-# connection instead. max_size=8 because Neon's free tier caps concurrent
-# connections and this is a read-only GET API - a pool larger than the work queue
-# only holds server slots idle. check=check_connection is not optional: Neon closes
-# idle connections on its side, so an unchecked pool hands out a dead socket.
-#
-# Two separate questions, which `_pool is None` alone used to answer at once: "is
-# there a usable pool" and "are we running under the lifespan at all". The test
-# suite drives handlers through TestClient without a lifespan, so the second one
-# has to be answerable - but overloading the first onto it meant a lifespan that
-# failed to build a pool left the process serving requests unpooled *and*
-# unthrottled, silently, as if it were a test run.
+# Neon serverless connection pool (max 8 connections).
 _pool: Optional[ConnectionPool] = None
 _under_lifespan = False
 
@@ -63,7 +48,7 @@ async def lifespan(_app: FastAPI):
             min_size=1,
             max_size=8,
             timeout=10,                              # wait for a free slot, then fail
-            check=ConnectionPool.check_connection,   # never hand out a dead socket
+            check=ConnectionPool.check_connection,   # verify connection health on checkout
             open=False,
         )
         _pool.open()
@@ -85,9 +70,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Read-only public GET API: no cookies or auth headers, so allow_credentials stays
-# off and only GET is permitted. FRONTEND_ORIGIN must name the real deployed origin
-# in production - empty allows no browser origin at all, the safe default over "*".
+# Restrict CORS to specified frontend origin(s).
 origins = []
 if FRONTEND_ORIGIN:
     origins = [origin.strip() for origin in FRONTEND_ORIGIN.split(",") if origin.strip()]
@@ -103,37 +86,16 @@ app.add_middleware(
 
 @app.middleware("http")
 async def cache_control(request, call_next):
-    """Let caches absorb repeat reads, so the 8-slot pool is not the only limit.
-
-    Every endpoint reads a record the daily pipeline rewrites once a day, so 5
-    minutes of staleness is invisible - including /health, whose staleness is
-    measured in days.
-
-    ponytail: one blanket max-age, no per-route tuning. Split it when an endpoint
-    needs to be fresher than the pipeline that feeds it.
-    """
+    """Cache successful GET responses for 5 minutes (data updates daily)."""
     response = await call_next(request)
     if request.method == "GET" and response.status_code == 200:
         response.headers["Cache-Control"] = "public, max-age=300"
     return response
 
 
-# A fixed-window cap, in stdlib, because the real exposure is the 8-slot pool: a
-# client looping /evaluation with a cache-busting query string bypasses the
-# Cache-Control above and can hold every slot until requests time out at 10s.
-# 120/min is far above a dashboard load (~6 calls) and far below pool saturation.
-#
-# Not a security control: X-Forwarded-For is client-supplied, so a distributed or
-# header-rotating caller is not covered, and nothing here needs it to be - this
-# exists to stop one noisy client taking the record offline for everyone else.
-#
-# ponytail: in-process, so the budget is per instance and resets on deploy - fine
-# at one Render instance, slowapi + Redis is the upgrade at two.
+# In-memory rate limiting (120 req/min per client IP) to protect the DB connection pool.
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 120
-# Bounds the counter dict: without a cap, a caller rotating the forwarded header
-# turns a rate limiter into a memory leak. Past it, new keys share one bucket, so
-# a flood degrades into throttling itself rather than into unbounded growth.
 RATE_LIMIT_MAX_CLIENTS = 10_000
 
 _rate_window_start = 0.0
@@ -141,16 +103,7 @@ _rate_hits: dict = {}
 
 
 def over_rate_limit(key, now):
-    """Count one request for `key` and report whether it exceeded the window.
-
-    Fixed window rather than sliding: the whole dict is dropped on rollover, which
-    is what bounds memory by one window's traffic instead of by every client ever
-    seen. The cost is a caller spending two windows' budget across a boundary, not
-    worth a deque per client for a cache-fronted read-only API.
-
-    No lock: the event loop is single-threaded and there is no await between the
-    read and the write below.
-    """
+    """Return True if client has exceeded the request threshold in the current window."""
     global _rate_window_start, _rate_hits
     if now - _rate_window_start >= RATE_LIMIT_WINDOW_SECONDS:
         _rate_window_start, _rate_hits = now, {}
@@ -172,12 +125,8 @@ def client_key(request):
 
 @app.middleware("http")
 async def rate_limit(request, call_next):
-    # Skipped only outside the lifespan, which means the test suite driving ~50
-    # requests through TestClient as one client. A running deployment whose pool
-    # failed to open is still throttled: it is serving on one direct connection
-    # per request, which is exactly when a runaway client does the most damage.
+    """Enforce per-client request limits under active lifespan."""
     if _under_lifespan and over_rate_limit(client_key(request), monotonic()):
-        # Not cached: Cache-Control is only set on 200s.
         return JSONResponse(
             status_code=429,
             content={"detail": "Too many requests; slow down and retry shortly."},
@@ -187,16 +136,7 @@ async def rate_limit(request, call_next):
 
 
 def get_db_connection():
-    """A pooled connection, as a context manager.
-
-    Every caller already uses `with get_db_connection() as conn`, which is exactly
-    pool.connection()'s contract. Falls back to a direct connect only outside the
-    lifespan: the TestClient in tests/ drives handlers without running it.
-
-    Under the lifespan a missing pool is a real fault, not a test - 503 rather
-    than a silent per-request connect that works until Neon's connection cap
-    turns it into a 500 for everyone.
-    """
+    """Return a pooled connection context manager, falling back to direct connection for tests."""
     if _pool is not None:
         return _pool.connection()
     if _under_lifespan:
@@ -206,11 +146,7 @@ def get_db_connection():
 
 
 def db_error(exc: Exception) -> HTTPException:
-    """500 without leaking the raw database exception to the client.
-
-    log.exception, not print: it carries the level and the traceback, so a pool
-    timeout is greppable and distinguishable from a bad query in the log viewer.
-    """
+    """Log exception details and return sanitized 500 HTTPException."""
     log.exception("db error on request: %s", type(exc).__name__)
     return HTTPException(status_code=500, detail="Internal server error")
 
@@ -225,13 +161,13 @@ async def root():
             "forecast": "/forecast",
             "leaderboard": "/leaderboard",
             "history": "/history",
-            "predictions": "/predictions?model=lightgbm&limit=50&scored_only=false",
+            "predictions": "/predictions?model=lightgbm&limit=50&scored_only=false&source=daily",
             "evaluation": "/evaluation?days=30",
             "electricity": {
                 "health": "/electricity/health",
                 "forecast": "/electricity/forecast?model=lightgbm",
                 "history": "/electricity/history?days=30",
-                "predictions": "/electricity/predictions?model=lightgbm&limit=15&scored_only=false",
+                "predictions": "/electricity/predictions?model=lightgbm&limit=15&scored_only=false&source=daily",
                 "evaluation": "/electricity/evaluation?days=30",
                 "leaderboard": "/electricity/leaderboard",
             },
@@ -435,6 +371,7 @@ async def get_predictions(
     model: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
     scored_only: bool = False,
+    source: Optional[str] = None,
 ):
     """
     Get individual prediction rows from the predictions table.
@@ -442,9 +379,34 @@ async def get_predictions(
     - model: filter to a single model (e.g. 'lightgbm'). Omit for all models.
     - limit: max rows returned (1-500), most recent forecast_date first.
     - scored_only: if true, only return rows where actual_pm2_5 is known.
+    - source: filter to one provenance, 'daily' or 'backtest'. Omit for both.
+
+    `source` filters in SQL, before the LIMIT. That distinction is the whole
+    point of the parameter: a caller that wants only published rows and filters
+    the payload itself gets `limit` rows of interleaved provenance and keeps
+    whatever fraction survives, so its window silently shrinks as the two
+    records overlap in forecast_date. Values are the stored ones ('daily'),
+    not the renamed ones the payload reports ('verified').
+
+    No rows is **200 with an empty list**, not the 404 the record routes answer.
+    Deliberate, and the dividing line for the whole API: this is a filtered log,
+    so "nothing matches model=X, source=Y, scored_only=Z" is an answer about the
+    filter the caller composed. /forecast, /history, /leaderboard and /evaluation
+    each return *the* record, where absence means the pipeline has not produced
+    one yet - a fault worth a status code. `count` reports the same emptiness
+    without making every caller special-case a status.
     """
     if model is not None and model not in PM25_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
+
+    # Allowlisted rather than passed through: an unrecognised source is a 400
+    # here instead of an empty `predictions` list, which a caller cannot tell
+    # apart from "nothing published yet".
+    if source is not None and source not in PROVENANCE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported source: {source}. Expected one of {sorted(PROVENANCE)}.",
+        )
 
     try:
         with get_db_connection() as conn:
@@ -456,13 +418,18 @@ async def get_predictions(
                     clauses.append("model = %s")
                     params.append(model)
 
+                if source:
+                    clauses.append("source = %s")
+                    params.append(source)
+
                 if scored_only:
                     clauses.append("actual_pm2_5 IS NOT NULL")
 
                 # ponytail: f-string WHERE, not a query builder. Safe because every
-                # fragment joined here is a literal in this file and the only user
-                # value (`model`) is allowlisted above; real values still go through
-                # %s. Revisit if a caller-supplied column or operator reaches this.
+                # fragment joined here is a literal in this file and both user
+                # values (`model`, `source`) are allowlisted above; real values
+                # still go through %s. Revisit if a caller-supplied column or
+                # operator reaches this.
                 where_clause = " AND ".join(clauses)
                 params.append(limit)
 
@@ -479,7 +446,10 @@ async def get_predictions(
         # Serialization outside the `with`: the pool is max_size=8 and JSON-encoding
         # 500 rows does not need a connection held open for it.
         predictions = []
-        for forecast_date, model_name, predicted, actual, created_at, source in rows:
+        # row_source, not `source`: that name is the query parameter now, and a
+        # loop that rebinds it would hand the next reader the last row's
+        # provenance where they expected the caller's filter.
+        for forecast_date, model_name, predicted, actual, created_at, row_source in rows:
             # Coerced at the unpack, not per output field, so `error` below is
             # covered too. Both columns are FLOAT today, but a NUMERIC migration
             # touching one and not the other makes `actual - predicted` a
@@ -494,10 +464,11 @@ async def get_predictions(
                 "actual_pm2_5": actual,
                 "error": error,
                 "created_at": created_at.isoformat() if created_at else None,
-                # Labelled, not filtered: 'backtest' rows outnumber 'daily' ones
-                # ~50:1 here. Filtering would change the existing contract, and a
-                # label is enough to tell a published forecast from a launch record.
-                "source": PROVENANCE.get(source, source),
+                # Labelled, not filtered by default: 'backtest' rows outnumber
+                # 'daily' ones ~50:1 here, and a caller may legitimately want the
+                # launch record. A caller that does not passes ?source=daily,
+                # which filters before the LIMIT rather than after it.
+                "source": PROVENANCE.get(row_source, row_source),
             })
 
         return {
@@ -790,14 +761,28 @@ async def get_electricity_predictions(
     model: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
     scored_only: bool = False,
+    source: Optional[str] = None,
 ):
     """Individual prediction rows from electricity_predictions.
 
     `error_pct` is the per-row absolute percentage error, which is what the
     dashboard's status badges are banded on.
+
+    `source` filters one provenance in SQL before the LIMIT, as in /predictions.
+    It matters more here: the elec backtest tail is ~2 weeks behind the daily
+    record rather than a year, so a DESC window of any size already mixes the
+    two and post-filtering a payload would keep only a fraction of it.
+
+    No rows is 200 with an empty list, for the reason /predictions gives.
     """
     if model is not None and model not in ELEC_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
+
+    if source is not None and source not in PROVENANCE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported source: {source}. Expected one of {sorted(PROVENANCE)}.",
+        )
 
     try:
         with get_db_connection() as conn:
@@ -808,6 +793,10 @@ async def get_electricity_predictions(
                 if model:
                     clauses.append("model = %s")
                     params.append(model)
+
+                if source:
+                    clauses.append("source = %s")
+                    params.append(source)
 
                 if scored_only:
                     clauses.append("actual_demand_mw IS NOT NULL")
@@ -829,7 +818,9 @@ async def get_electricity_predictions(
 
         # Serialization outside the `with`, as in /predictions above.
         predictions = []
-        for forecast_date, model_name, predicted, actual, created_at, source in rows:
+        # row_source for the reason /predictions gives: `source` is the query
+        # parameter here.
+        for forecast_date, model_name, predicted, actual, created_at, row_source in rows:
             # Coerced at the unpack, as in /predictions: `error` and `error_pct`
             # both read these.
             predicted = float(predicted) if predicted is not None else None
@@ -844,8 +835,8 @@ async def get_electricity_predictions(
                 "error": error,
                 "error_pct": (error / actual * 100) if scored and actual else None,
                 "created_at": created_at.isoformat() if created_at else None,
-                # Labelled, not filtered - see /predictions.
-                "source": PROVENANCE.get(source, source),
+                # Labelled, not filtered by default - see /predictions.
+                "source": PROVENANCE.get(row_source, row_source),
             })
 
         return {"predictions": predictions, "count": len(predictions)}

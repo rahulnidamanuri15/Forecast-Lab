@@ -100,7 +100,7 @@ def test_no_check_raises_when_its_dependency_is_missing(monkeypatch):
 
 
 def test_the_gate_is_actually_scheduled_somewhere():
-    """A 22-check gate nothing runs is documentation, not a gate.
+    """A 23-check gate nothing runs is documentation, not a gate.
 
     This file can only assert the list is wired correctly; the checks themselves
     need a populated database and a live API_BASE, which is why they run in their
@@ -122,6 +122,31 @@ def test_the_gate_is_actually_scheduled_somewhere():
     assert "API_BASE" in text, (
         "no API_BASE in the gate workflow: the six HTTP checks would hit the "
         "localhost default and FAIL on a healthy deploy")
+
+
+def test_the_cors_check_fails_when_no_browser_origin_is_allowed(monkeypatch):
+    """The gap this check closes: every other one is a server-side SELECT or a
+    header-less GET, so all 22 passed on a deploy that served the API perfectly and
+    handed the dashboard nothing. Both halves - unset FRONTEND_ORIGIN, and a set one
+    the API does not echo - have to FAIL, or the check is decoration.
+
+    monkeypatch on the module attribute, not the env: the gate reads it once at
+    import, like CITY.
+    """
+    monkeypatch.setattr(gate, "FRONTEND_ORIGIN", "")
+    assert gate.check_cors_allows_frontend_origin() is False
+
+    monkeypatch.setattr(gate, "FRONTEND_ORIGIN", "https://example.github.io")
+    no_cors = MagicMock(headers={})
+    echoed = MagicMock(headers={"access-control-allow-origin":
+                                "https://example.github.io"})
+    with patch.object(gate.httpx, "get", return_value=no_cors):
+        assert gate.check_cors_allows_frontend_origin() is False
+    with patch.object(gate.httpx, "get", return_value=echoed) as get:
+        assert gate.check_cors_allows_frontend_origin() is True
+    # The Origin header is the entire point: without it CORSMiddleware answers
+    # nothing and the check would pass on the posture it exists to catch.
+    assert get.call_args.kwargs["headers"] == {"Origin": "https://example.github.io"}
 
 
 def test_the_readme_advertises_the_number_of_checks_that_exist():

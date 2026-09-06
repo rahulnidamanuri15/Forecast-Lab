@@ -14,6 +14,7 @@ NOT NULL filter drops the feature rows whose lags are NULL because of it.
 """
 import os
 import sys
+from datetime import timedelta
 import psycopg
 import numpy as np
 import lightgbm as lgb
@@ -174,20 +175,40 @@ def save_model_performance(evaluation_dates, predictions, actuals):
         WHERE electricity_model_performance.source = 'backtest';
     """
 
+    # The guard stops a re-run clobbering a verified row; it does nothing about this
+    # seeder's own previous row, which sits at the old evaluation_dates[-1] and stays
+    # there as the dataset grows - two backtest rows per model both claiming to be the
+    # launch record. Clear ours first, in the insert's transaction. See the PM2.5 twin.
+    delete_sql = ("DELETE FROM electricity_model_performance "
+                  "WHERE state = %s AND source = 'backtest';")
+
     score_date = evaluation_dates[-1]
     sample_size = len(actuals)
     metrics = {model: calculate_metrics(preds, actuals)
                for model, preds in predictions.items()}
 
-    records = [(STATE, score_date, model, mae, rmse, mape, sample_size)
-               for model, (mae, rmse, mape) in metrics.items()]
-
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MIN(score_date) FROM electricity_model_performance "
+                "WHERE state = %s AND source = 'daily'", (STATE,))
+            row = cur.fetchone()
+            first_daily = row[0] if row else None
+            if first_daily and score_date >= first_daily:
+                valid = [d for d in evaluation_dates if d < first_daily]
+                score_date = valid[-1] if valid else first_daily - timedelta(days=1)
+
+            records = [(STATE, score_date, model, mae, rmse, mape, sample_size)
+                       for model, (mae, rmse, mape) in metrics.items()]
+
+            cur.execute(delete_sql, (STATE,))
+            stale = cur.rowcount
             cur.executemany(insert_sql, records)
         conn.commit()
 
     print(f"\n[OK] Model performance saved (n={sample_size}, score_date={score_date})")
+    if stale:
+        print(f"   (replaced {stale} row(s) from a previous seeding)")
     for model, (mae, rmse, mape) in sorted(metrics.items(), key=lambda kv: kv[1][0]):
         # calculate_metrics returns None when no actual is non-zero, and the commit
         # above has already landed - so formatting it unguarded kills the run *after*
@@ -200,11 +221,14 @@ def save_model_performance(evaluation_dates, predictions, actuals):
 
 
 def verify_saved_results():
+    # source = 'backtest' so the printout confirms what this run wrote. Unfiltered it
+    # mixes in every daily prediction since launch and overstates the seeding.
     query = """
         SELECT model, COUNT(*), COUNT(actual_demand_mw),
                MIN(forecast_date), MAX(forecast_date)
         FROM electricity_predictions
         WHERE state = %s
+          AND source = 'backtest'
         GROUP BY model
         ORDER BY model;
     """

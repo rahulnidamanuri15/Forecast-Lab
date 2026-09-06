@@ -3,32 +3,17 @@ import numpy as np
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import require_city_of_record
+from vericast import reopen_revised_actuals, require_city_of_record, revision_sql
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# model_performance is keyed UNIQUE(score_date, model) with no city column, so a
-# run under a different CITY would upsert another city's errors onto Nagpur's rows
-# and overwrite the published record in place. The predictions themselves are keyed
-# on city and would be fine, which is what makes this quiet.
+# model_performance has no city column, so CITY is constrained to Nagpur.
 CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
 
-# Attach the actual observation to every prediction still waiting for one.
-# Deliberately not scoped to "yesterday": if a day's run was missed, that row would
-# otherwise stay pending forever. Driven purely off forecast_date ==
-# observations.as_of, so there is no timezone decision here.
-#
-# predicted_pm2_5 IS NOT NULL because that column is nullable: scoring a NULL
-# prediction makes np.mean below return NaN, and a NaN mae 500s /leaderboard on
-# JSON serialisation until the row is deleted by hand.
-#
-# source = 'daily' so this only ever fills in rows that were published before the
-# outcome. Backtest rows arrive with their actual already set, so they never match
-# `actual_pm2_5 IS NULL` today - but that is the writer's habit, not a constraint,
-# and one backtest inserted without its actual would otherwise be scored here and
-# averaged into the published record as a verified day.
+# Attach arriving ground-truth observations to pending predictions.
+# Scoped to source='daily' and non-null predictions to preserve backtest provenance.
 SCORE_SQL = """
 UPDATE predictions p
 SET actual_pm2_5 = o.pm2_5
@@ -43,9 +28,7 @@ WHERE o.city = p.city
 RETURNING p.forecast_date, p.model, p.predicted_pm2_5, o.pm2_5;
 """
 
-# `source` forced in the DO UPDATE branch: schema.py's DEFAULT 'daily' applies to
-# inserts only, so a daily score landing on a score_date a backtest already wrote
-# would keep source='backtest' and stay filtered out of /leaderboard forever.
+# Upsert daily model performance metrics, ensuring source='daily' on conflict.
 UPSERT_PERF_SQL = """
 INSERT INTO model_performance (score_date, model, mae, rmse, sample_size)
 VALUES (%s, %s, %s, %s, %s)
@@ -57,13 +40,38 @@ ON CONFLICT (score_date, model) DO UPDATE SET
     created_at = CURRENT_TIMESTAMP;
 """
 
+# Re-score query pair: finds and clears actuals for rows whose upstream observation changed.
+DIVERGED_SQL, REOPEN_SQL = revision_sql(
+    "predictions", "observations", "city",
+    actual="actual_pm2_5", predicted="predicted_pm2_5", observed="pm2_5")
+
 
 def score_pending_predictions():
-    """Fill in actuals for any pending predictions and record per-day MAE/RMSE."""
+    """Fill in actuals for any pending predictions and record per-day MAE/RMSE.
+
+    Re-opens revised days first, in the same transaction, so a day whose ground truth
+    moved upstream is re-scored here rather than keeping an error computed against a
+    value the observations table no longer holds.
+    """
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            reopened = reopen_revised_actuals(
+                cur, DIVERGED_SQL, REOPEN_SQL, CITY, "ug/m3")
+
             cur.execute(SCORE_SQL, (CITY,))
             scored = cur.fetchall()
+
+            # Every row REOPEN_SQL cleared satisfies SCORE_SQL's predicates by
+            # construction (same source, same NOT NULL prediction, same NOT NULL
+            # observation) and this is one transaction, so all of them must come back
+            # scored. Raised, not asserted: python -O erases `assert`, and the failure
+            # this stands in front of is committing an erased actual - a published row
+            # silently returning to unverified. Nothing is committed yet, so psycopg
+            # rolls the clear back on the way out.
+            if reopened > len(scored):
+                raise RuntimeError(
+                    f"{reopened} row(s) were re-opened for rescoring but only "
+                    f"{len(scored)} row(s) scored; refusing to commit an erased actual")
 
             if not scored:
                 print("No pending predictions had an actual observation available.")
@@ -86,7 +94,9 @@ def score_pending_predictions():
 
             conn.commit()
 
-    print(f"Scored {len(scored)} prediction(s).")
+    print(f"Scored {len(scored)} prediction(s)"
+          + (f", {reopened} of them a rescore after an upstream revision."
+             if reopened else "."))
     return len(scored)
 
 

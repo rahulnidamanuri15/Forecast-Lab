@@ -1,4 +1,5 @@
 import pytest
+import re
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 from datetime import date
@@ -155,8 +156,9 @@ def test_backtest_seeder_cannot_overwrite_a_daily_row(script, table, actual_col)
 # the daily scorer has usually already scored. Unguarded, a re-run replaces that
 # day's real MAE with the backtest aggregate and relabels the row 'backtest', so
 # /leaderboard's source = 'daily' filter drops the newest verified score and falls
-# back to an older one. The daily scorer never revisits a past score_date, so it
-# never comes back.
+# back to an older one. The daily scorer revisits a past score_date only when that
+# day's *observation* was revised upstream (vericast/__init__.py's reopen step), and
+# a relabelled row is not a revised one - so it never comes back on its own.
 @pytest.mark.parametrize("script,table", [
     ("experiments/save_backtest_results.py", "model_performance"),
     ("experiments/save_elec_backtest_results.py", "electricity_model_performance"),
@@ -172,3 +174,36 @@ def test_backtest_seeder_cannot_relabel_a_daily_perf_row(script, table):
     assert "source = EXCLUDED.source" not in source, (
         f"{script} relabels source on conflict; combined with the guard above that "
         f"is dead code, without it the row leaves the leaderboard permanently")
+
+
+# The guard above stops a re-run clobbering a verified row. It does nothing about the
+# seeder's *own* previous row: score_date is evaluation_dates[-1], which advances as
+# the dataset grows, so a second seeding does not conflict with the first - it inserts
+# at the new date and leaves the old launch record behind, two backtest rows per model
+# both claiming to be it. Asserted on the SQL text because the failure is silent: both
+# rows are well-formed, /leaderboard filters them out either way, and only a reader of
+# model_performance sees the duplicate.
+@pytest.mark.parametrize("script,table,extra", [
+    ("experiments/save_backtest_results.py", "model_performance", ""),
+    ("experiments/save_elec_backtest_results.py", "electricity_model_performance",
+     "state = %s AND "),
+])
+def test_backtest_seeder_replaces_its_own_previous_aggregate(script, table, extra):
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), script)
+    with open(path, encoding="utf-8") as fh:
+        # Adjacent string literals are one string to Python, so collapse the seams:
+        # the elec DELETE is written across two source lines and would otherwise be
+        # unmatchable except by asserting on half of it.
+        source = re.sub(r'"\s*"', "", fh.read())
+
+    delete = f"DELETE FROM {table} WHERE {extra}source = 'backtest'"
+    assert delete in source, (
+        f"{script} no longer clears its own aggregate before inserting; a second "
+        f"seeding leaves two 'backtest' rows per model at different score_dates")
+    # The half that makes it safe rather than destructive. An unfiltered DELETE here
+    # erases the published daily record from the aggregate table outright, and unlike
+    # a relabelled row there is nothing left to relabel back.
+    assert f"DELETE FROM {table} WHERE {extra}source = 'daily'" not in source
+    assert f"DELETE FROM {table};" not in source, (
+        f"{script} deletes {table} unconditionally; that erases every verified "
+        f"score, which no re-scoring can rebuild")

@@ -15,34 +15,15 @@ ROOT = Path(__file__).resolve().parent.parent
 MODEL_PM25 = str(ROOT / "models" / "lightgbm_model.txt")
 MODEL_ELEC = str(ROOT / "models" / "lightgbm_elec_model.txt")
 
-# How many days behind an upstream source may fall before it counts as stalled.
-# One definition per target, imported by every consumer, because three roles have
-# to agree on the number: the diagnostic gate that stops the daily pipeline,
-# /health's LIVE pill, and verify_deployment_readiness.py's go-live check.
-#
-# The two differ because the sources differ:
-#   PM2.5 - Open-Meteo publishes yesterday by ~05:00 UTC, so 1 stale day is the
-#           steady state and 2 allows one dropped cron run.
-#   Elec  - the demand mirror normally runs 2-4 days behind, so only past 5 has
-#           it actually stalled.
-#
-# Why any limit: both predict.py modules anchor forecast_date to latest_obs + 1
-# day, so a stalled source slides the anchor with it and every
-# internal-consistency check downstream still passes.
+# Upstream staleness thresholds (days).
+# PM2.5 (Open-Meteo) updates daily (limit: 2 days).
+# Electricity (Grid-Sentinel) lags real-time by 2-4 days (limit: 5 days).
 PM25_STALE_LIMIT_DAYS = 2
 ELEC_STALE_LIMIT_DAYS = 5
 
 
 def refuse_stale(as_of, today, limit_days, target):
-    """Age of `as_of` in days, raising past `limit_days`.
-
-    Called by both predict.py modules *before* the forecast is committed. It
-    used to be a [WARN] there and a hard failure in diagnose.py at step 6/6,
-    which meant a forecast anchored to a stalled source was already public and
-    already being served by /forecast by the time the job exited non-zero. A
-    published number is the one thing this project cannot take back, so the gate
-    moved ahead of the commit.
-    """
+    """Refuse to publish forecasts if the newest observation exceeds limit_days."""
     stale_days = (today - as_of).days
     if stale_days > limit_days:
         raise RuntimeError(
@@ -61,24 +42,12 @@ def refuse_stale(as_of, today, limit_days, target):
 # else - observations, features, predictions - is keyed on city and is fine.
 # Changing this needs a UNIQUE(city, score_date, model) migration, out of scope
 # for vericast/schema.py.
+# model_performance has no city column; the PM2.5 pipeline is scoped strictly to Nagpur.
 PM25_CITY_OF_RECORD = "Nagpur"
 
 
 def require_city_of_record(city):
-    """Return `city`, refusing any value the published record cannot hold.
-
-    Hoisted out of the three modules that had this check (app.py,
-    vericast/pm25/score.py, experiments/save_backtest_results.py) and into every
-    other PM2.5-side module. The invariant is a property of the schema described
-    above, so it belongs beside it rather than copied per caller - and it has to
-    fire in every module, not just the ones that write model_performance: under
-    another CITY, ingest and features and predict would happily populate a second
-    city's rows that score.py then refuses to score and app.py refuses to serve.
-    One loud failure at import beats a pipeline that half-runs.
-
-    The elec modules deliberately do not call it: electricity_model_performance is
-    keyed on `state`, so that target has no equivalent single-key collision.
-    """
+    """Enforce single-city invariant for PM2.5 to prevent cross-city key collisions."""
     if city != PM25_CITY_OF_RECORD:
         raise RuntimeError(
             f"CITY={city!r} but this deployment is single-city: model_performance "
@@ -88,35 +57,14 @@ def require_city_of_record(city):
     return city
 
 
-# Physically plausible daily peak demand for a whole state, in MW. Maharashtra's
-# observed 2023-2026 range is 20,147-32,419: wide enough for growth and a mild
-# winter, tight enough that a unit change (kW, GW) or a mis-parsed column fails
-# instead of entering the record. A claim about the target, not the fetch, so both
-# the ingest and publish gates import it.
-ELEC_MIN_MW, ELEC_MAX_MW = 15_000.0, 40_000.0
-
-# Physically plausible daily-mean PM2.5 for Nagpur, in ug/m3. The observed
-# 2023-2026 CAMS range is roughly 4-160. Zero is excluded deliberately: a real
-# daily mean over a city is never 0.0, so that value means "the field came back
-# empty", not "clean air". Used at both ends - a bad *actual* gets scored against
-# and becomes a permanent error nobody can attribute; a bad *forecast* enters the
-# public record.
-PM25_MIN, PM25_MAX = 1.0, 500.0
+# Physical plausibility limits for target values.
+# Catch unit errors (kW vs GW) or empty/corrupt fields before they enter the record.
+ELEC_MIN_MW, ELEC_MAX_MW = 15_000.0, 40_000.0  # Maharashtra daily peak demand range (MW)
+PM25_MIN, PM25_MAX = 1.0, 500.0                # Nagpur daily mean PM2.5 range (ug/m3)
 
 
 def refuse_implausible(value, low, high, model, unit):
-    """Return float(value), raising if it is None or outside [low, high].
-
-    The publish gate. Both diagnose.py modules already range-check what was
-    written, but they run as step 6/6 - after predict.py's commit - so a -40
-    ug/m3 forecast was public, and served by /forecast, for as long as it took
-    the job to fail. This is the same check one step earlier, where refusing
-    still means nothing was published.
-
-    Raised, not asserted: python -O erases `assert` and this guard stands
-    between a broken model and the permanent record. Same reasoning as
-    verify_alignment above.
-    """
+    """Validate that predicted/observed value is non-null and within [low, high]."""
     if value is None:
         raise RuntimeError(
             f"{model} produced no value - refusing to publish NULL as a forecast."
@@ -132,40 +80,90 @@ def refuse_implausible(value, low, high, model, unit):
     return value
 
 
-# How far back an ingest run re-checks for holes. Both ingesters resume from
-# MAX(as_of) + 1 day, which is correct for the steady state and permanent for a
-# hole: a date the upstream skipped or served as NULL is behind the resume point
-# forever after (Maharashtra's 2025-05-21 -> 05-24 gap is one). 30 days because
-# the sources revise within days, not months.
+# Historical lookback window (days) to re-scan for missing observations or upstream revisions.
 RESCAN_DAYS = 30
 
 
 def resume_start(last_date, gap_date):
-    """Earliest date an ingest run must fetch, or None when the table is empty.
-
-    MAX(as_of) + 1 day is the floor, not the answer: min() can only move the
-    start EARLIER, so a table whose newest row predates the re-scan window still
-    resumes from its own MAX rather than jumping forward over the months in
-    between. Backwards, this would create holes instead of filling them.
-    """
+    """Return earliest date to ingest, prioritizing historical gaps over monotonic advance."""
     if last_date is None:
         return None
     start = last_date + timedelta(days=1)
     return min(start, gap_date) if gap_date else start
 
 
-# Every feature row must have a next-day observation to be the target of, except
-# where the observation series itself has a hole. Both counts come from the same
-# shape so they can be compared directly: an orphan is only excusable if a gap
-# explains it.
-#
-# Row existence, not "value IS NOT NULL": a low-coverage day is stored as a row
-# with a NULL value (ingest.py's MIN_HOURS_PER_DAY) and train.py filters those.
-# Broken-join territory is a *missing row*, which is what these count.
-#
-# Formatted, not parameterised, because table and column names cannot be bound -
-# and the four values are module constants in vericast/{pm25,elec}/features.py,
-# never anything a caller supplies. The key *value* is still bound.
+# Floating-point tolerance for detecting ground truth revisions in observations.
+ACTUAL_TOLERANCE = 1e-6
+
+# Query to find daily predictions whose scored actuals differ from current observations.
+_DIVERGED_SQL = """
+SELECT p.forecast_date, p.model, p.{actual}, o.{observed}
+FROM {predictions} p
+JOIN {observations} o ON o.{key} = p.{key} AND o.as_of = p.forecast_date
+WHERE p.{key} = %s
+  AND p.source = 'daily'
+  AND p.{actual} IS NOT NULL
+  AND (o.{observed} IS NULL
+       OR ABS(p.{actual} - o.{observed}) > {eps})
+ORDER BY p.forecast_date, p.model
+"""
+
+# Re-opens diverged predictions by setting actual to NULL, allowing score.py to re-score them atomically.
+_REOPEN_SQL = """
+UPDATE {predictions} p
+SET {actual} = NULL
+FROM {observations} o
+WHERE o.{key} = p.{key}
+  AND o.as_of = p.forecast_date
+  AND p.{key} = %s
+  AND p.source = 'daily'
+  AND p.{actual} IS NOT NULL
+  AND p.{predicted} IS NOT NULL
+  AND o.{observed} IS NOT NULL
+  AND ABS(p.{actual} - o.{observed}) > {eps}
+"""
+
+
+def revision_sql(predictions, observations, key, actual, predicted, observed):
+    """Return (diverged_sql, reopen_sql) query pair for detecting and reopening revised actuals."""
+    names = {"predictions": predictions, "observations": observations, "key": key,
+             "actual": actual, "predicted": predicted, "observed": observed,
+             "eps": ACTUAL_TOLERANCE}
+    return _DIVERGED_SQL.format(**names), _REOPEN_SQL.format(**names)
+
+
+def reopen_revised_actuals(cur, diverged_sql, reopen_sql, key_value, unit):
+    """Re-open scored rows whose ground truth observation changed upstream. Returns count re-opened."""
+    cur.execute(diverged_sql, (key_value,))
+    diverged = cur.fetchall()
+    if not diverged:
+        return 0
+
+    for forecast_date, model, scored_against, observed_now in diverged:
+        if observed_now is None:
+            print(f"  [frozen] {forecast_date} {model}: scored against "
+                  f"{scored_against:.2f} {unit}, but that observation is NULL now - "
+                  f"no ground truth to re-score against, so the published actual and "
+                  f"its error stand.")
+        else:
+            print(f"  [revised] {forecast_date} {model}: ground truth moved "
+                  f"{scored_against:.2f} -> {observed_now:.2f} {unit} upstream; "
+                  f"re-opening it to be re-scored below.")
+
+    # Only a revision to a usable value re-opens anything; a [frozen] row has nothing
+    # to re-score against and SCORE_SQL would not refill it.
+    if not any(observed_now is not None for *_, observed_now in diverged):
+        return 0
+
+    cur.execute(reopen_sql, (key_value,))
+    print(f"Re-opened {cur.rowcount} scored row(s) whose ground truth was revised "
+          f"upstream; they are re-scored in this same transaction, so the new actual "
+          f"and the new error land together.")
+    return cur.rowcount
+
+
+# Queries to verify that every feature row at t has a matching observation at t+1,
+# ensuring orphan feature rows are fully accounted for by genuine observation gaps.
 _ORPHAN_ROWS_SQL = """
 SELECT COUNT(*)
 FROM {features} f
@@ -194,25 +192,13 @@ WHERE o.{key} = %s
 
 
 def alignment_sql(features, observations, key):
-    """The (gap-days, orphan-rows) query pair for one target's two tables."""
+    """Return (gap_days_sql, orphan_rows_sql) query pair for target tables."""
     names = {"features": features, "observations": observations, "key": key}
     return _GAP_DAYS_SQL.format(**names), _ORPHAN_ROWS_SQL.format(**names)
 
 
 def verify_alignment(cur, gap_sql, orphan_sql, key_value):
-    """Enforce the features(t) -> target(t+1) contract, gaps accounted for.
-
-    Equality, not a tolerance: hardcoding "<= 1" for Maharashtra's known
-    2025-05-21 -> 2025-05-24 hole absorbs the next gap silently, and absorbs a
-    genuinely broken join just as quietly. Deriving the expected count from the
-    observations means a NEW gap fails here, on the day it appears.
-
-    Raised, not asserted: `assert` is erased by python -O / PYTHONOPTIMIZE=1, so
-    the one interpreter flag someone adds for speed would turn every data gate in
-    this pipeline into a no-op that still exits 0. Same reasoning in both train.py
-    modules; the remaining bare asserts are all in `__main__` self-checks, where
-    being erased costs nothing.
-    """
+    """Enforce features(t) -> target(t+1) temporal alignment; orphan rows must match gaps."""
     cur.execute(gap_sql, (key_value,))
     gaps = cur.fetchone()[0]
     cur.execute(orphan_sql, (key_value,))

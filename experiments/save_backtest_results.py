@@ -9,6 +9,7 @@ re-declaring them, so the backtest cannot drift from the model it characterises.
 """
 import os
 import sys
+from datetime import timedelta
 import psycopg
 import numpy as np
 import lightgbm as lgb
@@ -257,11 +258,6 @@ def save_model_performance(
 
     score_date = evaluation_dates[-1]
 
-    # score_date is the last evaluated day, which the daily scorer has usually
-    # already scored. Same guard as save_results() one table up: without the WHERE
-    # a re-run overwrites that day's real MAE with the backtest aggregate and
-    # relabels the row 'backtest', and /leaderboard's source = 'daily' filter then
-    # drops the newest verified score for good.
     insert_sql = """
         INSERT INTO model_performance (
             score_date,
@@ -280,31 +276,44 @@ def save_model_performance(
             created_at = CURRENT_TIMESTAMP
         WHERE model_performance.source = 'backtest';
     """
-
-    records = [
-        (
-            score_date,
-            "naive_baseline",
-            float(naive_mae),
-            float(naive_rmse),
-            sample_size,
-        ),
-        (
-            score_date,
-            "lightgbm",
-            float(lightgbm_mae),
-            float(lightgbm_rmse),
-            sample_size,
-        ),
-    ]
+    delete_sql = "DELETE FROM model_performance WHERE source = 'backtest';"
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT MIN(score_date) FROM model_performance WHERE source = 'daily'")
+            row = cur.fetchone()
+            first_daily = row[0] if row else None
+            if first_daily and score_date >= first_daily:
+                valid = [d for d in evaluation_dates if d < first_daily]
+                score_date = valid[-1] if valid else first_daily - timedelta(days=1)
+
+            records = [
+                (
+                    score_date,
+                    "naive_baseline",
+                    float(naive_mae),
+                    float(naive_rmse),
+                    sample_size,
+                ),
+                (
+                    score_date,
+                    "lightgbm",
+                    float(lightgbm_mae),
+                    float(lightgbm_rmse),
+                    sample_size,
+                ),
+            ]
+
+            cur.execute(delete_sql)
+            stale = cur.rowcount
             cur.executemany(insert_sql, records)
 
         conn.commit()
 
     print("\n[OK] Model performance saved")
+
+    if stale:
+        print(f"   (replaced {stale} row(s) from a previous seeding)")
 
     print(
         f"   Naive:    MAE={naive_mae:.4f}, "
@@ -322,6 +331,8 @@ def save_model_performance(
 def verify_saved_results():
     """Verify that predictions were actually stored."""
 
+    # source = 'backtest' so this counts what the seeder just wrote. Unfiltered it also
+    # counts every daily prediction since launch and overstates the seeding.
     query = """
         SELECT
             model,
@@ -330,6 +341,7 @@ def verify_saved_results():
             MAX(forecast_date)
         FROM predictions
         WHERE city = %s
+          AND source = 'backtest'
         GROUP BY model
         ORDER BY model;
     """

@@ -1,13 +1,7 @@
-"""Publish tomorrow's Nagpur PM2.5 forecast for two models.
+"""Publish next-day Nagpur PM2.5 forecasts for LightGBM and naive baseline.
 
-The forecast is always labelled "the day after the data we actually have", not
-blindly real-world tomorrow, so a stalled ingest produces a correctly-labelled
-forecast rather than a mislabelled one.
-
-Every publish path is gated *before* its commit: staleness, then plausibility.
-diagnose.py (step 6/6) still range-checks what was written and adds the trend
-and sigma checks, but it cannot be the only gate - by the time it runs, a bad
-row is public and /forecast is serving it.
+Forecasts are anchored to the day after the latest observation (latest_obs + 1 day).
+All predictions are validated for staleness and physical plausibility prior to DB commit.
 """
 import os
 import psycopg
@@ -84,30 +78,18 @@ def make_daily_prediction():
             raise Exception("No observations found")
 
         as_of, pm2_5 = row
-
-        # The forecast is always "the day after the data we actually have", NOT
-        # blindly "real-world tomorrow": if ingestion has stalled, the forecast is
-        # still labelled correctly relative to the data behind it.
         forecast_date = as_of + timedelta(days=1)
 
-        # Raises past the limit, before anything is published. Under the limit
-        # (1 stale day is PM2.5's steady state) it just reports the age.
+        # Validate that the observation is fresh enough to anchor a forecast.
         stale_days = refuse_stale(as_of, today, PM25_STALE_LIMIT_DAYS, "PM2.5")
         if as_of != yesterday:
             print(f"[WARN] Most recent observation is from {as_of}, {stale_days} "
                   f"day(s) old (expected data through {yesterday}). Forecasting "
                   f"for {forecast_date}, not {today + timedelta(days=1)}.")
 
-
         print(f"Making prediction for {forecast_date} based on {as_of}'s observation")
 
-        # The unique constraint is (city, forecast_date, model), so naive and
-        # lightgbm rows for the same date coexist.
-        #
-        # `source` omitted from the INSERT (schema.py declares DEFAULT 'daily') and
-        # forced in the DO UPDATE: a DEFAULT applies to inserts only, so a real
-        # forecast landing on a date the launch backtest seeded would keep
-        # source='backtest' and stay out of /evaluation's verified half forever.
+        # Upsert prediction into the public record with source='daily'.
         upsert_sql = """
         INSERT INTO predictions (city, forecast_date, predicted_pm2_5, model)
         VALUES (%s, %s, %s, %s)
@@ -117,25 +99,14 @@ def make_daily_prediction():
             created_at = CURRENT_TIMESTAMP;
         """
 
-        # A thin-hours day is stored as pm2_5 = NULL by ingest.py, so the naive
-        # baseline has nothing to carry forward. Warn and skip rather than raise -
-        # diagnose.py is the step that fails the job when nothing publishable was
-        # written. Publishing NULL would commit here, crash on the format below,
-        # and leave a row that 500s /forecast and scores as a NaN MAE.
         if pm2_5 is None:
-            print(f"[WARN] Latest observation ({as_of}) has NULL pm2_5 (too few "
-                  f"hours ingested); skipping naive_baseline rather than "
-                  f"publishing a NULL forecast for {forecast_date}.")
+            print(f"[WARN] Latest observation ({as_of}) has NULL pm2_5; "
+                  f"skipping naive_baseline forecast for {forecast_date}.")
         else:
-            # Before the commit, not after: refusing here means nothing was
-            # published. Persistence carries an observation forward, so an
-            # out-of-range value means ingest's own gate let one through - raise
-            # rather than skip, since every model below reads the same source.
             pm2_5 = refuse_implausible(pm2_5, PM25_MIN, PM25_MAX,
                                        "naive_baseline", UNIT)
             cur.execute(upsert_sql, (CITY, forecast_date, pm2_5, "naive_baseline"))
             conn.commit()
-
             print(f"[OK] Stored naive_baseline prediction for {forecast_date}: {pm2_5:.2f} PM2.5")
 
         # LightGBM prediction, if a trained artifact is available. Conditions on the

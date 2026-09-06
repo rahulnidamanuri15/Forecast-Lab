@@ -40,3 +40,14 @@ def test_empty_table_defers_to_the_caller():
 def test_rescan_window_is_bounded():
     """Unbounded would re-read the whole series every run."""
     assert 0 < RESCAN_DAYS <= 90
+
+
+def test_insert_observations_handles_empty_records_gracefully():
+    """Empty list of records must return early rather than crash on min()."""
+    from vericast.pm25.ingest import insert_observations as pm25_insert
+    from vericast.elec.ingest import insert_observations as elec_insert
+
+    # Neither should raise ValueError on empty input
+    pm25_insert([])
+    elec_insert([])
+

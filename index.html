@@ -1186,13 +1186,19 @@
     return Math.max(0, 100 - Math.abs(actual - predicted) / actual * 100);
   }
 
-  // The one filter both history tables and every metric derived from them run
-  // through. /predictions labels provenance rather than filtering it, because
-  // 'backtest' rows outnumber published ones ~50:1 there and a caller may
-  // legitimately want the launch record. This page may not: its table is headed
-  // "logged before actual outcomes were known", and a walk-forward backtest row
-  // was fitted after the fact. Quoting one under that heading is the retro-fitting
-  // the provenance split exists to prevent.
+  // The safety net, not the mechanism. Both fetches above pass ?source=daily, so
+  // the API filters provenance in SQL before its LIMIT and the panel gets the 15
+  // published rows it asked for. This used to be the only filter, applied after
+  // the server had already spent the LIMIT on interleaved rows: the elec backtest
+  // tail sits ~2 weeks behind the daily record, so a DESC window of 15 was
+  // roughly half backtest and this threw that half away - the panel ran on a
+  // fraction of its window with no error anywhere.
+  //
+  // It stays because the tables are headed "logged before actual outcomes were
+  // known" and a walk-forward backtest row was fitted after the fact. Quoting one
+  // under that heading is the retro-fitting the provenance split exists to
+  // prevent, and a dropped query parameter should thin the table rather than
+  // change what it claims.
   //
   // Allowlist, not `!== 'backtest'`: the API renames source 'daily' to 'verified'
   // on the way out, so a third provenance added upstream would arrive under a name
@@ -1283,7 +1289,7 @@
         // No days= -> full record. /leaderboard reports only the most recent
         // scored day (n=1), which is not the headline accuracy claim.
         fetchJSON('/evaluation').catch(() => null),
-        fetchJSON('/predictions?model=lightgbm&limit=15').catch(() => null),
+        fetchJSON('/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
         // 404s until score.py has written its first daily row, which fetchJSON
         // turns into null and renderLeaderboard shows as "no scored day yet".
         fetchJSON('/leaderboard').catch(() => null),
@@ -1584,7 +1590,7 @@
         fetchJSON('/electricity/forecast?model=lightgbm').catch(() => null),
         fetchJSON('/electricity/history?days=30').catch(() => null),
         fetchJSON('/electricity/evaluation').catch(() => null),
-        fetchJSON('/electricity/predictions?model=lightgbm&limit=15').catch(() => null),
+        fetchJSON('/electricity/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
         fetchJSON('/electricity/leaderboard').catch(() => null),
       ]);
 

@@ -9,13 +9,15 @@ import numpy as np
 import psycopg
 from dotenv import load_dotenv
 
+from vericast import reopen_revised_actuals, revision_sql
+
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 STATE = os.getenv("STATE", "Maharashtra")
 
-# `source = 'daily'` for the reason spelled out in vericast/pm25/score.py's copy of
-# this query: only rows published before the outcome get an actual attached here.
+# Attach arriving ground-truth observations to pending predictions.
+# Scoped to source='daily' and non-null predictions to preserve backtest provenance.
 SCORE_SQL = """
 UPDATE electricity_predictions p
 SET actual_demand_mw = o.peak_demand_mw
@@ -30,8 +32,7 @@ WHERE o.state = p.state
 RETURNING p.forecast_date, p.model, p.predicted_demand_mw, o.peak_demand_mw;
 """
 
-# `source` omitted from the INSERT and forced in the DO UPDATE, for the reason
-# spelled out in vericast/pm25/score.py's copy of this comment.
+# Upsert daily model performance metrics, ensuring source='daily' on conflict.
 UPSERT_PERF_SQL = """
 INSERT INTO electricity_model_performance
     (state, score_date, model, mae, rmse, mape, sample_size)
@@ -45,13 +46,34 @@ ON CONFLICT (state, score_date, model) DO UPDATE SET
     created_at = CURRENT_TIMESTAMP;
 """
 
+# Re-score query pair: finds and clears actuals for rows whose upstream observation changed.
+DIVERGED_SQL, REOPEN_SQL = revision_sql(
+    "electricity_predictions", "electricity_observations", "state",
+    actual="actual_demand_mw", predicted="predicted_demand_mw",
+    observed="peak_demand_mw")
+
 
 def score_pending_predictions():
-    """Fill in actuals for any pending predictions and record per-day MAE/RMSE/MAPE."""
+    """Fill in actuals for any pending predictions and record per-day MAE/RMSE/MAPE.
+
+    Re-opens revised days first, in the same transaction, so a day the mirror corrected
+    is re-scored rather than keeping an error computed against the old value.
+    """
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            reopened = reopen_revised_actuals(
+                cur, DIVERGED_SQL, REOPEN_SQL, STATE, "MW")
+
             cur.execute(SCORE_SQL, (STATE,))
             scored = cur.fetchall()
+
+            # See the PM2.5 twin: a re-opened row satisfies every SCORE_SQL predicate
+            # by construction, so fewer scored rows than re-opened ones means an actual
+            # would be committed erased. Nothing is committed yet.
+            if reopened > len(scored):
+                raise RuntimeError(
+                    f"{reopened} row(s) were re-opened for rescoring but only "
+                    f"{len(scored)} row(s) scored; refusing to commit an erased actual")
 
             if not scored:
                 print("No pending electricity predictions had an actual available.")
@@ -82,7 +104,9 @@ def score_pending_predictions():
 
             conn.commit()
 
-    print(f"Scored {len(scored)} electricity prediction(s).")
+    print(f"Scored {len(scored)} electricity prediction(s)"
+          + (f", {reopened} of them a rescore after an upstream revision."
+             if reopened else "."))
     return len(scored)
 
 

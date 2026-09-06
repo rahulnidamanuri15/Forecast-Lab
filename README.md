@@ -111,6 +111,50 @@ publishes nothing. It cannot affect the PM2.5 record.
 Temperature for both targets comes from Open-Meteo archive, averaged unweighted
 across Mumbai, Pune and Nagpur for the state-level demand model.
 
+### When the ground truth is revised
+
+Both sources revise the past. CAMS reanalysis reprocesses days after first
+publication, and the demand mirror backfills and corrects rows days later. Both
+ingesters re-read the last `RESCAN_DAYS = 30` days on every run precisely so a
+hole gets filled — which means a day already published, scored and counted can
+have its observation replaced by a better one.
+
+**The revision is accepted, and the published error moves with it.** The revised
+observation is the better ground truth, so refusing it would leave features and
+training reading a number the upstream no longer serves, disagreeing with the
+scored record. What the old code did instead was accept the new observation and
+keep the old error: `actual_pm2_5`, `mae` and `rmse` stayed as computed against a
+value the `observations` table no longer held, and nothing anywhere said so. That
+is the retro-fit — not the movement, the silence.
+
+So a revision is now loud on both sides of the loop:
+
+- **At ingest.** The upsert is conditional (`... DO UPDATE SET ... WHERE
+  observations.pm2_5 IS DISTINCT FROM EXCLUDED.pm2_5 OR ...`), so a day the
+  re-scan re-reads unchanged is not rewritten and `created_at` keeps meaning
+  "when this value arrived". Every day whose scored target actually moved is
+  printed as `[revised] 2026-08-27: 41.20 -> 44.85 ug/m3`, so the run log names
+  it.
+- **At scoring.** Before filling pending rows, the scorer finds every `source =
+  'daily'` row whose stored actual has diverged from the current observation,
+  clears the actual, and lets the ordinary scoring query refill it — in the same
+  transaction, so the new actual, MAE and RMSE (and MAPE) commit together or not
+  at all. One definition of "how a day is scored" serves both the first score and
+  the rescore. `Scored 3 prediction(s), 1 of them a rescore after an upstream
+  revision.`
+
+Two deliberate exceptions:
+
+- **A revision to NULL leaves the published actual standing.** There is nothing
+  to re-score against, so clearing it would return a verified day to unverified
+  with no way back. It is reported as `[frozen]` on every run instead.
+- **`source = 'backtest'` rows are never re-opened.** The backtest is a closed
+  set, seeded with its actuals already in hand; re-opening one erases an actual
+  the scorer cannot refill.
+
+Neither ingest re-fetches beyond the 30-day window, so a revision older than that
+is not detected — a bounded, stated ceiling rather than a silent one.
+
 ## Model performance
 
 Both endpoints return **two separate blocks per model**, `verified` and `backtest`, and
@@ -249,7 +293,7 @@ prediction dates in one pass is the only way the improvement percentage means an
 ```
 app.py                            FastAPI service, both targets
 index.html                        dashboard, one tab per target
-verify_deployment_readiness.py    the single go-live gate (22 checks)
+verify_deployment_readiness.py    the single go-live gate (23 checks)
 models/                           committed LightGBM artifacts
 vericast/
 ├── __init__.py                   resolves models/ paths from the package, not cwd
@@ -340,18 +384,26 @@ city would need — see Known limits below.
 | `GET /leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
 | `GET /evaluation` | Full record per model, split into `verified` and `backtest` blocks |
 | `GET /evaluation?days=30` | Same, restricted to a rolling window (`days` is `ge=0`; a bad one is 422) |
-| `GET /predictions?model=lightgbm&limit=12` | Prediction log with errors |
+| `GET /predictions?model=lightgbm&limit=12&source=daily` | Prediction log with errors (`source` is optional: `daily`, `backtest`, or omit for both) |
 | `GET /electricity/health` | Latest demand observation + `source_lag_expected` (5-day threshold) |
 | `GET /electricity/forecast?model=lightgbm` | Latest **verified-provenance** demand forecast in MW (`source = 'daily'`) |
 | `GET /electricity/history?days=30` | Same row-bounded contract: recent peak demand, energy met and temperature |
 | `GET /electricity/leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
 | `GET /electricity/evaluation` | Same split, with **MAPE** alongside MAE/RMSE in each block |
-| `GET /electricity/predictions?model=lightgbm&limit=15` | Prediction log with `error` and `error_pct` |
+| `GET /electricity/predictions?model=lightgbm&limit=15&source=daily` | Prediction log with `error` and `error_pct` |
 
 Every `days` parameter is validated by FastAPI rather than by a hand-rolled check, so
 out-of-range values answer **422** across all four endpoints that take one — `/evaluation`
 used to answer 400 for the same class of input, which made the contract something a
 client had to special-case per route.
+
+**Empty results split by route kind, deliberately.** The two `/predictions` routes are
+filtered logs: `model`, `source`, `scored_only` and `limit` are the caller's query, so no
+matching rows is an answer about that query — **200** with `{"predictions": [], "count": 0}`.
+Every other route returns *the* record, where absence means the pipeline has not produced
+one yet, which is a fault a client should see as one — **404**. Pinned in
+`tests/test_predictions.py` in both directions, so a later pass "unifying" the two breaks
+a test rather than a client.
 
 Both evaluation endpoints nest their metrics under a provenance key and publish **no
 combined figure**:
@@ -375,8 +427,13 @@ record and the daily record overlap in `forecast_date`, so an unfiltered
 `ORDER BY forecast_date DESC LIMIT 1` would present a walk-forward row fitted after
 the fact as today's live forecast on any day the daily row is missing. Both echo
 `source` anyway, so a caller never has to trust that the filter stayed. `/predictions`
-and `/electricity/predictions` still label without filtering — there the backtest rows
-are the point.
+and `/electricity/predictions` label both provenances by default — there the backtest
+rows are the point — and take an optional `source=daily|backtest` for callers that want
+one. That filter lands in the `WHERE`, before the `LIMIT`, which is the whole reason it
+exists as a parameter: `ORDER BY forecast_date DESC LIMIT 15` interleaves the two
+records, so a caller filtering the payload itself keeps only the fraction that survived
+and its window silently shrinks as the records overlap. The dashboard's two history
+tables ask for `source=daily`; an unrecognised value is a **400**, not an empty list.
 
 Interactive docs at `/docs`. PM2.5 values are raw concentration in μg/m³ —
 **not** AQI; no AQI transform is computed anywhere in this system. Electricity values
@@ -468,7 +525,7 @@ would be re-reading only changes once a day.
   this workflow racing itself but not an unrelated push to `main` landing during the
   minutes of training, and a rejected push would discard the retrain.
 - `.github/workflows/readiness-gate.yml` — Sundays 06:23 UTC: runs
-  `verify_deployment_readiness.py`'s 22 checks against the live database and the deployed
+  `verify_deployment_readiness.py`'s 23 checks against the live database and the deployed
   API. Scheduled between the weekly retrain's 04:00 commit and the daily pipeline's 08:42
   catch-up cron, so it gates the artifact that was just committed. This is the one gate
   nothing used to automate: `ci.yml` has a throwaway Postgres and no server, so the script

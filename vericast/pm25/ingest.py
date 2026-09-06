@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 from vericast import (
+    ACTUAL_TOLERANCE,
     PM25_MAX,
     PM25_MIN,
     RESCAN_DAYS,
@@ -230,7 +231,10 @@ def fetch_and_aggregate_data(start_date, end_date):
     return records_to_insert
 
 def insert_observations(records):
-    """Insert aggregated observations into the database"""
+    """Insert aggregated observations into the database."""
+    if not records:
+        return
+
     insert_sql = """
     INSERT INTO observations (city, as_of, pm2_5, pm10, temperature_2m_mean, wind_speed_10m_max, precipitation_sum)
     VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -240,16 +244,36 @@ def insert_observations(records):
         temperature_2m_mean = EXCLUDED.temperature_2m_mean,
         wind_speed_10m_max = EXCLUDED.wind_speed_10m_max,
         precipitation_sum = EXCLUDED.precipitation_sum,
-        created_at = CURRENT_TIMESTAMP;
+        created_at = CURRENT_TIMESTAMP
+    WHERE observations.pm2_5 IS DISTINCT FROM EXCLUDED.pm2_5
+       OR observations.pm10 IS DISTINCT FROM EXCLUDED.pm10
+       OR observations.temperature_2m_mean IS DISTINCT FROM EXCLUDED.temperature_2m_mean
+       OR observations.wind_speed_10m_max IS DISTINCT FROM EXCLUDED.wind_speed_10m_max
+       OR observations.precipitation_sum IS DISTINCT FROM EXCLUDED.precipitation_sum;
+    """
+
+    # Query existing observation values in range to log upstream revisions.
+    before_sql = """
+    SELECT as_of, pm2_5 FROM observations
+    WHERE city = %s AND as_of BETWEEN %s AND %s
     """
 
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
-                # Execute batch insert
+                dates = [as_of for _, as_of, *_ in records]
+                cur.execute(before_sql, (CITY, min(dates), max(dates)))
+                before = {as_of.isoformat(): pm for as_of, pm in cur.fetchall()}
+
                 cur.executemany(insert_sql, records)
                 conn.commit()
-                print(f"Successfully inserted {cur.rowcount} records")
+                # rowcount is new-or-changed rows only, thanks to the WHERE above: an
+                # unchanged re-scan day is skipped rather than rewritten with a fresh
+                # created_at.
+                print(f"Wrote {cur.rowcount} new or changed record(s) of "
+                      f"{len(records)} submitted")
+
+                report_revisions(before, records)
 
                 # Verify insertion
                 cur.execute("SELECT COUNT(*) FROM observations WHERE city = %s", (CITY,))
@@ -259,6 +283,25 @@ def insert_observations(records):
     except Exception as e:
         print(f"Error inserting observations: {e}")
         raise
+
+
+def report_revisions(before, records):
+    """Log days where CAMS ground-truth values were revised from prior stored observations."""
+    revised = [(as_of, before[as_of], new)
+               for _, as_of, new, *_ in records
+               if before.get(as_of) is not None
+               and (new is None or abs(new - before[as_of]) > ACTUAL_TOLERANCE)]
+    if not revised:
+        return
+
+    print(f"  {len(revised)} day(s) had their pm2_5 REVISED upstream:")
+    for as_of, old, new in sorted(revised):
+        shown = f"{new:.2f}" if new is not None else "NULL"
+        print(f"    [revised] {as_of}: {old:.2f} -> {shown} ug/m3")
+    print("  Any of these already scored against are re-opened and re-scored by "
+          "vericast.pm25.score, so the published error follows the observation.")
+
+
 
 def main():
     """Main ingestion process"""

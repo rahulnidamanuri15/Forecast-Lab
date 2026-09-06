@@ -21,6 +21,11 @@ load_dotenv()
 # Override to smoke-test a deployed instance instead of the local process.
 API_BASE = os.getenv("API_BASE", "http://localhost:8000").rstrip("/")
 
+# Same env read as app.py, and read here for the same reason CITY is: every other
+# check in this file is a server-side SELECT or a header-less GET, so all 22 of them
+# passed on a deploy that answers the API perfectly and hands the browser nothing.
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
+
 # Same env read as app.py and every vericast module: with the city hardcoded, the
 # one gate meant to catch a misconfiguration was the only place that could not see
 # it - point CITY at a city with no rows and this file still queried Nagpur. And
@@ -178,6 +183,7 @@ def check_features_no_nulls(target="PM2.5"):
     denylist FAILs go-live on any new nullable column the model never looks at, and
     drifts the moment one is added. Same columns the target's diagnose.py checks.
 
+    
     Parameterised for the same reason as check_prediction_exists: electricity_features
     has its own date gaps - the mirror runs 2-4 days behind - and a NULL there stops
     /electricity/forecast?model=lightgbm exactly as this one stops PM2.5's.
@@ -466,13 +472,26 @@ def check_api_evaluation_endpoint():
         return False
 
 def check_api_predictions_endpoint():
-    """Check that /predictions endpoint returns 200"""
+    """Check that /predictions returns 200 and honours ?source=daily.
+
+    The provenance assertion is the point of asking with the filter: FastAPI
+    ignores query parameters a handler does not declare, so a deploy running the
+    pre-filter app.py answers 200 here and quietly serves backtest rows - which
+    is what the dashboard's two history tables would then average over. Backtest
+    rows outnumber daily ones ~50:1 in this table, so an ignored parameter shows
+    up in the first five rows.
+    """
     try:
-        response = httpx.get(f'{API_BASE}/predictions?model=lightgbm&limit=5', timeout=10.0)
+        response = httpx.get(
+            f'{API_BASE}/predictions?model=lightgbm&limit=5&source=daily', timeout=10.0)
         if response.status_code == 200:
-            data = response.json()
-            prediction_count = len(data.get('predictions', []))
-            print(f"PASS: /predictions endpoint returns 200 ({prediction_count} predictions)")
+            predictions = response.json().get('predictions', [])
+            stray = [p['source'] for p in predictions if p.get('source') != 'verified']
+            if stray:
+                print(f"FAIL: /predictions?source=daily returned {stray} - the "
+                      f"deployed build does not filter provenance before its LIMIT")
+                return False
+            print(f"PASS: /predictions endpoint returns 200 ({len(predictions)} predictions)")
             return True
         else:
             print(f"FAIL: /predictions endpoint returns status {response.status_code}")
@@ -501,7 +520,7 @@ def check_api_electricity_endpoints():
         ('/electricity/history?days=7', 'days_returned'),
         ('/electricity/leaderboard', 'leaderboard'),
         ('/electricity/evaluation', 'evaluation'),
-        ('/electricity/predictions?model=lightgbm&limit=5', 'count'),
+        ('/electricity/predictions?model=lightgbm&limit=5&source=daily', 'count'),
     ]
     try:
         for path, key in endpoints:
@@ -516,6 +535,48 @@ def check_api_electricity_endpoints():
         return True
     except Exception as e:
         print(f"FAIL: Error checking /electricity endpoints: {e}")
+        return False
+
+def check_cors_allows_frontend_origin():
+    """Check the API returns access-control-allow-origin for FRONTEND_ORIGIN.
+
+    The browser is the only client that reads CORS, and every other check in this
+    file is a server-side SELECT or a GET with no Origin header - so all of them
+    pass on a deploy that serves the API perfectly and hands the dashboard nothing.
+    app.py allows no origin at all when FRONTEND_ORIGIN is empty, the safe default
+    over "*", which is exactly the state this closes: a green go-live summary next
+    to a blank page.
+
+    A plain GET, not an OPTIONS preflight: the dashboard's fetches carry no custom
+    headers, so the browser never preflights them and reads the header off the GET.
+    """
+    if not FRONTEND_ORIGIN:
+        print("FAIL: FRONTEND_ORIGIN is not set, so app.py allows no browser origin; "
+              "the dashboard would load and read nothing from this API")
+        return False
+
+    # First valid origin in comma-separated list, split as app.py splits it.
+    origins = [o.strip() for o in FRONTEND_ORIGIN.split(",") if o.strip()]
+    if not origins:
+        print("FAIL: FRONTEND_ORIGIN contains no valid origins, so app.py allows no browser origin; "
+              "the dashboard would load and read nothing from this API")
+        return False
+    origin = origins[0]
+    try:
+        response = httpx.get(f'{API_BASE}/health',
+                             headers={"Origin": origin}, timeout=10.0)
+        allowed = response.headers.get("access-control-allow-origin")
+        # CORSMiddleware echoes a matched origin back; "*" only if someone fronts
+        # this with a proxy that widens it, and the dashboard works either way.
+        if allowed not in (origin, "*"):
+            print(f"FAIL: /health returned access-control-allow-origin={allowed!r} "
+                  f"for Origin {origin} - every dashboard fetch would be blocked by "
+                  f"the browser while curl and this gate both see a healthy API")
+            return False
+        print(f"PASS: CORS allows {origin} (access-control-allow-origin: {allowed})")
+        return True
+    except Exception as e:
+        print(f"FAIL: Error checking CORS for {origin}: {e}")
         return False
 
 # Module level, not a local in main(), so tests/test_readiness_gate.py can assert
@@ -567,6 +628,9 @@ CHECKS = [
     ("API /evaluation endpoint", check_api_evaluation_endpoint),
     ("API /predictions endpoint", check_api_predictions_endpoint),
     ("API /electricity/* endpoints", check_api_electricity_endpoints),
+    # Last, because it is the only check that asks the question the browser asks.
+    # Everything above passes on a deploy whose dashboard shows nothing.
+    ("CORS allows FRONTEND_ORIGIN", check_cors_allows_frontend_origin),
 ]
 
 

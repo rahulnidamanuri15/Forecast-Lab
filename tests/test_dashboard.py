@@ -65,18 +65,34 @@ def test_backtest_stays_out_of_the_headline_metrics():
 
 
 def test_backtest_rows_are_filtered_out_of_the_history_tables():
-    """/predictions labels provenance without filtering it, so the page must.
+    """Both panels ask the API for published rows, and filter what arrives anyway.
 
-    Both tables are headed "logged before actual outcomes were known" and both
-    derive their within-tolerance and average-accuracy figures from the same rows.
-    A backtest row under that heading is a fitted-after-the-fact number presented
-    as a published one - the retro-fitting claim the whole record rests on.
+    ?source=daily is the mechanism: /predictions applies its LIMIT to
+    `ORDER BY forecast_date DESC` across both provenances, so a page that fetched
+    limit=15 unfiltered and dropped backtest rows client-side kept only the
+    fraction the interleave left. Both tables are headed "logged before actual
+    outcomes were known" and both derive their within-tolerance and
+    average-accuracy figures from these rows, so that fraction was the
+    denominator.
+
+    publishedOnly() stays as the net. A backtest row under that heading is a
+    fitted-after-the-fact number presented as a published one, and a dropped
+    query parameter should thin the table rather than change what it claims.
 
     The filter must be an allowlist. The API renames source 'daily' to 'verified'
     on the way out, so `!== 'backtest'` admits every value that is not that one
     literal - including a third provenance added upstream under a name this page
     has never seen.
     """
+    asked = re.findall(r"fetchJSON\('(/(?:electricity/)?predictions)\?([^']*)'", SOURCE)
+    assert len(asked) == 2, (
+        f"expected one /predictions fetch per panel, found {len(asked)}")
+    for path, query in asked:
+        assert "source=daily" in query, (
+            f"{path} is fetched without ?source=daily ({query}); the API would "
+            f"spend the LIMIT on interleaved provenance and the panel would run "
+            f"on whatever fraction of its window survived the client-side filter")
+
     assert "r.source === 'verified'" in SOURCE, (
         "publishedOnly() no longer allowlists verified rows; the history tables "
         "would quote the launch record, or any future provenance, as published "
