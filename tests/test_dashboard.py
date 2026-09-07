@@ -185,3 +185,13 @@ def test_history_sections_have_bottom_margin():
         "expected .history-section to define margin-bottom so stacked tables "
         "have spacing between them")
 
+
+def test_all_charts_have_legends():
+    """All 4 charts must display legends so users know what colors represent."""
+    assert "legend: { display: false }" not in SOURCE, (
+        "a chart has legend disabled; all charts must show what colors represent")
+    displays = re.findall(r"legend:\s*\{\s*display:\s*true", SOURCE)
+    assert len(displays) == 4, (
+        f"expected 4 charts with legend display: true, found {len(displays)}")
+
+

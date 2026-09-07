@@ -1553,6 +1553,7 @@
             labels: accLabels,
             datasets: [
               {
+                label: 'Accuracy (%)',
                 data: accValues,
                 borderColor: '#38BDF8',
                 backgroundColor: 'rgba(56, 189, 248, 0.08)',
@@ -1566,7 +1567,13 @@
           options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
+            plugins: {
+              legend: {
+                display: true,
+                position: 'bottom',
+                labels: { color: '#94A3B8', boxWidth: 10, font: { size: 10 } }
+              }
+            },
             scales: {
               x: { display: false },
               // No min/max: clamping to 70-100 truncated every bad day out of
@@ -1770,7 +1777,23 @@
           options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
+            plugins: {
+              legend: {
+                display: true,
+                position: 'bottom',
+                onClick: () => {},
+                labels: {
+                  color: '#94A3B8',
+                  boxWidth: 10,
+                  font: { size: 10 },
+                  generateLabels: () => [
+                    { text: '< 2% (Excellent)', fillStyle: '#10B981', strokeStyle: '#10B981', lineWidth: 0 },
+                    { text: '< 5% (Good)', fillStyle: '#38BDF8', strokeStyle: '#38BDF8', lineWidth: 0 },
+                    { text: '≥ 5% (Moderate)', fillStyle: '#F59E0B', strokeStyle: '#F59E0B', lineWidth: 0 }
+                  ]
+                }
+              }
+            },
             scales: {
               x: { display: false },
               y: {
@@ -1815,7 +1838,13 @@
           options: {
             responsive: true,
             maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
+            plugins: {
+              legend: {
+                display: true,
+                position: 'bottom',
+                labels: { color: '#94A3B8', boxWidth: 10, font: { size: 10 } }
+              }
+            },
             scales: {
               x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748B', font: { size: 10 }, maxTicksLimit: 6 } },
               y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748B', font: { size: 10 } } },
