@@ -835,7 +835,7 @@
       <div class="accuracy-number" id="acc-big-num">
         — <span>last 15 scored</span>
       </div>
-      <div class="chart-container" style="height: 120px;">
+      <div class="chart-container" style="height: 135px;">
         <canvas id="accuracyChart"></canvas>
       </div>
     </div>
@@ -1034,7 +1034,7 @@
         <div class="accuracy-number" id="el-acc-big-num">
           — <span>last 15 scored</span>
         </div>
-        <div class="chart-container" style="height: 120px;">
+        <div class="chart-container" style="height: 135px;">
           <canvas id="elErrorChart"></canvas>
         </div>
       </div>
@@ -1521,7 +1521,7 @@
               legend: {
                 display: true,
                 position: 'bottom',
-                labels: { color: '#94A3B8', boxWidth: 10, font: { size: 10 } }
+                labels: { color: '#E2E8F0', boxWidth: 10, font: { size: 10, weight: '500' }, padding: 18 }
               }
             },
             scales: {
@@ -1571,7 +1571,7 @@
               legend: {
                 display: true,
                 position: 'bottom',
-                labels: { color: '#94A3B8', boxWidth: 10, font: { size: 10 } }
+                labels: { color: '#E2E8F0', boxWidth: 10, font: { size: 10, weight: '500' }, padding: 18 }
               }
             },
             scales: {
@@ -1783,13 +1783,14 @@
                 position: 'bottom',
                 onClick: () => {},
                 labels: {
-                  color: '#94A3B8',
+                  color: '#E2E8F0',
                   boxWidth: 10,
-                  font: { size: 10 },
+                  font: { size: 10, weight: '500' },
+                  padding: 18,
                   generateLabels: () => [
-                    { text: '< 2% (Excellent)', fillStyle: '#10B981', strokeStyle: '#10B981', lineWidth: 0 },
-                    { text: '< 5% (Good)', fillStyle: '#38BDF8', strokeStyle: '#38BDF8', lineWidth: 0 },
-                    { text: '≥ 5% (Moderate)', fillStyle: '#F59E0B', strokeStyle: '#F59E0B', lineWidth: 0 }
+                    { text: '< 2% (Excellent)', fillStyle: '#10B981', strokeStyle: '#10B981', fontColor: '#E2E8F0', lineWidth: 0 },
+                    { text: '< 5% (Good)', fillStyle: '#38BDF8', strokeStyle: '#38BDF8', fontColor: '#E2E8F0', lineWidth: 0 },
+                    { text: '≥ 5% (Moderate)', fillStyle: '#F59E0B', strokeStyle: '#F59E0B', fontColor: '#E2E8F0', lineWidth: 0 }
                   ]
                 }
               }
@@ -1842,7 +1843,7 @@
               legend: {
                 display: true,
                 position: 'bottom',
-                labels: { color: '#94A3B8', boxWidth: 10, font: { size: 10 } }
+                labels: { color: '#E2E8F0', boxWidth: 10, font: { size: 10, weight: '500' }, padding: 18 }
               }
             },
             scales: {
