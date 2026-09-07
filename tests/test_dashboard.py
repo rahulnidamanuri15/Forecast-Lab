@@ -175,3 +175,13 @@ def test_the_window_scoped_metrics_say_which_window_they_are():
     assert SOURCE.count("scored</span>`") == 2, (
         "expected both accuracy headlines to interpolate the count they averaged "
         "over; one is back to a fixed or unstated denominator")
+
+
+def test_history_sections_have_bottom_margin():
+    """Adjacent table cards must not touch each other without margin."""
+    m = re.search(r"\.history-section\s*\{([^}]+)\}", SOURCE)
+    assert m, ".history-section rule missing"
+    assert "margin-bottom" in m.group(1), (
+        "expected .history-section to define margin-bottom so stacked tables "
+        "have spacing between them")
+
