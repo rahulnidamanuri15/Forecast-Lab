@@ -1,7 +1,7 @@
 # Production runtime deps only. Test-only deps live in requirements-dev.txt; the
 # Dockerfile installs this file alone (.dockerignore excludes tests/).
 httpx==0.28.1
-psycopg[binary]==3.3.4
+psycopg[binary]==3.3.5
 # Connection pool for app.py - separate distribution from psycopg itself. Without
 # it every request pays a fresh connect + TLS handshake + auth to Neon.
 psycopg-pool==3.3.1
