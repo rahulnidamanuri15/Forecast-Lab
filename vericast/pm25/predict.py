@@ -4,6 +4,7 @@ Forecasts are anchored to the day after the latest observation (latest_obs + 1 d
 All predictions are validated for staleness and physical plausibility prior to DB commit.
 """
 import os
+import numpy as np
 import psycopg
 import lightgbm as lgb
 from datetime import timedelta
@@ -130,7 +131,6 @@ def make_daily_prediction():
                     print("[WARN] Latest features row has NULL values (likely a date gap); "
                           "skipping LightGBM forecast to avoid a garbage prediction.")
                 else:
-                    import numpy as np
                     X = np.array([feature_values], dtype=float)
                     lgbm_pred = float(lgbm_model.predict(X)[0])
 

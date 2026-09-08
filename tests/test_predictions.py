@@ -90,7 +90,7 @@ def test_predictions_endpoint_scored_only():
 
         # The mock ignores the WHERE clause, so the filter can only be verified
         # on the SQL that was actually sent.
-        sql, params = mock_cursor.execute.call_args[0]
+        sql, _ = mock_cursor.execute.call_args[0]
         assert "actual_pm2_5 IS NOT NULL" in sql
 
         assert response.status_code == 200

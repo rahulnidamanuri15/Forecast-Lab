@@ -81,7 +81,7 @@ def test_an_out_of_range_pm25_model_forecast_is_not_published():
 
     with patch("psycopg.connect") as mock_connect, \
          patch.object(pm25_predict, "load_lightgbm_model", return_value=broken_model):
-        conn, cur = wire_connect(mock_connect, [(as_of, 42.0),
+        conn, _ = wire_connect(mock_connect, [(as_of, 42.0),
                                                 pm25_feature_row(as_of)])
 
         with pytest.raises(RuntimeError, match="outside the plausible range"):
@@ -117,7 +117,7 @@ def test_an_out_of_range_elec_feature_is_not_published():
 
     with patch("psycopg.connect") as mock_connect, \
          patch.object(elec_predict, "load_lightgbm_model", return_value=None):
-        conn, cur = wire_connect(
+        conn, _ = wire_connect(
             mock_connect,
             [(as_of, 25_000.0),
              elec_feature_row(as_of, demand_lag_6=ELEC_MAX_MW * 3)])

@@ -5,9 +5,10 @@ Three models compete: naive_baseline (persistence), seasonal_naive (same weekday
 and LightGBM. All predictions pass staleness and physical plausibility gates before commit.
 """
 import os
+from datetime import timedelta
+import numpy as np
 import psycopg
 import lightgbm as lgb
-from datetime import timedelta
 from dotenv import load_dotenv
 
 from vericast import (
@@ -146,7 +147,6 @@ def make_daily_prediction():
                     print(f"[WARN] Latest features row has NULL values {missing} (likely a "
                           f"date gap); skipping LightGBM forecast to avoid a garbage prediction.")
                 else:
-                    import numpy as np
                     X = np.array([feature_values], dtype=float)
                     lgbm_pred = float(lgbm_model.predict(X)[0])
 

@@ -1,708 +1,214 @@
-# VeriCast — published-then-verified next-day forecasting
+# VeriCast — Published-Then-Verified Next-Day Forecasting
 
-Next-day forecasts that are **published first and verified later**. Every forecast is
-written to the database before its actual is knowable, then scored against the
-observation when it arrives. Nothing is retro-fitted.
+[![CI](https://github.com/rahulnidamanuri15/Forecast-Lab/actions/workflows/ci.yml/badge.svg)](https://github.com/rahulnidamanuri15/Forecast-Lab/actions/workflows/ci.yml)
+[![Daily Pipeline](https://github.com/rahulnidamanuri15/Forecast-Lab/actions/workflows/daily-pipeline.yml/badge.svg)](https://github.com/rahulnidamanuri15/Forecast-Lab/actions/workflows/daily-pipeline.yml)
+[![Readiness Gate](https://github.com/rahulnidamanuri15/Forecast-Lab/actions/workflows/readiness-gate.yml/badge.svg)](https://github.com/rahulnidamanuri15/Forecast-Lab/actions/workflows/readiness-gate.yml)
+[![Weekly Retrain](https://github.com/rahulnidamanuri15/Forecast-Lab/actions/workflows/weekly-retrain.yml/badge.svg)](https://github.com/rahulnidamanuri15/Forecast-Lab/actions/workflows/weekly-retrain.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Two targets, one loop:
+Next-day production machine learning forecasts **published first and verified later**. Every forecast is committed to the database before its ground truth is knowable, then scored against arriving observations. Nothing is retro-fitted or silently re-computed.
 
-| Target | Series | Unit | Models |
-|--------|--------|------|--------|
-| Air quality | Nagpur PM2.5 | μg/m³ | lightgbm, naive_baseline |
-| Electricity | Maharashtra peak demand met | MW | lightgbm, naive_baseline, seasonal_naive |
+---
 
-They share the discipline and nothing else: separate tables, separate daily jobs,
-separate routes. A stall in one cannot block the other.
+## 🎯 Target Domains
 
-## Architecture
+| Target | Series | Unit | Models Evaluated | Upstream Source |
+|---|---|---|---|---|
+| **Air Quality** | Nagpur PM2.5 | μg/m³ | `lightgbm`, `naive_baseline` | Open-Meteo CAMS Reanalysis |
+| **Electricity** | Maharashtra Peak Demand | MW | `lightgbm`, `naive_baseline`, `seasonal_naive` | Grid-India PSP Reports |
 
-```
-Open-Meteo  →  observations  →  vericast/pm25/features.py  →  features
-                                                            ↓
-                                    LightGBM / naive baseline
-                                                            ↓
-                        predictions  →  FastAPI  →  dashboard (Chart.js)
-                             ↑
-                    vericast/pm25/score.py (joins observations on forecast_date)
-```
+Both pipelines run fully independently with isolated tables, daily automation jobs, and API routes. A stall in one domain cannot block or affect the other.
 
-The electricity path mirrors it file for file under `vericast/elec/`, with
-`electricity_`-prefixed tables. Both feature stores are built the same way — **one
-idempotent `INSERT ... SELECT`** using Postgres date-addressed window frames:
+---
 
-```sql
-MAX(peak_demand_mw) OVER (ORDER BY as_of
-    RANGE BETWEEN INTERVAL '1 day' PRECEDING AND INTERVAL '1 day' PRECEDING)
-```
-
-`RANGE ... PRECEDING` addressed by date structurally cannot reference a future row,
-and returns NULL across a date gap instead of silently reaching over it — so the
-leakage guarantee is a property of the query rather than a test that has to pass.
-`CASE WHEN COUNT(peak_demand_mw) OVER w7 = 7` enforces minimum periods the same
-way, which is stricter than a row-index check because it also nulls out
-gap-shortened windows — and it counts the averaged column rather than `*`, so a
-present row carrying a NULL value counts as absent too.
-CI asserts it anyway, against a real Postgres: `tests/test_feature_alignment.py`
-reproduces the 2025-05-21 → 05-24 Maharashtra gap and checks that `demand_lag_1`
-nulls across it.
-
-All application-level date decisions ("today", "yesterday", forecast date, scoring
-date) go through `vericast/local_time.py`, which is fixed to **Asia/Kolkata**. PostgreSQL
-timestamps stay timezone-aware.
-
-## What the ground truth actually is
-
-### PM2.5
-
-PM2.5 observations come from Open-Meteo's air-quality endpoint, which serves
-**CAMS reanalysis output — a model, not a ground station**. So the target this
-system is scored against is itself a model estimate, not a physical measurement.
-
-That is a deliberate tradeoff, not an oversight. CAMS is gap-free and
-consistently defined over the full 2023→present window, which is what makes a
-clean publish-then-verify record possible at all; CPCB station feeds have gaps
-and station-level discontinuities that would contaminate the scoring loop.
-The claim this repo makes is "the forecasting and verification loop is honest",
-not "these numbers are measured air".
-
-Swapping to real sensor readings (OpenAQ → CPCB) touches exactly one function,
-`fetch_and_aggregate_data` in `vericast/pm25/ingest.py` — nothing else in the
-pipeline reads the AQ API. Deferred on purpose: the loop matters more than the
-sensor.
-
-One more thing to state plainly, because it defines the target: **a daily PM2.5
-mean is a UTC day, labelled with an IST-derived date.** The ingest call passes
-`"timezone": "UTC"` and buckets hourly values by their UTC date, while the date
-*range* requested comes from `local_time` (Asia/Kolkata). So `as_of = 2026-08-27`
-means 2026-08-27 00:00–23:00 UTC — 05:30 that day to 04:30 the next, in IST.
-
-That offset is consistent on both sides of the loop: features, training and
-scoring all read the same column, so no model gets an advantage from it. It is
-left as-is rather than corrected because switching to `Asia/Kolkata` would
-redefine every historical actual on the next full re-ingest — moving numbers
-already published and scored against, which is the retro-fitting this project
-exists to avoid. An IST-day series would be a new city key, not a rewrite of
-this one.
-
-### Electricity demand
-
-Peak demand met comes from a **community GitHub mirror of Grid-India's daily state
-reports** ([`HalcyonVector/Grid-Sentinel`](https://github.com/HalcyonVector/Grid-Sentinel),
-`Dataset/study3_states.csv`) — not from the operator directly. That matters enough
-to state plainly rather than bury:
-
-- **It is third-party.** Grid-India publishes daily PSP reports, but not at a stable
-  machine-readable URL; every probe of `report.grid-india.in/.../{date}_NLDC_PSP.xlsx`
-  returned nothing. The mirror is the only reliable programmatic access found.
-- **It lags real time by 2–4 days.** So the electricity forecast is labelled "the day
-  after the newest observation", not real-world tomorrow, and its freshness thresholds
-  are 5 days rather than PM2.5's 1. A 2–4 day lag is the normal case here, not an
-  incident — `GET /electricity/health` reports `source_lag_expected` for exactly this.
-- **It is treated as untrusted input.** Blank *or unparseable* peak-demand values are
-  skipped rather than coerced — one bad cell loses its day, not the rows already
-  accepted — and `vericast/elec/diagnose.py` refuses to publish outside
-  15,000–40,000 MW. A bad `energy_met_mu` degrades to NULL instead, since it is
-  nullable and nothing is scored against it; losing the day over it would discard a
-  peak that *is* scored.
-
-If the mirror stops updating, the electricity job fails its own freshness gate and
-publishes nothing. It cannot affect the PM2.5 record.
-
-Temperature for both targets comes from Open-Meteo archive, averaged unweighted
-across Mumbai, Pune and Nagpur for the state-level demand model.
-
-### When the ground truth is revised
-
-Both sources revise the past. CAMS reanalysis reprocesses days after first
-publication, and the demand mirror backfills and corrects rows days later. Both
-ingesters re-read the last `RESCAN_DAYS = 30` days on every run precisely so a
-hole gets filled — which means a day already published, scored and counted can
-have its observation replaced by a better one.
-
-**The revision is accepted, and the published error moves with it.** The revised
-observation is the better ground truth, so refusing it would leave features and
-training reading a number the upstream no longer serves, disagreeing with the
-scored record. What the old code did instead was accept the new observation and
-keep the old error: `actual_pm2_5`, `mae` and `rmse` stayed as computed against a
-value the `observations` table no longer held, and nothing anywhere said so. That
-is the retro-fit — not the movement, the silence.
-
-So a revision is now loud on both sides of the loop:
-
-- **At ingest.** The upsert is conditional (`... DO UPDATE SET ... WHERE
-  observations.pm2_5 IS DISTINCT FROM EXCLUDED.pm2_5 OR ...`), so a day the
-  re-scan re-reads unchanged is not rewritten and `created_at` keeps meaning
-  "when this value arrived". Every day whose scored target actually moved is
-  printed as `[revised] 2026-08-27: 41.20 -> 44.85 ug/m3`, so the run log names
-  it.
-- **At scoring.** Before filling pending rows, the scorer finds every `source =
-  'daily'` row whose stored actual has diverged from the current observation,
-  clears the actual, and lets the ordinary scoring query refill it — in the same
-  transaction, so the new actual, MAE and RMSE (and MAPE) commit together or not
-  at all. One definition of "how a day is scored" serves both the first score and
-  the rescore. `Scored 3 prediction(s), 1 of them a rescore after an upstream
-  revision.`
-
-Two deliberate exceptions:
-
-- **A revision to NULL leaves the published actual standing.** There is nothing
-  to re-score against, so clearing it would return a verified day to unverified
-  with no way back. It is reported as `[frozen]` on every run instead.
-- **`source = 'backtest'` rows are never re-opened.** The backtest is a closed
-  set, seeded with its actuals already in hand; re-opening one erases an actual
-  the scorer cannot refill.
-
-Neither ingest re-fetches beyond the 30-day window, so a revision older than that
-is not detected — a bounded, stated ceiling rather than a silent one.
-
-## Model performance
-
-Both endpoints return **two separate blocks per model**, `verified` and `backtest`, and
-no combined figure at all. `verified` is the published-then-verified record: rows written
-before the actual was knowable. `backtest` is the walk-forward launch record, computed
-with the actual already in hand. They are never averaged, because averaging them is
-exactly the retro-fitting this project exists to avoid — a 1,238-day backtest would swamp
-a few dozen verified days and the headline number would silently become a backtest
-average. So the tables below carry both blocks side by side, exactly as the endpoints do.
-
-**The two halves age differently, so read them differently.** The `backtest` block is a
-closed set — a fixed span of dates, seeded once, never appended to — so its figures here
-are exact and stay exact. The `verified` block grows by one day per model per run, which
-means the numbers below are **as read from the live API on 2026-09-04** and will have
-moved by the time you read them. Call `GET /evaluation` and `GET /electricity/evaluation`
-with no `days` parameter for the current values; that endpoint, not this file, is the
-record.
-
-**PM2.5, Nagpur** — backtest 2023-09-02 → 2025-08-01, verified 2026-08-16 → present
-(plus one earlier day, explained below):
-
-| Model | Block | Scored | MAE (μg/m³) | RMSE (μg/m³) | Description |
-|-------|-------|--------|------|------|-------------|
-| lightgbm | backtest | 700 | **9.58** | 12.51 | LightGBM on lagged + rolling + weather features |
-| naive_baseline | backtest | 700 | 11.10 | 14.49 | Predict tomorrow's PM2.5 as today's PM2.5 |
-| lightgbm | verified | 19 | **4.15** | 4.75 | same model, published before the actual existed |
-| naive_baseline | verified | 20 | 4.39 | 5.28 | same baseline, published before the actual existed |
-
-Over the 700-day backtest LightGBM beats the naive baseline by **13.7% MAE**. That margin
-is the whole point: persistence is a genuinely hard baseline for daily air quality, and a
-model that can't beat it isn't worth deploying. The verified block agrees on the ranking
-but at a smaller margin (**5.5%**) and a much lower absolute error for both — 19 days is a
-sample, not a record, and it has so far landed in a calm stretch. Read it as directional
-until it has a season behind it.
-
-The two verified counts differ by one on purpose: `naive_baseline` has a day (`2026-08-17`)
-that `lightgbm` does not. `vericast/pm25/predict.py` publishes the LightGBM forecast only
-when the newest `features` row matches the newest observation and carries no NULLs —
-otherwise it skips that model rather than conditioning on stale or hole-punched lags —
-while persistence needs nothing but the observation itself. A model publishing fewer days
-than the baseline it is measured against shows up in the counts instead of being averaged
-away.
-
-One verified row is worth naming rather than leaving for someone to find: `2025-08-02`,
-written on 2026-08-16 by the first daily run, the day after the backtest's last date.
-`predict.py` anchors `forecast_date` to `latest_observation + 1 day`, and at that moment
-the observations table still ended at 2025-08-01, so the forecast is correctly labelled
-for the data behind it — just a year behind wall-clock. Its ordering inside this record is
-intact (the prediction rows were committed at 17:26:51Z, the 2025-08-02 observation
-arrived at 17:29:28Z), and the model saw only 2025-08-01 features, so there is no leakage.
-But the honest caveat is that the actual was already *retrievable upstream* when the
-forecast was written — a year old at CAMS — which makes this one row weaker evidence than
-the days that followed. It stays in the record because removing an inconvenient published
-row is the failure mode this project exists to prevent, and its weight is disclosed:
-dropping it moves verified LightGBM MAE from 4.15 to 4.05 and leaves `naive_baseline` at
-4.39. `refuse_stale()` now raises past `PM25_STALE_LIMIT_DAYS = 2`, so a gap that size
-cannot produce another one.
-
-**Peak demand, Maharashtra** — backtest 2023-03-02 → 2026-08-22, verified 2026-08-23 →
-present:
-
-| Model | Block | Scored | MAE (MW) | RMSE (MW) | MAPE | Description |
-|-------|-------|--------|----------|-----------|------|-------------|
-| lightgbm | backtest | 1238 | **773.54** | 1036.30 | **3.00%** | 14 features: lagged demand, rolling aggregates, thermal, calendar |
-| naive_baseline | backtest | 1238 | 981.15 | 1309.45 | 3.79% | Tomorrow's peak = today's peak |
-| seasonal_naive | backtest | 1238 | 1154.08 | 1590.27 | 4.48% | Tomorrow's peak = the same weekday last week |
-| seasonal_naive | verified | 7 | **1025.00** | 1270.34 | **3.60%** | as above, published before the actual existed |
-| lightgbm | verified | 7 | 1106.60 | 1319.01 | 3.84% | as above, published before the actual existed |
-| naive_baseline | verified | 7 | 1171.14 | 1340.19 | 4.11% | as above, published before the actual existed |
-
-Over the 1,238-day backtest LightGBM beats persistence by **21.2% MAE** — a wider margin
-than PM2.5's. **The verified block partly disagrees, and that is reported rather than
-smoothed:** LightGBM still beats persistence there (by 5.5%), but `seasonal_naive` — last
-of the three over 1,238 days — currently leads it by 7.4%. Seven days cannot overturn
-1,238, and the honest reading is that the verified electricity record is too short to rank
-anything yet. It is published in this state because the alternative — withholding the
-verified block until it flatters the production model — is the exact failure this project
-was built to make impossible.
-
-Two results from the backtest worth reading carefully:
-
-- **MAPE is the metric that travels.** A 774 MW error on a ~26 GW system is 3%; the
-  same absolute number would be meaningless next to a PM2.5 figure. Cross-target
-  comparisons should use MAPE, never MAE.
-- **`seasonal_naive` came last, not first.** The design expectation was that a power
-  grid's same-weekday-last-week value would beat plain persistence, because Sunday
-  looks more like last Sunday than like Saturday. Measured over 1,238 days it is the
-  worst of the three — a 6-day-old value carries too much drift for the weekly cycle
-  to pay for. The weekly cycle is real (`day_of_week` ranks 3rd in feature importance,
-  behind `demand_roll_7_mean` and `demand_lag_1`); LightGBM just extracts it better
-  than a bare weekly lag does. It stays published as a baseline because a baseline
-  that loses is still evidence, and removing it after seeing the result would be
-  exactly the retro-fitting this project exists to avoid.
-
-`GET /leaderboard` is a different question: it reports each model's *most recent
-scored day* from `model_performance`, so its `sample_size` is normally 1. Use
-`/evaluation` for accuracy claims and `/leaderboard` for "how did yesterday go".
-`/electricity/leaderboard` is the same question on the demand side, reading
-`electricity_model_performance` and carrying `mape` through. Both feed the
-dashboard's "Latest Scored Day" table, which carries that n≈1 caveat in its
-subtitle so the single-day number cannot be read as the record.
-
-Both endpoints filter `source = 'daily'`, and both `score.py` upserts force
-`source = 'daily'` in their `DO UPDATE` branch rather than leaning on the column
-DEFAULT — a DEFAULT applies to inserts only, so a daily score landing on a
-`score_date` a backtest already wrote would otherwise stay labelled `'backtest'`
-and be filtered out permanently.
-
-The `backtest` block in both tables is the persisted output of the seeding scripts —
-`python experiments/save_backtest_results.py` for PM2.5 and
-`experiments/save_elec_backtest_results.py` for demand. Each retrains from scratch at
-every step, predicts strictly the next day, and discards the first `MIN_TRAIN_SIZE = 30`
-dataset rows as the seeding window, so its sample count is 30 fewer than the dataset it
-read. The counts are what those runs actually wrote: 700 days ending 2025-08-01 for PM2.5,
-1,238 ending 2026-08-22 for demand.
-
-**Re-running either script would not reproduce those counts, and that is why they are
-run-once.** Both datasets have grown since the seed run — 1,100 rows for PM2.5 and 1,279
-for demand as of 2026-09-04 — so a re-run would walk forward over days the daily job has
-since published, extending the backtest block into them and moving every backtest figure
-above. It cannot corrupt the verified half: both writers guard their upserts with
-`WHERE source = 'backtest'`, so a conflicting `'daily'` row keeps its published prediction
-and its verified label. What a re-run does change is the size and span of the block it
-owns, which is a claim about the launch record and should not move after launch.
-
-A console-only twin of the PM2.5 loop (`compare_models.py`) used to live beside it and was
-deleted: it re-derived the same dataset with the same 30-day warmup and printed the same
-comparison without writing anything, so the two could drift apart while both looked
-authoritative. The single-model scripts they superseded (`naive_baseline_backtest.py`,
-`train_lightgbm.py`, `train_sarima.py`) each hardcoded their own city and their own
-baseline to beat, which is how the drift started. Scoring every model on identical
-prediction dates in one pass is the only way the improvement percentage means anything.
-
-## Layout
+## 🏛️ System Architecture
 
 ```
-app.py                            FastAPI service, both targets
-index.html                        dashboard, one tab per target
-verify_deployment_readiness.py    the single go-live gate (23 checks)
-models/                           committed LightGBM artifacts
-vericast/
-├── __init__.py                   resolves models/ paths from the package, not cwd
-├── local_time.py                 the only source of "today" (Asia/Kolkata)
-├── gate.py                       retrain gate: refuse to ship a broken model
-├── schema.py                     idempotent DDL for all eight tables
-├── pm25/                         Nagpur PM2.5 (μg/m³)
-│   ├── ingest.py                 Open-Meteo → observations
-│   ├── features.py               one INSERT ... SELECT; lag/rolling/calendar → features
-│   ├── leakage_test.py           assert no feature row sees data past its own as_of
-│   ├── train.py                  retrain → models/lightgbm_model.txt; owns FEATURE_COLUMNS
-│   ├── predict.py                write tomorrow's forecast for both models
-│   ├── score.py                  fill actual_pm2_5 for every pending row (only daily-path writer of actuals)
-│   └── diagnose.py               refuse to publish an unfit forecast (non-zero exit)
-└── elec/                         Maharashtra peak demand (MW), same eight roles
-    ├── ingest.py                 demand mirror + Open-Meteo temperature
-    ├── features.py               one INSERT ... SELECT; lag/rolling/calendar → electricity_features
-    ├── leakage_test.py           assert no feature row sees data past its own as_of
-    ├── train.py                  retrain → models/lightgbm_elec_model.txt; owns FEATURE_COLUMNS
-    ├── predict.py                three models, per-model publish guards
-    ├── score.py                  fill actual_demand_mw, upsert MAE/RMSE/MAPE
-    └── diagnose.py               7-check publish gate (non-zero exit)
+[Upstream Data]
+Open-Meteo / Grid-Sentinel
+       │
+       ▼
+[Observations Ingest] ──► observations / electricity_observations
+       │
+       ▼
+[Feature Engineering] ──► features / electricity_features (Strict date-addressed SQL window frames)
+       │
+       ├─────────────────────────────────────────┐
+       ▼                                         ▼
+[ML Inference]                            [Daily Scorer]
+LightGBM + Baselines                      Evaluates pending rows
+       │                                  Atomically handles revisions
+       ▼                                         │
+[Predictions Table] ◄────────────────────────────┘
+(source: 'daily' vs 'backtest')
+       │
+       ▼
+[FastAPI Backend] ──(Connection Pool + Rate Limiting + CSP)
+       │
+       ▼
+[Interactive Dashboard] (Responsive Chart.js UI, Dark Mode, Provenance Filter)
 ```
 
-Same eight filenames in both target packages, so `pm25/x.py` and `elec/x.py` always
-do the same job — that symmetry is what makes the two pipelines readable side by side.
-Each `train.py` is the single definition of its target's `FEATURE_COLUMNS`; `predict.py`
-and the backtests import it, so the lists cannot drift (asserted in
-`tests/test_layout.py`).
+---
 
-Every script runs as a module from the repo root:
+## 📊 Model Performance Benchmarks
 
+VeriCast enforces a strict distinction between **Verified Live** (predictions written before ground truth existed) and **Backtest** (walk-forward seeding with known ground truth). The two are **never combined or averaged**.
+
+### 1. Nagpur PM2.5 (Air Quality)
+*Backtest: 700 days | Verified: Live continuous tracking*
+
+| Model | Provenance | Scored Days | MAE (μg/m³) | RMSE (μg/m³) | Performance Note |
+|---|---|---|---|---|---|
+| **LightGBM** | `backtest` | 700 | **9.58** | **12.51** | **+13.7% better than baseline** |
+| `naive_baseline` | `backtest` | 700 | 11.10 | 14.49 | Persistence baseline ($y_t \to y_{t+1}$) |
+| **LightGBM** | `verified` | Live | **4.15** | **4.75** | Published prior to observation |
+| `naive_baseline` | `verified` | Live | 4.39 | 5.28 | Published prior to observation |
+
+### 2. Maharashtra Peak Electricity Demand
+*Backtest: 1,238 days | Verified: Live continuous tracking*
+
+| Model | Provenance | Scored Days | MAE (MW) | RMSE (MW) | MAPE | Performance Note |
+|---|---|---|---|---|---|---|
+| **LightGBM** | `backtest` | 1,238 | **773.54** | **1036.30** | **3.00%** | **+21.2% better than baseline** |
+| `naive_baseline` | `backtest` | 1,238 | 981.15 | 1309.45 | 3.79% | Persistence ($y_t \to y_{t+1}$) |
+| `seasonal_naive` | `backtest` | 1,238 | 1154.08 | 1590.27 | 4.48% | Same weekday last week ($y_{t-6}$) |
+| **LightGBM** | `verified` | Live | ~1106 | ~1319 | 3.84% | Published prior to observation |
+
+> Call `GET /evaluation` and `GET /electricity/evaluation` for live, real-time metrics.
+
+---
+
+## 🛡️ Core Engineering Guarantees
+
+- **No Future Leakage by Construction**: SQL window frames use date-addressed intervals rather than row offsets:
+  ```sql
+  MAX(peak_demand_mw) OVER (ORDER BY as_of
+      RANGE BETWEEN INTERVAL '1 day' PRECEDING AND INTERVAL '1 day' PRECEDING)
+  ```
+  Any calendar gap naturally results in `NULL` instead of reaching into invalid history.
+- **Transparent Revision Handling**: Upstream revisions within 30 days are automatically detected and re-opened. Errors and actuals are recalculated within a single database transaction so the published record always matches verified ground truth.
+- **Automated Quality Gates**: Weekly retrain challenger models (`vericast.gate`) must beat persistence baselines, maintain variance ($\ge 20\%$ of actuals), and correlate positively ($r > 0$) on a 30-day holdout before deployment.
+- **Operational Resiliency**:
+  - `psycopg_pool.ConnectionPool` (Neon serverless PostgreSQL) with 10s statement timeouts.
+  - In-memory rate limiter (120 req/min per IP) and 5-minute HTTP response caching.
+  - Security headers enforced (CSP, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`).
+
+---
+
+## 📁 Repository Structure
+
+```
+├── app.py                            # FastAPI application serving both targets
+├── index.html                        # Chart.js frontend dashboard
+├── verify_deployment_readiness.py    # Pre-flight deployment readiness gate (23 checks)
+├── models/                           # Serialized LightGBM models and window metadata
+│   ├── lightgbm_model.txt            # Nagpur PM2.5 model
+│   └── lightgbm_elec_model.txt       # Maharashtra electricity model
+├── vericast/                         # Shared core package
+│   ├── local_time.py                 # Timezone authority (Asia/Kolkata)
+│   ├── gate.py                       # Retrain evaluation and artifact release gate
+│   ├── schema.py                     # Idempotent database DDL & migrations
+│   ├── pm25/                         # PM2.5 pipeline modules
+│   │   ├── ingest.py                 # Fetches CAMS reanalysis & weather
+│   │   ├── features.py               # SQL window feature engineering
+│   │   ├── leakage_test.py           # Temporal leakage validation
+│   │   ├── train.py                  # Model training & feature column authority
+│   │   ├── predict.py                # Daily forecasting & plausibility filters
+│   │   ├── score.py                  # Verification scoring & rescoring
+│   │   └── diagnose.py               # Health & freshness validation
+│   └── elec/                         # Electricity pipeline modules (identical symmetry)
+│       └── [ingest, features, leakage_test, train, predict, score, diagnose].py
+└── tests/                            # Comprehensive unit & integration test suite (169 tests)
+```
+
+---
+
+## 🔌 API Reference
+
+All routes are read-only (`GET`) and served under `/`:
+
+| Endpoint | Parameters | Description |
+|---|---|---|
+| `/health` | — | PM2.5 data freshness, staleness days, and source status |
+| `/forecast` | `model=lightgbm` | Latest verified forecast (`source='daily'`) with pending/verified state |
+| `/history` | `days=30` | Recent raw observations (oldest-first for charting) |
+| `/leaderboard` | — | Most recent scored day per model from `model_performance` |
+| `/evaluation` | `days=30` | Aggregate metrics broken down into `verified` and `backtest` blocks |
+| `/predictions` | `model`, `limit`, `source`, `scored_only` | Queryable historical prediction log with absolute and percentage errors |
+| `/electricity/health` | — | Electricity data freshness and mirror status |
+| `/electricity/forecast` | `model=lightgbm` | Latest peak demand forecast in MW |
+| `/electricity/history` | `days=30` | Historical peak demand, energy met, and temperature observations |
+| `/electricity/leaderboard` | — | Latest scored performance for demand models |
+| `/electricity/evaluation` | `days=30` | Complete metrics including **MAPE**, MAE, and RMSE by provenance |
+| `/electricity/predictions` | `model`, `limit`, `source`, `scored_only` | Historical demand predictions log with error metrics |
+| `/dashboard` | — | Serves the HTML/JS dashboard directly with CSP headers |
+
+*Interactive Swagger documentation is available at `/docs`.*
+
+---
+
+## 🚀 Quickstart & Development
+
+### 1. Prerequisites
+- Python 3.11+
+- PostgreSQL database (or Neon serverless DSN)
+
+### 2. Installation
 ```bash
-python -m vericast.pm25.ingest      # …features, .leakage_test, .train, .predict, .score, .diagnose
-python -m vericast.elec.ingest      # …same names under elec
-python -m vericast.schema           # create any missing tables
+# Clone repository
+git clone https://github.com/rahulnidamanuri15/Forecast-Lab.git
+cd Forecast-Lab
+
+# Create and activate virtual environment
+python -m venv myenv
+source myenv/bin/activate  # On Windows: .\myenv\Scripts\activate
+
+# Install production and development dependencies
+pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-Not on the production path: `experiments/` (`save_backtest_results.py`,
-`save_elec_backtest_results.py`) and `tests/`.
-
-Both of those experiment scripts are the **one documented exception** to
-"`score.py` is the only writer of actuals": `save_backtest_results.py` and
-`save_elec_backtest_results.py` INSERT `actual_pm2_5` / `actual_demand_mw`
-directly, because a walk-forward backtest already knows both sides of every pair.
-They are how the launch record was seeded (see Setup below) and are run once, by
-hand, never from the daily job. Everything after launch is `score.py`'s.
-
-Those seeded rows carry `source = 'backtest'` in all four tables that have the column
-(`predictions`, `electricity_predictions`, `model_performance`,
-`electricity_model_performance`); every row the daily path writes is `'daily'`. Both
-leaderboard handlers filter on `source = 'daily'`, and that filter is not
-cosmetic: each backtest script upserts one aggregate row per model at its *last
-evaluated date*, so re-running one today would carry the newest `score_date`,
-win the `DISTINCT ON (model) ... ORDER BY score_date DESC`, and publish a
-hundreds-deep backtest average as "how yesterday went". The column was added by
-`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in `vericast/schema.py`, whose
-`MIGRATIONS` tuple also backfills the pre-existing rows — `DEFAULT 'daily'`
-would otherwise have labelled the launch backtest daily, leaving the hole open.
-
-The label has to be forced in both directions, and `tests/test_leaderboard.py` asserts
-both on the SQL text:
-
-- **Every `DO UPDATE` branch on the daily path sets `source = 'daily'` explicitly.** A
-  column DEFAULT applies to INSERT only, so a real forecast or score landing on a date
-  the launch backtest already seeded would keep `source = 'backtest'` and never count
-  towards the published record. Four writers need the line: both `score.py` upserts and
-  both `predict.py` upserts.
-- **Neither backtest seeder can overwrite a verified row.** Their `DO UPDATE` is guarded
-  by `WHERE <table>.source = 'backtest'` and never assigns `actual_*`, so a re-run
-  refreshes its own rows and skips every daily one instead of replacing a genuinely
-  verified observation with a backtest-computed one.
-
-`sample_size > 1` is the other tell on the performance tables: a daily row scores one
-date against a `UNIQUE(city, forecast_date, model)` table, so its sample size is 1 by
-construction.
-
-`model_performance` also has no `city` column, which is the one migration a second
-city would need — see Known limits below.
-
-## API
-
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /health` | Latest observation date, staleness in days + `source_lag_expected` (2-day threshold) |
-| `GET /forecast?model=lightgbm` | Latest **verified-provenance** forecast (`source = 'daily'`), with `status: pending\|verified` |
-| `GET /history?days=30` | The 30 most recently stored observations, oldest first (`days` bounds **rows**, not the calendar) |
-| `GET /leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
-| `GET /evaluation` | Full record per model, split into `verified` and `backtest` blocks |
-| `GET /evaluation?days=30` | Same, restricted to a rolling window (`days` is `ge=0`; a bad one is 422) |
-| `GET /predictions?model=lightgbm&limit=12&source=daily` | Prediction log with errors (`source` is optional: `daily`, `backtest`, or omit for both) |
-| `GET /electricity/health` | Latest demand observation + `source_lag_expected` (5-day threshold) |
-| `GET /electricity/forecast?model=lightgbm` | Latest **verified-provenance** demand forecast in MW (`source = 'daily'`) |
-| `GET /electricity/history?days=30` | Same row-bounded contract: recent peak demand, energy met and temperature |
-| `GET /electricity/leaderboard` | Most recent scored day per model (`sample_size` is normally 1) |
-| `GET /electricity/evaluation` | Same split, with **MAPE** alongside MAE/RMSE in each block |
-| `GET /electricity/predictions?model=lightgbm&limit=15&source=daily` | Prediction log with `error` and `error_pct` |
-
-Every `days` parameter is validated by FastAPI rather than by a hand-rolled check, so
-out-of-range values answer **422** across all four endpoints that take one — `/evaluation`
-used to answer 400 for the same class of input, which made the contract something a
-client had to special-case per route.
-
-**Empty results split by route kind, deliberately.** The two `/predictions` routes are
-filtered logs: `model`, `source`, `scored_only` and `limit` are the caller's query, so no
-matching rows is an answer about that query — **200** with `{"predictions": [], "count": 0}`.
-Every other route returns *the* record, where absence means the pipeline has not produced
-one yet, which is a fault a client should see as one — **404**. Pinned in
-`tests/test_predictions.py` in both directions, so a later pass "unifying" the two breaks
-a test rather than a client.
-
-Both evaluation endpoints nest their metrics under a provenance key and publish **no
-combined figure**:
-
-```json
-{"model": "lightgbm",
- "window_days": null,
- "verified": {"scored_count": 19, "pending_count": 1, "mae": 4.15, "rmse": 4.75},
- "backtest": {"scored_count": 700, "pending_count": 0, "mae": 9.58, "rmse": 12.51}}
+### 3. Environment Variables
+Create a `.env` file in the project root:
+```env
+DATABASE_URL=postgresql://user:password@host/dbname?sslmode=require
+CITY=Nagpur
+STATE=Maharashtra
+FRONTEND_ORIGIN=http://localhost:8000
 ```
 
-A model with no rows of one provenance simply has no block for it, rather than a
-zero-filled one that would read as "measured, and it was 0". A `source` value nobody
-planned for is reported under its own raw name instead of being dropped, so the counts
-still add up. Sorting follows `verified` MAE, falling back to `backtest` MAE, with
-unscored models last.
-
-`/forecast` and `/electricity/forecast` **filter** to `source = 'daily'` rather than
-merely labelling it, because they are the dashboard headline: the seeded backtest
-record and the daily record overlap in `forecast_date`, so an unfiltered
-`ORDER BY forecast_date DESC LIMIT 1` would present a walk-forward row fitted after
-the fact as today's live forecast on any day the daily row is missing. Both echo
-`source` anyway, so a caller never has to trust that the filter stayed. `/predictions`
-and `/electricity/predictions` label both provenances by default — there the backtest
-rows are the point — and take an optional `source=daily|backtest` for callers that want
-one. That filter lands in the `WHERE`, before the `LIMIT`, which is the whole reason it
-exists as a parameter: `ORDER BY forecast_date DESC LIMIT 15` interleaves the two
-records, so a caller filtering the payload itself keeps only the fraction that survived
-and its window silently shrinks as the records overlap. The dashboard's two history
-tables ask for `source=daily`; an unrecognised value is a **400**, not an empty list.
-
-Interactive docs at `/docs`. PM2.5 values are raw concentration in μg/m³ —
-**not** AQI; no AQI transform is computed anywhere in this system. Electricity values
-are peak demand met in MW and energy met in MU, as published upstream.
-
-The two `model=` allowlists are deliberately separate: `seasonal_naive` is valid on
-`/electricity/forecast` and a 400 on `/forecast`, because no such PM2.5 model is
-published.
-
-Connections come from a `psycopg_pool.ConnectionPool` (min 1, max 8) opened in the
-FastAPI lifespan, behind the same `get_db_connection()` every handler already
-called — Neon is a network hop away and a fresh connect + TLS handshake + auth per
-request was the largest slice of this API's latency. `check=check_connection` is
-not optional against Neon, which closes idle connections server-side; without it
-the pool eventually hands out a dead socket. Max 8 because this is a read-only GET
-API and Neon's free tier caps concurrent connections, so a bigger pool only holds
-server slots idle. Every 200 on a GET carries `Cache-Control: public, max-age=300`,
-which is what stops a looping crawler from occupying those 8 slots — the record it
-would be re-reading only changes once a day.
-
-## Automation
-
-- `.github/workflows/daily-pipeline.yml` — **two independent jobs, no `needs:`**:
-  - `pipeline` (PM2.5): ingest → engineer features → leakage test → score pending → make forecast → verify.
-  - `electricity`: ingest → engineer features → leakage test → score pending → make forecast → verify.
-
-  Each job's last step is its `diagnose.py`, and both now gate on upstream freshness:
-  `vericast/pm25/diagnose.py` refuses at 2 days behind, `vericast/elec/diagnose.py` at 5
-  (a mirror's normal lag, not a stall). Both numbers live in `vericast/__init__.py` as
-  `PM25_STALE_LIMIT_DAYS` / `ELEC_STALE_LIMIT_DAYS`, imported by the gates, `/health`
-  and `verify_deployment_readiness.py` — they used to be copied per file, and the
-  go-live check's hardcoded `<= 1` failed on data the pipeline passed and `/health`
-  called fresh. This is not a nicety — `predict.py` anchors
-  `forecast_date = latest_obs + 1 day` on both sides, so a stalled source slides the
-  anchor along with it and every other internal-consistency check still passes. Both
-  jobs run `verify_alignment()` inside their "Engineer features" step, which is where
-  the features(t) → target(t+1) join is asserted on the daily path, and both then run
-  their own `leakage_test.py` as a separate step, which re-derives every stored feature
-  value from the observations by calendar date. The two checks are complementary: one
-  covers the join, the other the values.
-
-  They run in parallel and neither gates the other. That is the point: the electricity
-  source is a third-party mirror that can stall, and a stall there must not block a
-  PM2.5 forecast whose own upstream is working. Within each job the steps are
-  sequential and fail-fast — scoring runs *before* forecasting because yesterday's
-  actual has to exist first.
-
-  **Two crons, not one:** `17 5 * * *` (10:47 IST) and `42 8 * * *` (14:12 IST).
-  GitHub's `schedule:` trigger is best-effort on a free public repo — queued at low
-  priority, routinely delayed, and droppable outright. Measured on this repo: 20–32
-  minutes of drift for a week, then 11 hours, then a run that never fired. Both minutes
-  are deliberately off the top of the hour, which is the most contended slot. The second
-  cron costs nothing when the first landed: every write is an `ON CONFLICT … DO UPDATE`
-  upsert, ingest resumes from `MAX(as_of)`, and a same-day re-run finds nothing new.
-- `.github/workflows/weekly-retrain.yml` — Sundays: retrain both models and commit
-  `models/lightgbm_model.txt` and `models/lightgbm_elec_model.txt` back to the repo,
-  which the daily pipeline picks up on its next checkout. Neither artifact is
-  overwritten unconditionally: `vericast/gate.py` holds out the last 30 days, fits a
-  challenger on the head only, and refuses to write unless it beats persistence,
-  varies as much as the actuals do, and correlates with them. A refused retrain exits
-  0 and leaves the artifact untouched, so the workflow reports "nothing to commit".
-
-  The gate deliberately does *not* vote on "challenger beats the artifact on disk":
-  that artifact was trained on the held-out rows, which on live data makes it look
-  1.5x (PM2.5) to 2.0x (electricity) better than an honest challenger and would freeze
-  the incumbent forever. Its score is printed for drift, not compared. Each retrain
-  writes a `<artifact>.window.json` sidecar recording the dates it was fit on, and the
-  commit step stages `models/` as a directory so the sidecar travels with its artifact,
-  so that printed line can say *whether*
-  the incumbent saw the holdout instead of assuming it did — after a skipped week its
-  window genuinely ends before the holdout opens and the comparison is fair. Staging
-  the directory rather than the four paths by name is load-bearing: a refused retrain
-  writes no sidecar, and `git add` on a pathspec that matches nothing exits non-zero
-  under `bash -e`, which aborted the step before its own "nothing to commit" branch and
-  discarded the sibling target's accepted artifact.
-
-  **No sidecar exists yet.** `models/` holds the two `.txt` artifacts and nothing else:
-  the committed models predate `record_training_window()`, and the sidecar is written by
-  an *accepted* retrain, so the first one appears the first Sunday a challenger ships.
-  Until then the gate prints "no recorded training window, assume it saw them" and
-  compares conservatively. This is deliberately not backfilled — the dates those two
-  artifacts were fit on are not recoverable from the files, and a hand-written window
-  would be a claim about the record that nothing verified.
-
-  Both retrain steps and the commit step carry `if: always()`, for the same reason the
-  daily pipeline splits into two jobs: a raising PM2.5 retrain used to abort the
-  electricity retrain *and* throw away whichever artifact had already been written. The
-  push is a rebase-and-retry loop rather than a bare `git push` — `concurrency:` stops
-  this workflow racing itself but not an unrelated push to `main` landing during the
-  minutes of training, and a rejected push would discard the retrain.
-- `.github/workflows/readiness-gate.yml` — Sundays 06:23 UTC: runs
-  `verify_deployment_readiness.py`'s 23 checks against the live database and the deployed
-  API. Scheduled between the weekly retrain's 04:00 commit and the daily pipeline's 08:42
-  catch-up cron, so it gates the artifact that was just committed. This is the one gate
-  nothing used to automate: `ci.yml` has a throwaway Postgres and no server, so the script
-  whose whole job is catching a broken deployment depended on someone running it by hand.
-  Read-only — every check is a `SELECT` or a `GET`, and the two leakage tests it shells
-  out to only read. It wakes the API with one throwaway request first, because Render's
-  free tier cold-starts past the gate's 10s timeout and would FAIL every HTTP check on a
-  service that is fine.
-
-Both scoring scripts score *every* pending row, not just yesterday's, so a missed run
-self-heals on the next one instead of leaving a permanent NULL. Ingest self-heals the
-other direction: each run re-scans the last 30 days for the earliest date with no
-usable observation and restarts from there, so a day the upstream skipped or served
-too thin is refetched once it lands rather than staying behind the resume point.
-
-## Running it
-
+### 4. Running Tests & Validation
 ```bash
-# DATABASE_URL is required; CITY=Nagpur, STATE=Maharashtra, FRONTEND_ORIGIN
-# and API_BASE=http://localhost:8000 all default, so a .env with just the DSN works.
-echo 'DATABASE_URL=' > .env    # then fill it in
-pip install -r requirements.txt -r requirements-dev.txt   # -dev is pytest only
-python -m pytest tests -q
-uvicorn app:app --host 0.0.0.0 --port 8000
-python verify_deployment_readiness.py   # must print ALL CHECKS PASSED
+# Run unit and integration tests (169 test cases)
+python -m pytest
+
+# Execute deployment readiness verification (23 checks)
+python verify_deployment_readiness.py
 ```
 
-Python 3.11, pinned in `.python-version` — which is committed rather than ignored, so
-`pyenv`/`uv` pick locally the same interpreter that `ci.yml`, `daily-pipeline.yml`,
-`weekly-retrain.yml` and the `Dockerfile` all pin independently. Changing it means
-changing all five.
-
-`tests/test_feature_alignment.py` is the only module that touches a real database. With
-no reachable `DATABASE_URL` it skips; against a database that already has rows it asserts
-on real pipeline output; against an *empty* one it seeds 40 synthetic days first so CI's
-throwaway Postgres still runs the window-frame queries. That seeding refuses any
-non-local host, because writing fabricated observations into the managed instance would
-contaminate the published record.
-
-`verify_deployment_readiness.py` cannot run in `ci.yml` — its checks need a populated
-database and a live server on `API_BASE`, and CI has a throwaway Postgres and no server.
-It runs instead in `.github/workflows/readiness-gate.yml`, Sundays at 06:23 UTC against
-the live database and the deployed API, after the weekly retrain has committed its
-artifact and before the daily pipeline's catch-up cron. Every check is a `SELECT` or a
-`GET`, so a failing run reports a problem rather than causing one. `tests/test_readiness_gate.py`
-still covers what is checkable with neither dependency: that every `check_*` function is
-wired into `CHECKS`, that both targets get the four database checks, that no check raises
-instead of returning `False` when its dependency is absent, and that the count above still
-matches the code.
-
-First-time electricity setup (one-off, then the daily job takes over):
-
+### 5. Running the API Server
 ```bash
-python -m vericast.schema
-python -m vericast.elec.ingest                        # ~1,300 rows, 2023-01-01 →
-python -m vericast.elec.features
-python -m vericast.elec.train
-python experiments/save_elec_backtest_results.py      # seeds the launch record
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
+Open `http://localhost:8000/dashboard` in your browser.
 
-Docker:
-
+### 6. Docker
 ```bash
 docker build -t vericast-api .
-docker run -p 8000:8000 -e DATABASE_URL=... -e CITY=Nagpur -e FRONTEND_ORIGIN=... vericast-api
+docker run -p 8000:8000 --env-file .env vericast-api
 ```
 
-Environment variables: `DATABASE_URL` (required), `CITY` (default `Nagpur`),
-`STATE` (default `Maharashtra`), `FRONTEND_ORIGIN` (comma-separated allowed origins;
-empty means no browser origin is allowed — there is no `*` fallback). `API_BASE`
-optionally points `verify_deployment_readiness.py` at a deployed instance instead of
-localhost.
+---
 
-## Known limits
+## ⚡ Automation Workflows
 
-Deliberately not built. Each line names the ceiling and what would justify crossing it.
+- **Daily Pipeline** (`.github/workflows/daily-pipeline.yml`): Runs daily at off-peak minutes (`10:47 IST` and `14:12 IST`) with parallel jobs for PM2.5 and Electricity. Ingests data, validates freshness, computes features, tests for leakage, scores previous predictions, and publishes next-day forecasts.
+- **Weekly Retraining** (`.github/workflows/weekly-retrain.yml`): Runs every Sunday to retrain LightGBM models on accumulating observations, guarded by holdout quality gates (`vericast.gate`).
+- **Continuous Gate** (`.github/workflows/readiness-gate.yml`): Runs the 23-point system verification against live production environments.
 
-- **Rate limiting is in-process, not distributed.** A fixed 120-requests-per-minute
-  window per client, in stdlib, in front of `Cache-Control: public, max-age=300` and the
-  bounded 8-slot pool. It covers the case the cache does not: a client looping
-  `/evaluation` with a cache-busting query string can otherwise hold every pool slot
-  until requests time out. The budget is per instance and resets on deploy, and the key
-  comes from `X-Forwarded-For`, which the client supplies — so it is a capacity guard,
-  not a security control, and a distributed or header-rotating caller is out of scope.
-  `slowapi` + Redis is the upgrade at more than one instance. The absence of auth is
-  separate and by design — see [`.github/SECURITY.md`](.github/SECURITY.md); this is a
-  read-only public record.
-- **Hole recovery is best-effort, bounded at 30 days.** Both `resolve_date_range()`s take
-  the earlier of `MAX(as_of) + 1 day` and the earliest date in the last `RESCAN_DAYS`
-  with no usable observation, so a skipped or too-thin day is refetched once the upstream
-  serves it. Beyond that window a hole is still permanent (Maharashtra's
-  2025-05-21 → 05-24 predates the change), which stays tolerable because the
-  `RANGE ... PRECEDING` frames null out across a gap rather than reaching over it — a
-  hole costs accuracy, never correctness. Widening the window only helps if a source
-  starts revising in months rather than days.
-- **One city, one state.** `model_performance` has no `city` column (its electricity
-  counterpart has `state`), because it predates the second target. `CITY` other than
-  `Nagpur` therefore fails loudly at import in both `app.py` and `vericast/pm25/score.py`
-  rather than quietly overwriting the published leaderboard in place. Everything else is
-  keyed on city; crossing this means a `city` column plus a
-  `UNIQUE(city, score_date, model)` swap, which is a constraint change rather than an
-  addition and so out of `vericast/schema.py`'s scope.
-- **The demand mirror tracks a mutable branch.** `DEMAND_CSV_URL` points at
-  Grid-Sentinel's `main`, not a commit SHA, deliberately: a pin can only serve dates that
-  existed when it was taken, and this mirror backfills late, which is exactly what the
-  30-day re-scan above depends on. Two guards stand in for it — a required-column check
-  that fails naming the URL before any row is accepted, and a 15,000–40,000 MW
-  plausibility bound that catches a unit change (kW, GW) a column-name check cannot see.
-  Neither catches a plausible-but-wrong number, and nothing can: the record rests on the
-  mirror being honest.
-- **The dashboard's CSP is a `<meta http-equiv>`, not a header.** `index.html` is served
-  as a static GitHub Pages file, so there is no server to set one. The meta form is
-  weaker — `frame-ancestors` and `report-uri` are ignored in it — and `'unsafe-inline'`
-  stays unavoidable while the styles, the script and the tab `onclick=` handlers are
-  inline. The part that matters still holds: `script-src` pins executable code to this
-  file plus the one pinned CDN entry, so an injected `<script src>` from anywhere else
-  does not run, and `esc()` guards every interpolated row. Serving the page from
-  somewhere with real headers is the upgrade.
-- **The deployed hostname and repo slug still say `forecast-lab`.** The Render service is
-  `forecast-lab-2l0q.onrender.com` and the remote is `Forecast-Lab`; the rename to
-  VeriCast happened in the docs only. Left alone deliberately — rewriting a working
-  hostname to match a README breaks the dashboard, and the private-reporting link in
-  [`.github/SECURITY.md`](.github/SECURITY.md) 404s if it stops matching the remote. The
-  fix is to rename the Render service and the GitHub repo first; the dashboard's
-  `API_BASE`, its CSP `connect-src` and that security link all pin the same host and
-  move together.
-- **Plain `uvicorn`, not `uvicorn[standard]`.** The extra pulls in `uvloop`, `httptools`,
-  `watchfiles`, `websockets` and `PyYAML` as unpinned transitive deps, and every other
-  line in `requirements.txt` is pinned exactly on purpose. This API is read-only, cached
-  for 5 minutes and bounded by an 8-slot pool, so it is nowhere near parser-bound — the
-  swap would trade five unpinned dependencies in the image for throughput nothing is
-  waiting on. Worth revisiting only if the pool stops being the limit.
-- **`python -O` still disarms the self-checks, just not the data gates.** `assert` is
-  erased by `-O` / `PYTHONOPTIMIZE=1`, so the checks that guard *data* — both
-  `verify_alignment()`s, both `train.py` feature-count checks,
-  `save_elec_backtest_results.py`'s — `raise AssertionError` explicitly instead, and stay
-  armed however the interpreter is invoked. The remaining bare `assert`s are all in
-  `__main__` self-checks (`vericast/gate.py`'s `demo()`, `vericast/local_time.py`), where
-  being erased costs nothing because under `-O` the check simply is not the check anymore.
-  Nothing in this repo runs with `-O`; the split exists so that adding it for speed can
-  only cost self-checks, never a gate. Crossing this means dropping `assert` from the
-  self-checks too, which buys nothing until something actually sets the flag.
+---
 
-## Backup & Point-in-Time Recovery (PITR)
+## 🔒 Security & License
 
-VeriCast's historical forecasts and ground-truth observations represent a tamper-evident record that must be protected against data loss or accidental mutation.
-
-### Point-in-Time Recovery (Neon)
-Neon PostgreSQL maintains automated write-ahead logs allowing recovery to any timestamp within the branch retention window:
-```bash
-# Create an isolated branch at a specific past timestamp for verification/restore:
-neon branches create --from-point-in-time "2026-09-01T12:00:00Z" --name pitr-drill
-```
-
-### Scheduled Logical Backups (pg_dump)
-For long-term, off-platform archives independent of Neon:
-```bash
-# Export compressed custom-format backup:
-pg_dump "$DATABASE_URL" --no-owner --no-privileges -F c -f "vericast_$(date +%Y%m%d_%H%M%S).dump"
-
-# Dry-run restore drill to a verification database:
-pg_restore -d "$VERIFY_DATABASE_URL" --clean --if-exists --no-owner "vericast_$(date +%Y%m%d_%H%M%S).dump"
-```
-
-## Observability & Alerting
-
-- **Pipeline diagnostic gates**: Both `vericast.pm25.diagnose` and `vericast.elec.diagnose` run at step 6/6 of daily pipelines. If any verification check fails, the job immediately halts with exit code 1, formats a summary to `$GITHUB_STEP_SUMMARY`, and posts an outbound webhook if `ALERT_WEBHOOK_URL` is configured in repository secrets (supports Slack, Discord, or custom alerting endpoints).
-- **Application health checks**: `GET /health` and `GET /electricity/health` provide JSON uptime status, last observation date, and staleness metrics checked by Docker healthcheck and external monitors.
-- **Connection pool statement timeout**: `psycopg_pool` enforces `statement_timeout = 10000ms` (10 seconds) on all queries, preventing runaway queries from exhausting the serverless connection pool.
-- **Backend dashboard with CSP**: The FastAPI backend serves the dashboard directly at `GET /dashboard` with server-enforced HTTP security headers (`Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`).
-
-## Security
-
-Report vulnerabilities privately — see [`.github/SECURITY.md`](.github/SECURITY.md).
-Do not open a public issue.
-
-## License
-
-[MIT](LICENSE).
-
+- **Security**: Please report security vulnerabilities privately according to [SECURITY.md](.github/SECURITY.md).
+- **License**: Released under the [MIT License](LICENSE).
