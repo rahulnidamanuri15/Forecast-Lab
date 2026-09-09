@@ -107,7 +107,8 @@ _rate_hits: dict = {}
 def over_rate_limit(key, now):
     """Return True if client has exceeded the request threshold in the current window."""
     global _rate_window_start, _rate_hits
-    if now - _rate_window_start >= RATE_LIMIT_WINDOW_SECONDS:
+    # Tolerance of 1 microsecond avoids IEEE-754 precision loss where (now + 60) - now < 60
+    if now - _rate_window_start >= RATE_LIMIT_WINDOW_SECONDS - 1e-6:
         _rate_window_start, _rate_hits = now, {}
     if key not in _rate_hits and len(_rate_hits) >= RATE_LIMIT_MAX_CLIENTS:
         key = ""  # shared overflow bucket; "" is not a reachable client key

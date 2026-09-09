@@ -70,6 +70,18 @@ def test_a_new_window_forgives():
     assert not over_rate_limit("5.5.5.5", now + RATE_LIMIT_WINDOW_SECONDS)
 
 
+def test_float_precision_at_window_boundary():
+    """Float arithmetic (now + 60) - now can equal 59.999999999999545 due to IEEE-754
+    rounding. The rate limiter must still forgive at the window boundary."""
+    import app as app_module
+    app_module._rate_window_start, app_module._rate_hits = 0.0, {}
+    now = 4069.196634241  # Known timestamp where (now + 60) - now < 60
+    for _ in range(RATE_LIMIT_MAX_REQUESTS + 5):
+        over_rate_limit("5.5.5.6", now)
+    assert over_rate_limit("5.5.5.6", now)
+    assert not over_rate_limit("5.5.5.6", now + RATE_LIMIT_WINDOW_SECONDS)
+
+
 def test_key_count_is_bounded_so_the_limiter_is_not_the_leak():
     """A caller rotating X-Forwarded-For must not grow the dict without limit."""
     now = fresh_window()
