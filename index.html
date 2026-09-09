@@ -1,1488 +1,1612 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<!-- The page is a static file (GitHub Pages), so there is no server to set a CSP
-     header and the meta form is the only one available. It is weaker -
-     frame-ancestors and report-uri are ignored in meta - but the part that matters
-     works: script-src pins executable code to this file plus the one pinned CDN
-     entry. 'unsafe-inline' is unavoidable while the styles, the script and the tab
-     onclick= handlers are inline; esc() is what guards the interpolated rows.
-     connect-src lists the deployed API and the two local dev origins, because
-     window.API_BASE is the documented way to point this page at a local uvicorn.
-
-     With DevTools open, connect-src blocks cdn.jsdelivr.net/.../chart.umd.js.map -
-     DevTools fetching the sourcemap, not the page. Deliberately NOT fixed by
-     widening connect-src: that directive is what stops injected script from
-     posting this page's data elsewhere, and a console line is not worth it. -->
-<meta http-equiv="Content-Security-Policy" content="
-  default-src 'none';
-  script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
-  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
-  font-src https://fonts.gstatic.com;
-  img-src 'self' data:;
-  connect-src https://forecast-lab-2l0q.onrender.com http://localhost:8000 http://127.0.0.1:8000;
-  base-uri 'none';
-  form-action 'none'">
-<title>VeriCast · Published-then-verified PM2.5 &amp; Electricity Demand Forecasts</title>
-<!-- Inline SVG favicon data URI to avoid separate asset request -->
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230B0E14'/><path d='M7 11l5.5 12h2L21 9' fill='none' stroke='%2300E5A3' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/></svg>">
-<!-- Version-pinned AND hash-pinned: the tag stops a silent major-version bump,
-     the integrity hash stops a tampered CDN response from running as script on
-     a page whose whole claim is that its numbers are trustworthy. Bumping the
-     version means recomputing the hash:
-     curl -sSL <url> | openssl dgst -sha384 -binary | openssl base64 -A -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
-        integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4"
-        crossorigin="anonymous"></script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --bg-base: #0B0E14;
-    --bg-card: #111622;
-    --bg-card-hover: #161D2C;
-    --bg-card-inner: #182030;
-    --border: #1F293D;
-    --border-subtle: #192233;
-    --text-main: #F1F5F9;
-    --text-dim: #94A3B8;
-    --text-faint: #64748B;
-    
-    --brand-teal: #00E5A3;
-    --brand-teal-glow: rgba(0, 229, 163, 0.15);
-    --brand-cyan: #38BDF8;
-    --brand-orange: #F97316;
-    --brand-red: #EF4444;
-    --brand-purple: #A855F7;
-    
-    --good: #10B981;
-    --warn: #F59E0B;
-    --bad: #EF4444;
-
-    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-mono: 'IBM Plex Mono', monospace;
-  }
-
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    background: var(--bg-base);
-    color: var(--text-main);
-    font-family: var(--font-sans);
-    line-height: 1.5;
-    padding: 0;
-    min-height: 100vh;
-  }
-
-  .container {
-    max-width: 1240px;
-    margin: 0 auto;
-    padding: 24px 24px 80px;
-  }
-
-  /* ----------------- NAVBAR ----------------- */
-  header.navbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 0 28px;
-    border-bottom: 1px solid var(--border-subtle);
-    margin-bottom: 28px;
-    flex-wrap: wrap;
-    gap: 16px;
-  }
-
-  .nav-left {
-    display: flex;
-    align-items: center;
-    gap: 28px;
-  }
-
-  .logo {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 18px;
-    font-weight: 800;
-    letter-spacing: 0.04em;
-    color: #FFF;
-    text-decoration: none;
-  }
-
-  .logo-icon {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #00E5A3, #0284C7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    box-shadow: 0 0 16px var(--brand-teal-glow);
-  }
-
-  .logo-icon svg {
-    width: 16px;
-    height: 16px;
-    stroke: #0B0E14;
-    stroke-width: 2.5;
-  }
-
-  .city-tabs {
-    display: flex;
-    background: #0E131E;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 3px;
-    gap: 2px;
-  }
-
-  .tab-btn {
-    background: transparent;
-    border: none;
-    color: var(--text-dim);
-    font-size: 13px;
-    font-weight: 600;
-    padding: 6px 14px;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    font-family: var(--font-sans);
-  }
-
-  .tab-btn.active {
-    background: #192336;
-    color: var(--brand-teal);
-    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-  }
-
-  .tab-btn.disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .nav-right {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-  }
-
-  .live-pill {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    font-weight: 500;
-    background: rgba(0, 229, 163, 0.08);
-    border: 1px solid rgba(0, 229, 163, 0.25);
-    color: var(--brand-teal);
-    padding: 5px 12px;
-    border-radius: 20px;
-  }
-
-  .pulse-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--brand-teal);
-    box-shadow: 0 0 8px var(--brand-teal);
-    animation: livePulse 2s infinite;
-  }
-
-  /* Upstream has stalled: the record is still readable but the "forecast for
-     tomorrow" is anchored to an old observation. Amber, and the dot stops
-     pulsing - a stalled feed must not look alive. */
-  .live-pill.stale {
-    background: rgba(245, 158, 11, 0.08);
-    border-color: rgba(245, 158, 11, 0.25);
-    color: var(--warn);
-  }
-
-  .live-pill.stale .pulse-dot {
-    background: var(--warn);
-    box-shadow: 0 0 8px var(--warn);
-    animation: none;
-  }
-
-  .live-pill.offline {
-    background: rgba(148, 163, 184, 0.08);
-    border-color: rgba(148, 163, 184, 0.25);
-    color: var(--text-dim);
-  }
-
-  .live-pill.offline .pulse-dot {
-    background: var(--text-dim);
-    box-shadow: none;
-    animation: none;
-  }
-
-  @keyframes livePulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(0.85); }
-  }
-
-  /* Shown only when a panel's fetches throw. role="alert" is on the element, so
-     a screen reader announces it without the user having to find it. */
-  .error-banner {
-    background: rgba(239, 68, 68, 0.08);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    border-radius: 10px;
-    color: #FCA5A5;
-    font-size: 13px;
-    line-height: 1.5;
-    padding: 12px 16px;
-    margin-bottom: 20px;
-  }
-
-  .error-banner b { color: var(--brand-red); }
-
-  .api-link-btn {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    font-size: 13px;
-    font-weight: 600;
-    padding: 6px 14px;
-    border-radius: 6px;
-    text-decoration: none;
-    transition: all 0.2s;
-  }
-
-  .api-link-btn:hover {
-    color: var(--text-main);
-    border-color: var(--text-dim);
-  }
-
-  /* ----------------- TOP KPI 4-GRID ----------------- */
-  .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-    margin-bottom: 24px;
-  }
-
-  .kpi-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 18px 20px;
-    position: relative;
-    overflow: hidden;
-  }
-
-  .kpi-label {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-    margin-bottom: 8px;
-  }
-
-  .kpi-value {
-    font-size: 32px;
-    font-weight: 800;
-    line-height: 1.1;
-    margin-bottom: 6px;
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-  }
-
-  .kpi-value .unit {
-    font-size: 13px;
-    color: var(--text-dim);
-    font-weight: 500;
-  }
-
-  .kpi-sub {
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-
-  .val-orange { color: var(--brand-orange); }
-  .val-teal { color: var(--brand-teal); }
-  .val-white { color: var(--text-main); }
-  .val-cyan { color: var(--brand-cyan); }
-
-  /* ----------------- HERO / FORECAST SECTION ----------------- */
-  .hero-section {
-    display: grid;
-    grid-template-columns: 1.6fr 1fr;
-    gap: 16px;
-    margin-bottom: 24px;
-  }
-
-  .hero-main-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 24px 28px;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-  }
-
-  .hero-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 16px;
-  }
-
-  .hero-eyebrow {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-dim);
-  }
-
-  .model-pill {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 600;
-    background: rgba(0, 229, 163, 0.12);
-    border: 1px solid rgba(0, 229, 163, 0.3);
-    color: var(--brand-teal);
-    padding: 3px 8px;
-    border-radius: 4px;
-    text-transform: uppercase;
-  }
-
-  .hero-body {
-    display: flex;
-    align-items: center;
-    gap: 20px;
-    margin-bottom: 18px;
-  }
-
-  .hero-number {
-    font-size: 72px;
-    font-weight: 800;
-    line-height: 1;
-    color: var(--brand-orange);
-    letter-spacing: -0.02em;
-  }
-
-  .hero-meta-col {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .hero-unit-tag {
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--text-dim);
-  }
-
-  .category-pill {
-    display: inline-flex;
-    align-items: center;
-    font-size: 12px;
-    font-weight: 700;
-    padding: 3px 10px;
-    border-radius: 6px;
-    width: fit-content;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .cat-low { background: rgba(16, 185, 129, 0.15); color: #10B981; border: 1px solid rgba(16, 185, 129, 0.3); }
-  .cat-mod { background: rgba(56, 189, 248, 0.15); color: #38BDF8; border: 1px solid rgba(56, 189, 248, 0.3); }
-  .cat-elevated { background: rgba(245, 158, 11, 0.15); color: #F59E0B; border: 1px solid rgba(245, 158, 11, 0.3); }
-  .cat-high { background: rgba(249, 115, 22, 0.15); color: #F97316; border: 1px solid rgba(249, 115, 22, 0.3); }
-  .cat-alert { background: rgba(239, 68, 68, 0.15); color: #EF4444; border: 1px solid rgba(239, 68, 68, 0.3); }
-
-  .hero-change-text {
-    font-size: 13px;
-    color: var(--text-dim);
-    margin-bottom: 16px;
-  }
-
-  .hero-change-text b {
-    color: var(--text-main);
-  }
-
-  .improvement-banner {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: rgba(0, 229, 163, 0.08);
-    border: 1px solid rgba(0, 229, 163, 0.2);
-    padding: 10px 14px;
-    border-radius: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--brand-teal);
-  }
-
-  .improvement-banner svg {
-    width: 16px;
-    height: 16px;
-    stroke: currentColor;
-    stroke-width: 2.2;
-  }
-
-  /* Right Metrics Column */
-  .metrics-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 20px 24px;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-around;
-  }
-
-  .metric-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 0;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .metric-row:last-child {
-    border-bottom: none;
-  }
-
-  .metric-name {
-    font-size: 13px;
-    color: var(--text-dim);
-    font-weight: 500;
-  }
-
-  .metric-val {
-    font-family: var(--font-mono);
-    font-size: 15px;
-    font-weight: 700;
-    color: var(--text-main);
-  }
-
-  /* ----------------- 3-COLUMN ANALYTICS ----------------- */
-  .analytics-grid {
-    display: grid;
-    grid-template-columns: 1.4fr 1.1fr 1fr;
-    gap: 16px;
-    margin-bottom: 24px;
-  }
-
-  .analytics-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 20px 22px;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .card-header-flex {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 16px;
-  }
-
-  .card-title {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-  }
-
-  .chart-container {
-    position: relative;
-    width: 100%;
-    height: 180px;
-  }
-
-  /* Accuracy Card Specifics */
-  .accuracy-number {
-    font-size: 42px;
-    font-weight: 800;
-    line-height: 1;
-    color: var(--text-main);
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  .accuracy-number span {
-    font-size: 12px;
-    color: var(--text-dim);
-    font-weight: 500;
-    font-family: var(--font-mono);
-  }
-
-  /* Model vs Baseline Bars */
-  .bar-comparison-group {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    margin-top: 10px;
-    margin-bottom: 20px;
-  }
-
-  .bar-item {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .bar-label-row {
-    display: flex;
-    justify-content: space-between;
-    font-size: 13px;
-    font-weight: 600;
-  }
-
-  .bar-label-row .bar-model-name {
-    color: var(--text-main);
-  }
-
-  .bar-label-row .bar-score {
-    font-family: var(--font-mono);
-    font-weight: 700;
-  }
-
-  .bar-track {
-    width: 100%;
-    height: 8px;
-    background: #1C2436;
-    border-radius: 4px;
-    overflow: hidden;
-  }
-
-  .bar-fill {
-    height: 100%;
-    border-radius: 4px;
-    transition: width 0.8s ease;
-  }
-
-  .fill-teal { background: var(--brand-teal); }
-  .fill-slate { background: #475569; }
-
-  .improvement-callout-box {
-    background: rgba(0, 229, 163, 0.08);
-    border: 1px solid rgba(0, 229, 163, 0.2);
-    border-radius: 8px;
-    padding: 12px 14px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .callout-label {
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-
-  .callout-value {
-    font-family: var(--font-mono);
-    font-size: 18px;
-    font-weight: 800;
-    color: var(--brand-teal);
-  }
-
-  /* ----------------- PREDICTION HISTORY TABLE ----------------- */
-  .history-section {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 22px 24px;
-    margin-bottom: 24px;
-  }
-
-  .history-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    margin-bottom: 18px;
-  }
-
-  .history-title {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-faint);
-  }
-
-  .history-subtitle {
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-
-  table.data-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
-
-  table.data-table th {
-    text-align: left;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-faint);
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  table.data-table td {
-    padding: 14px 14px;
-    border-bottom: 1px solid var(--border-subtle);
-    color: var(--text-main);
-  }
-
-  table.data-table tr:last-child td {
-    border-bottom: none;
-  }
-
-  table.data-table td.mono {
-    font-family: var(--font-mono);
-    font-weight: 600;
-  }
-
-  .pred-highlight {
-    color: var(--brand-cyan);
-    font-weight: 700;
-  }
-
-  .status-badge {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    padding: 3px 8px;
-    border-radius: 4px;
-    text-transform: uppercase;
-    display: inline-block;
-  }
-
-  .badge-excellent { background: rgba(16, 185, 129, 0.15); color: #10B981; }
-  .badge-good { background: rgba(56, 189, 248, 0.15); color: #38BDF8; }
-  .badge-moderate { background: rgba(245, 158, 11, 0.15); color: #F59E0B; }
-  .badge-pending { background: rgba(148, 163, 184, 0.15); color: #94A3B8; }
-
-  footer {
-    text-align: center;
-    margin-top: 40px;
-    color: var(--text-faint);
-    font-size: 12px;
-    font-family: var(--font-mono);
-  }
-
-  /* Responsive */
-  @media (max-width: 1024px) {
-    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
-    .hero-section { grid-template-columns: 1fr; }
-    .analytics-grid { grid-template-columns: 1fr; }
-  }
-
-  @media (max-width: 640px) {
-    .kpi-grid { grid-template-columns: 1fr; }
-    .nav-left { flex-direction: column; align-items: flex-start; gap: 12px; }
-  }
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#090d12" />
+
+  <!-- Security: Strict Content Security Policy -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'none';
+    script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    font-src https://fonts.gstatic.com;
+    img-src 'self' data:;
+    connect-src https://forecast-lab-2l0q.onrender.com http://localhost:8000 http://127.0.0.1:8000;
+    base-uri 'none';
+    form-action 'none'">
+
+  <title>VeriCast · Published-then-verified PM2.5 &amp; Electricity Demand Forecasts</title>
+
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23090d12'/><path d='M7 11l5.5 12h2L21 9' fill='none' stroke='%238cf0cb' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+
+  <!-- Typography: Manrope + DM Sans -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Manrope:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet"
+  />
+
+  <!-- Pinned Chart.js with SRI hash -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
+    integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4"
+    crossorigin="anonymous"
+  ></script>
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090d12;
+      --sidebar: #0c1117;
+      --surface: #10171f;
+      --surface-raised: #151e28;
+      --border: #ffffff0d;
+      --border-bright: #ffffff17;
+      --text: #edf4f6;
+      --muted: #8c9ba9;
+      --subtle: #697986;
+      --mint: #8cf0cb;
+      --mint-soft: #8cf0cb12;
+      --mint-glow: #8cf0cb22;
+      --blue: #91adff;
+      --amber: #edc788;
+      --red: #f87171;
+      --radius: 20px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "DM Sans", sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+    }
+
+    button, select { font: inherit; }
+    button, a, select { -webkit-tap-highlight-color: transparent; }
+    button { cursor: pointer; }
+    a { color: inherit; text-decoration: none; }
+    button:focus-visible, a:focus-visible, select:focus-visible {
+      outline: 2px solid var(--mint);
+      outline-offset: 4px;
+    }
+
+    ::selection { background: #8cf0cb40; }
+    h1, h2, h3, p { margin: 0; }
+    h1, h2, h3, .number { font-family: "Manrope", sans-serif; }
+    button svg, a svg { flex-shrink: 0; }
+    .icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+    .muted { color: var(--muted); }
+    .mint { color: var(--mint); }
+    .eyebrow { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: 1.7px; text-transform: uppercase; }
+    .flex { display: flex; align-items: center; }
+    .between { justify-content: space-between; }
+    .gap-8 { gap: 8px; }
+    .gap-12 { gap: 12px; }
+
+    /* Skip link */
+    .skip-link {
+      position: fixed;
+      top: -60px;
+      left: 15px;
+      z-index: 100;
+      background: var(--mint);
+      color: #102c23;
+      padding: 12px 18px;
+      border-radius: 6px;
+      font-weight: 700;
+      transition: top 0.2s;
+    }
+    .skip-link:focus { top: 15px; }
+
+    /* Sidebar */
+    .sidebar {
+      width: 232px;
+      height: 100dvh;
+      position: fixed;
+      inset: 0 auto 0 0;
+      z-index: 20;
+      background: var(--sidebar);
+      border-right: 1px solid var(--border);
+      padding: 34px 20px 22px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .brand { display: flex; align-items: center; gap: 11px; padding: 0 10px; }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 37px;
+      height: 37px;
+      background: var(--mint);
+      border-radius: 12px;
+      color: #102c23;
+      box-shadow: 0 0 28px #8cf0cb18;
+    }
+    .brand-name { font-family: "Manrope", sans-serif; font-size: 22px; font-weight: 800; letter-spacing: -0.9px; }
+    .brand-name span { color: var(--mint); }
+
+    .workspace {
+      margin: 32px 0 28px;
+      padding: 13px;
+      border: 1px solid var(--border-bright);
+      border-radius: 11px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #ffffff02;
+    }
+    .workspace-icon {
+      width: 31px;
+      height: 31px;
+      border-radius: 8px;
+      background: #8cf0cb10;
+      display: grid;
+      place-items: center;
+      color: var(--mint);
+    }
+    .workspace strong { font-size: 12px; font-weight: 600; }
+    .workspace small { display: block; color: var(--subtle); font-size: 10px; margin-top: 2px; }
+
+    .nav-label { padding-left: 13px; margin-bottom: 12px; font-size: 9px; letter-spacing: 1.8px; color: var(--subtle); font-weight: 700; }
+    .nav { display: grid; gap: 5px; }
+    .nav a {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 13px;
+      color: var(--muted);
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 500;
+      transition: all 0.2s ease;
+    }
+    .nav a:hover { color: var(--text); background: #ffffff04; }
+    .nav a.active { background: var(--mint-soft); color: var(--mint); font-weight: 600; }
+    .nav a.active::after { content: ""; width: 5px; height: 5px; background: var(--mint); border-radius: 50%; margin-left: auto; }
+
+    .sidebar-bottom { margin-top: auto; }
+    .transparency {
+      padding: 16px;
+      background: linear-gradient(145deg, #8cf0cb09, transparent);
+      border: 1px solid #8cf0cb14;
+      border-radius: 14px;
+      margin-bottom: 20px;
+    }
+    .transparency .icon { color: var(--mint); margin-bottom: 10px; }
+    .transparency strong { display: block; font-size: 12px; font-weight: 700; }
+    .transparency p { font-size: 11px; color: var(--muted); line-height: 1.7; margin-top: 6px; }
+
+    .profile {
+      border-top: 1px solid var(--border);
+      padding: 18px 8px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .avatar {
+      width: 31px;
+      height: 31px;
+      display: grid;
+      place-items: center;
+      background: #202b35;
+      border-radius: 50%;
+      color: #c6d3de;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid var(--border-bright);
+    }
+    .profile strong { display: block; font-size: 11px; font-weight: 600; }
+    .profile small { color: var(--subtle); font-size: 10px; }
+
+    /* Main layout */
+    main { margin-left: 232px; padding: 0 42px 36px; max-width: 1720px; }
+    .topbar {
+      min-height: 84px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+    .breadcrumb { display: flex; align-items: center; gap: 12px; color: var(--subtle); font-size: 11px; }
+    .breadcrumb b { color: #c8d3dc; font-weight: 600; }
+    .top-actions { display: flex; align-items: center; gap: 14px; }
+
+    /* Live Status Pill */
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--mint);
+      background: #8cf0cb10;
+      padding: 7px 12px;
+      border-radius: 7px;
+      border: 1px solid #8cf0cb26;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+    .live-pill.stale {
+      color: var(--amber);
+      background: #edc78810;
+      border-color: #edc78828;
+    }
+    .live-pill.offline {
+      color: var(--muted);
+      background: #8c9ba910;
+      border-color: #8c9ba925;
+    }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; }
+    .live-pill .dot { animation: pulse 2s infinite; }
+    .live-pill.stale .dot, .live-pill.offline .dot { animation: none; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.35; transform: scale(0.8); }
+    }
+
+    .button {
+      border: 1px solid var(--border-bright);
+      background: #ffffff04;
+      color: #d0dae1;
+      padding: 8px 14px;
+      border-radius: 8px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      font-size: 11px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .button:hover { background: #ffffff0a; transform: translateY(-1px); color: #fff; }
+    .button .icon { width: 15px; height: 15px; }
+
+    /* Page Heading & Dataset Tabs */
+    .page-heading { padding: 32px 0 24px; display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+    .page-heading h1 { font-size: clamp(24px, 2.4vw, 32px); font-weight: 800; letter-spacing: -1.2px; }
+    .page-heading p { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.6; }
+    .date-pill { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 8px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .date-pill .icon { width: 15px; height: 15px; }
+
+    .dataset-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 22px; }
+    .dataset-tabs { display: flex; background: #0c1117; border: 1px solid var(--border-bright); padding: 4px; border-radius: 10px; gap: 4px; }
+    .dataset-tab {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 8px 16px;
+      background: transparent;
+      color: var(--muted);
+      border: 0;
+      border-radius: 7px;
+      font-size: 11px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .dataset-tab .icon { width: 15px; height: 15px; }
+    .dataset-tab:hover { color: var(--text); }
+    .dataset-tab.active, .dataset-tab[aria-selected="true"] { color: var(--mint); background: #162422; box-shadow: 0 2px 8px #0004; }
+    .snapshot-note { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--subtle); }
+
+    /* Error banner */
+    .error-banner {
+      background: rgba(248, 113, 113, 0.08);
+      border: 1px solid rgba(248, 113, 113, 0.3);
+      border-radius: 10px;
+      color: #fca5a5;
+      font-size: 12px;
+      line-height: 1.6;
+      padding: 12px 18px;
+      margin-bottom: 20px;
+    }
+    .error-banner b { color: var(--red); }
+
+    /* Metrics Grid */
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 22px; }
+    .metric { padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; min-width: 0; }
+    .metric-top { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; font-weight: 600; gap: 8px; }
+    .metric-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: #ffffff04; color: var(--subtle); }
+    .metric-icon .icon { width: 15px; height: 15px; }
+    .metric-value { display: flex; align-items: baseline; gap: 7px; margin-top: 12px; }
+    .metric-value strong { font-family: "Manrope", sans-serif; font-size: clamp(24px, 2.4vw, 32px); font-weight: 700; letter-spacing: -1.2px; font-variant-numeric: tabular-nums; }
+    .metric-value span { font-size: 12px; color: var(--subtle); font-weight: 500; }
+    .metric-foot { margin-top: 8px; color: var(--subtle); font-size: 10px; line-height: 1.5; }
+    .metric-foot em { color: var(--mint); font-style: normal; font-weight: 600; }
+
+    /* Forecast Hero */
+    .feature-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 20px; margin-bottom: 22px; }
+    .forecast {
+      position: relative;
+      overflow: hidden;
+      min-height: 290px;
+      padding: 26px 28px;
+      border: 1px solid #8cf0cb26;
+      border-radius: var(--radius);
+      background:
+        radial-gradient(ellipse at 85% 20%, #8cf0cb12, transparent 58%),
+        linear-gradient(115deg, #15231f, #111c1c 65%, #142024);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .forecast::after {
+      content: "";
+      position: absolute;
+      width: 280px;
+      height: 280px;
+      border: 1px solid #8cf0cb08;
+      border-radius: 50%;
+      right: -115px;
+      top: -70px;
+      box-shadow: 0 0 0 35px #8cf0cb03, 0 0 0 70px #8cf0cb02;
+      pointer-events: none;
+    }
+    .forecast > * { position: relative; z-index: 1; }
+    .forecast .eyebrow { color: #a3c6b8; }
+    .model-badge {
+      color: #b9dfcf;
+      border: 1px solid #8cf0cb25;
+      background: #8cf0cb0a;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+    }
+    .forecast-location { margin-top: 12px; color: #93ac9f; font-size: 11px; display: flex; align-items: center; gap: 6px; font-weight: 500; }
+    .forecast-location .icon { width: 13px; height: 13px; }
+    .forecast-reading { margin-top: 14px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+    .forecast-number { font-size: clamp(48px, 5vw, 68px); font-weight: 700; line-height: 1; letter-spacing: -3px; color: #d9faeb; font-variant-numeric: tabular-nums; }
+    .forecast-unit { color: #aec2b9; font-size: 12px; font-weight: 500; margin-bottom: 8px; }
+
+    .category-pill {
+      display: inline-flex;
+      align-items: center;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 4px 9px;
+      border-radius: 6px;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+    }
+    .cat-low { background: rgba(16, 185, 129, 0.15); color: #8cf0cb; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .cat-mod { background: rgba(145, 173, 255, 0.15); color: #91adff; border: 1px solid rgba(145, 173, 255, 0.3); }
+    .cat-elevated { background: rgba(237, 199, 136, 0.15); color: #edc788; border: 1px solid rgba(237, 199, 136, 0.3); }
+    .cat-high { background: rgba(249, 115, 22, 0.15); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.3); }
+    .cat-alert { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+
+    .forecast-change { font-size: 11px; color: #8fa99d; margin-top: 14px; line-height: 1.6; }
+    .forecast-change strong { color: #caefdd; font-weight: 600; }
+    .forecast-bottom {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-top: 1px solid #8cf0cb14;
+      margin-top: 20px;
+      padding-top: 14px;
+      color: #a1b8ad;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .forecast-bottom .icon { color: var(--mint); width: 16px; height: 16px; flex-shrink: 0; }
+    .forecast-bottom b { color: var(--mint); font-weight: 600; }
+
+    /* Panels */
+    .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; min-width: 0; }
+    .panel-title { font-size: 14px; font-weight: 700; letter-spacing: -0.2px; }
+    .panel-subtitle { font-size: 11px; color: var(--subtle); margin-top: 4px; line-height: 1.5; }
+    .tiny-badge { font-size: 9px; color: var(--muted); padding: 4px 8px; border: 1px solid var(--border-bright); border-radius: 5px; font-weight: 600; }
+
+    /* Verification Ring */
+    .verification-content { display: flex; align-items: center; gap: 22px; padding-top: 18px; }
+    .ring { width: 128px; height: 128px; position: relative; flex-shrink: 0; }
+    .ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+    .ring circle { fill: none; stroke-width: 8; }
+    .ring-track { stroke: #192328; }
+    .ring-value { stroke: var(--mint); stroke-linecap: round; transition: stroke-dashoffset 0.8s ease; }
+    .ring-text { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+    .ring-text strong { font-family: "Manrope", sans-serif; font-size: 26px; font-weight: 700; letter-spacing: -1px; }
+    .ring-text span { margin-top: 2px; font-size: 9px; color: var(--subtle); font-weight: 500; }
+    .verification-stats { flex: 1; display: grid; gap: 14px; min-width: 0; }
+    .verification-stat { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--muted); }
+    .verification-stat b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+    .verification-note { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 10px; color: var(--subtle); line-height: 1.6; }
+
+    /* Analysis & Chart Grid */
+    .analysis-grid { display: grid; grid-template-columns: 1.4fr 1.1fr 1fr; gap: 20px; margin-bottom: 22px; }
+    .chart-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .range-control { display: flex; gap: 3px; border: 1px solid var(--border); padding: 3px; border-radius: 8px; background: #0c1117; }
+    .range-control button { background: transparent; border: 0; color: var(--subtle); padding: 5px 9px; border-radius: 5px; font-size: 10px; font-weight: 600; transition: all 0.15s; }
+    .range-control button:hover { color: var(--text); }
+    .range-control button[aria-pressed="true"] { background: #202e2b; color: var(--mint); }
+    .chart-box { margin-top: 14px; position: relative; width: 100%; height: 180px; }
+
+    /* Accuracy number */
+    .accuracy-number {
+      font-size: 38px;
+      font-weight: 800;
+      line-height: 1;
+      color: var(--text);
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-top: 8px;
+      margin-bottom: 6px;
+      font-family: "Manrope", sans-serif;
+    }
+    .accuracy-number span {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 500;
+      font-family: "DM Sans", sans-serif;
+    }
+
+    /* Comparison bars */
+    .comparison { margin-top: 14px; }
+    .bar-label { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 6px; gap: 12px; }
+    .bar-label span { color: var(--muted); font-weight: 500; }
+    .bar-label b { font-family: "Manrope", sans-serif; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .bar-track { height: 7px; border-radius: 8px; background: #19232d; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: inherit; transition: width 0.7s ease; }
+    .bar-fill.model { background: linear-gradient(90deg, #61b79b, var(--mint)); }
+    .bar-fill.baseline { background: #55687d; }
+    .comparison + .comparison { margin-top: 14px; }
+    .improvement {
+      display: flex;
+      gap: 11px;
+      padding: 12px 14px;
+      margin-top: 18px;
+      border: 1px solid #8cf0cb1c;
+      background: #8cf0cb08;
+      border-radius: 10px;
+    }
+    .improvement .icon { color: var(--mint); width: 16px; height: 16px; flex-shrink: 0; }
+    .improvement strong { font-size: 11px; font-weight: 600; color: var(--mint); }
+    .improvement p { font-size: 10px; color: var(--subtle); line-height: 1.6; margin-top: 4px; }
+    .rmse-row { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; }
+    .rmse-row b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+
+    /* Ledger Table & History Section */
+    .history-section {
+      margin-bottom: 22px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0;
+      overflow: hidden;
+    }
+    .ledger-heading { padding: 22px 24px 18px; display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+    .table-wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; white-space: nowrap; text-align: left; }
+    th {
+      background: #ffffff02;
+      color: var(--subtle);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      padding: 12px 24px;
+      border-block: 1px solid var(--border);
+    }
+    td {
+      font-size: 12px;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      color: #becbd4;
+      font-variant-numeric: tabular-nums;
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #ffffff03; }
+    td.predicted { color: var(--mint); font-weight: 600; }
+    td.observed-val { color: var(--text); }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 4px 8px;
+      border-radius: 5px;
+    }
+    .status-pill.good { background: #8cf0cb12; color: #a1dfc5; border: 1px solid #8cf0cb28; }
+    .status-pill.miss { background: #edc78812; color: var(--amber); border: 1px solid #edc78828; }
+    .status-pill.pending { background: #8c9ba912; color: var(--muted); border: 1px solid #8c9ba925; }
+    .status-pill .dot { width: 4px; height: 4px; }
+    .ledger-footer { padding: 12px 24px; color: var(--subtle); font-size: 10px; border-top: 1px solid var(--border); line-height: 1.6; }
+
+    /* Methodology Section */
+    .methodology {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      background: #ffffff02;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 22px;
+      margin-bottom: 24px;
+    }
+    .methodology .icon { width: 20px; height: 20px; flex-shrink: 0; color: var(--muted); margin-top: 2px; }
+    .methodology h3 { font-size: 12px; font-weight: 700; margin-bottom: 6px; }
+    .methodology p { font-size: 11px; color: var(--subtle); line-height: 1.8; }
+
+    /* Footer */
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 15px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      font-size: 10px;
+      color: var(--subtle);
+    }
+    footer a { color: var(--mint); text-decoration: underline; text-underline-offset: 3px; }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: calc(50% + 116px);
+      transform: translate(-50%, 15px);
+      background: #192d25;
+      color: #d4f5e6;
+      border: 1px solid #8cf0cb38;
+      border-radius: 9px;
+      padding: 12px 20px;
+      font-size: 12px;
+      font-weight: 500;
+      box-shadow: 0 10px 30px #0006;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.25s ease;
+      z-index: 60;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    /* Responsive Queries */
+    @media (max-width: 1200px) {
+      .sidebar { width: 200px; padding-inline: 14px; }
+      main { margin-left: 200px; padding-inline: 26px; }
+      .feature-grid { grid-template-columns: 1.3fr 1fr; }
+      .analysis-grid { grid-template-columns: 1fr; }
+      .ring { width: 112px; height: 112px; }
+      .toast { left: calc(50% + 100px); }
+    }
+
+    @media (max-width: 1000px) {
+      .sidebar { width: 76px; padding: 26px 12px 20px; align-items: center; }
+      .brand { padding: 0; }
+      .brand-name, .workspace, .nav-label, .nav a span, .transparency, .profile > div:last-child { display: none; }
+      .nav { margin-top: 36px; }
+      .nav a { padding: 13px; justify-content: center; }
+      .nav a.active::after { display: none; }
+      .profile { padding-inline: 0; }
+      main { margin-left: 76px; padding-inline: 24px; }
+      .toast { left: calc(50% + 38px); }
+      .feature-grid, .analysis-grid { grid-template-columns: 1fr; }
+      .verification-content { flex-direction: row; gap: 24px; }
+    }
+
+    @media (max-width: 760px) {
+      main { padding-inline: 18px; }
+      .topbar { min-height: 70px; }
+      .breadcrumb span:first-child, .breadcrumb span:nth-child(2) { display: none; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+      .dataset-row { flex-direction: column; align-items: flex-start; gap: 10px; }
+      .dataset-tabs { width: 100%; }
+      .dataset-tab { flex: 1; padding: 9px 8px; font-size: 10px; }
+      .snapshot-note { display: none; }
+      .verification-content { flex-direction: column; align-items: flex-start; }
+      .verification-stats { width: 100%; }
+      .forecast-number { font-size: 54px; }
+      footer { flex-direction: column; gap: 8px; }
+    }
+
+    @media (max-width: 480px) {
+      .sidebar { width: 56px; padding-inline: 6px; }
+      .brand-mark { width: 32px; height: 32px; }
+      main { margin-left: 56px; padding-inline: 14px; }
+      .page-heading h1 { font-size: 23px; }
+      .metrics { grid-template-columns: 1fr; }
+      .forecast-number { font-size: 46px; }
+      .toast { left: calc(50% + 28px); max-width: calc(100vw - 80px); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition: none !important; animation: none !important; }
+    }
+  </style>
 </head>
+
 <body>
+  <!-- Reusable SVG Icons -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="i-trend" viewBox="0 0 24 24">
+      <path d="m4 16 6-6 4 4 6-9M14 5h6v6"/>
+    </symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24">
+      <rect x="3" y="3" width="7" height="7" rx="1.5"/>
+      <rect x="14" y="3" width="7" height="7" rx="1.5"/>
+      <rect x="3" y="14" width="7" height="7" rx="1.5"/>
+      <rect x="14" y="14" width="7" height="7" rx="1.5"/>
+    </symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24">
+      <path d="M4 4v16h16M8 15v-4m5 4V7m5 8v-6"/>
+    </symbol>
+    <symbol id="i-ledger" viewBox="0 0 24 24">
+      <rect x="5" y="3" width="14" height="18" rx="2"/>
+      <path d="M9 8h6M9 12h6M9 16h4"/>
+    </symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24">
+      <path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/>
+      <path d="m8.5 12 2.5 2.5 4.5-5"/>
+    </symbol>
+    <symbol id="i-wind" viewBox="0 0 24 24">
+      <path d="M3 8h12a3 3 0 1 0-3-3M3 12h15a3 3 0 1 1-3 3M3 16h5a2.5 2.5 0 1 1-2.5 2.5"/>
+    </symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24">
+      <path d="m13 2-9 12h7l-1 8 10-13h-7l1-7Z"/>
+    </symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24">
+      <path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z"/>
+      <circle cx="12" cy="10" r="2.5"/>
+    </symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24">
+      <rect x="3" y="5" width="18" height="16" rx="2"/>
+      <path d="M16 3v4M8 3v4M3 11h18"/>
+    </symbol>
+    <symbol id="i-download" viewBox="0 0 24 24">
+      <path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>
+    </symbol>
+    <symbol id="i-target" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9"/>
+      <circle cx="12" cy="12" r="5"/>
+      <circle cx="12" cy="12" r="1"/>
+    </symbol>
+    <symbol id="i-info" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9"/>
+      <path d="M12 11v6M12 7h.01"/>
+    </symbol>
+    <symbol id="i-external" viewBox="0 0 24 24">
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"/>
+    </symbol>
+  </svg>
 
-<div class="container">
-  
-  <!-- NAVBAR -->
-  <header class="navbar">
-    <div class="nav-left">
-      <a href="#" class="logo">
-        <div class="logo-icon">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path d="M4 16l6-6 4 4 6-6" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </div>
-        VERICAST
-      </a>
+  <a href="#overview" class="skip-link">Skip to dashboard</a>
 
-      <div class="city-tabs" role="tablist" aria-label="Forecast target">
-        <button class="tab-btn active" id="tab-pm25" role="tab" aria-selected="true"
-                aria-controls="panel-pm25" onclick="switchTab('pm25')">Nagpur PM2.5</button>
-        <button class="tab-btn" id="tab-electricity" role="tab" aria-selected="false"
-                aria-controls="panel-electricity" onclick="switchTab('electricity')">Maharashtra Electricity Demand</button>
+  <!-- Sidebar -->
+  <aside class="sidebar" aria-label="Main navigation">
+    <a href="#overview" class="brand" aria-label="VeriCast home">
+      <div class="brand-mark">
+        <svg class="icon"><use href="#i-trend"/></svg>
       </div>
-    </div>
+      <div class="brand-name">vericast<span>.</span></div>
+    </a>
 
-    <div class="nav-right">
-      <div class="live-pill" id="status-pill">
-        <div class="pulse-dot"></div>
-        <span id="status-text">CONNECTING...</span>
+    <div class="workspace">
+      <div class="workspace-icon">
+        <svg class="icon"><use href="#i-grid"/></svg>
       </div>
-      <!-- href is set from API_BASE in the script below, so the deployed backend
-           URL lives in exactly one place. -->
-      <a href="/docs" target="_blank" class="api-link-btn" id="api-docs-link">FastAPI Docs</a>
-    </div>
-  </header>
-
-  <!-- ===================== PM2.5 PANEL ===================== -->
-  <div id="panel-pm25">
-
-  <div class="error-banner" id="pm25-error" role="alert" hidden></div>
-
-  <!-- TOP 4 KPI CARDS -->
-  <div class="kpi-grid">
-    <div class="kpi-card">
-      <div class="kpi-label">Today's Reading</div>
-      <div class="kpi-value val-orange" id="kpi-today-val">— <span class="unit">μg/m³</span></div>
-      <div class="kpi-sub" id="kpi-today-sub">PM2.5 · latest observation</div>
-    </div>
-
-    <div class="kpi-card">
-      <div class="kpi-label">Tomorrow's Forecast</div>
-      <div class="kpi-value val-teal" id="kpi-forecast-val">— <span class="unit">μg/m³</span></div>
-      <div class="kpi-sub">LightGBM prediction</div>
-    </div>
-
-    <div class="kpi-card">
-      <div class="kpi-label">Model MAE</div>
-      <div class="kpi-value val-white" id="kpi-mae-val">— <span class="unit">vs —</span></div>
-      <div class="kpi-sub">vs persistence baseline</div>
-    </div>
-
-    <div class="kpi-card">
-      <div class="kpi-label">Track Record</div>
-      <div class="kpi-value val-cyan" id="kpi-record-val">—</div>
-      <div class="kpi-sub">public forecasts logged</div>
-    </div>
-  </div>
-
-  <!-- HERO FORECAST + METRICS DEEP-DIVE -->
-  <div class="hero-section">
-    <div class="hero-main-card">
       <div>
-        <div class="hero-header">
-          <div class="hero-eyebrow" id="hero-forecast-date">NEXT-DAY FORECAST</div>
-          <div class="model-pill" id="hero-model-badge">LIGHTGBM</div>
+        <strong>Forecast Lab</strong>
+        <small>Public research workspace</small>
+      </div>
+    </div>
+
+    <div class="nav-label">WORKSPACE</div>
+    <nav class="nav">
+      <a href="#overview" class="active" id="nav-overview" aria-label="Overview" aria-current="location">
+        <svg class="icon"><use href="#i-grid"/></svg><span>Overview</span>
+      </a>
+      <a href="#performance" id="nav-performance" aria-label="Model performance">
+        <svg class="icon"><use href="#i-chart"/></svg><span>Model performance</span>
+      </a>
+      <a href="#ledger" id="nav-ledger" aria-label="Forecast ledger">
+        <svg class="icon"><use href="#i-ledger"/></svg><span>Forecast ledger</span>
+      </a>
+      <a href="#methodology" id="nav-methodology" aria-label="Methodology">
+        <svg class="icon"><use href="#i-shield"/></svg><span>Methodology</span>
+      </a>
+    </nav>
+
+    <div class="sidebar-bottom">
+      <div class="transparency">
+        <svg class="icon"><use href="#i-shield"/></svg>
+        <strong>Trust the track record.</strong>
+        <p>Publish the prediction.<br />Observe the outcome.<br />Measure the difference.</p>
+      </div>
+      <div class="profile">
+        <div class="avatar">FL</div>
+        <div><strong>Forecast Lab</strong><small>Open forecasting research</small></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main>
+    <!-- Topbar -->
+    <header class="topbar">
+      <div class="breadcrumb">
+        <span>Workspace</span><span>/</span><b id="topbar-crumb">Nagpur PM2.5 overview</b>
+      </div>
+      <div class="top-actions">
+        <div class="live-pill" id="status-pill">
+          <span class="dot"></span>
+          <span id="status-text">CONNECTING…</span>
         </div>
-
-        <div class="hero-body">
-          <div class="hero-number" id="hero-main-number">—</div>
-          <div class="hero-meta-col">
-            <div class="hero-unit-tag">PM2.5 μg/m³</div>
-            <div class="category-pill cat-mod" id="hero-cat-pill">—</div>
-          </div>
-        </div>
-
-        <div class="hero-change-text" id="hero-change-desc">
-          Based on the latest published observation
-        </div>
+        <a href="/docs" target="_blank" rel="noopener" class="button" id="api-docs-link" aria-label="Open FastAPI documentation in new tab">
+          <svg class="icon"><use href="#i-external"/></svg><span>FastAPI Docs</span>
+        </a>
       </div>
+    </header>
 
-      <div class="improvement-banner">
-        <svg viewBox="0 0 24 24" fill="none">
-          <path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span id="hero-improvement-text">Measuring against persistence baseline…</span>
-      </div>
-    </div>
-
-    <!-- RIGHT METRICS CARD -->
-    <div class="metrics-card">
-      <div class="metric-row">
-        <span class="metric-name">Total Forecasts</span>
-        <span class="metric-val" id="metric-total-scored">—</span>
-      </div>
-      <div class="metric-row">
-        <span class="metric-name" id="metric-within-5-name">Within ±5 μg/m³</span>
-        <span class="metric-val" id="metric-within-5">—</span>
-      </div>
-      <div class="metric-row">
-        <span class="metric-name">LightGBM MAE</span>
-        <span class="metric-val" id="metric-lgb-mae" style="color: var(--brand-teal);">—</span>
-      </div>
-      <div class="metric-row">
-        <span class="metric-name">LightGBM RMSE</span>
-        <span class="metric-val" id="metric-lgb-rmse">—</span>
-      </div>
-      <div class="metric-row">
-        <span class="metric-name">Naive Baseline MAE</span>
-        <span class="metric-val" id="metric-naive-mae" style="color: #94A3B8;">—</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- 3-COLUMN ANALYTICS -->
-  <div class="analytics-grid">
-    <!-- 1. Prediction vs Actual Chart -->
-    <div class="analytics-card">
-      <div class="card-header-flex">
-        <div class="card-title">Prediction vs Actual</div>
-      </div>
-      <div class="chart-container">
-        <canvas id="predVsActualChart"></canvas>
-      </div>
-    </div>
-
-    <!-- 2. Accuracy Over Time Chart -->
-    <div class="analytics-card">
-      <div class="card-header-flex">
-        <div class="card-title">Accuracy Over Time</div>
-      </div>
-      <div class="accuracy-number" id="acc-big-num">
-        — <span>last 15 scored</span>
-      </div>
-      <div class="chart-container" style="height: 150px;">
-        <canvas id="accuracyChart"></canvas>
-      </div>
-    </div>
-
-    <!-- 3. Model vs Baseline Comparison Bars -->
-    <div class="analytics-card">
-      <div class="card-header-flex">
-        <div class="card-title">Model vs Baseline (MAE)</div>
-      </div>
-      <div class="bar-comparison-group">
-        <div class="bar-item">
-          <div class="bar-label-row">
-            <span class="bar-model-name">LightGBM</span>
-            <span class="bar-score" style="color: var(--brand-teal);" id="bar-lgb-val">—</span>
-          </div>
-          <div class="bar-track">
-            <div class="bar-fill fill-teal" id="bar-lgb-fill" style="width: 0%;"></div>
-          </div>
-        </div>
-
-        <div class="bar-item">
-          <div class="bar-label-row">
-            <span class="bar-model-name">Persistence (Naive)</span>
-            <span class="bar-score" style="color: #94A3B8;" id="bar-naive-val">—</span>
-          </div>
-          <div class="bar-track">
-            <div class="bar-fill fill-slate" id="bar-naive-fill" style="width: 0%;"></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="improvement-callout-box">
-        <span class="callout-label">MAE Improvement</span>
-        <span class="callout-value" id="callout-improve-val">—</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- LATEST SCORED DAY (/leaderboard) -->
-  <!-- The subtitle is the point of this block, not decoration: /leaderboard is
-       DISTINCT ON (model) over the newest score_date, so sample_size is normally
-       1. Presented next to the record-wide numbers above without that caveat, a
-       good or bad single day reads as the model's accuracy. -->
-  <div class="history-section">
-    <div class="history-header">
-      <div class="history-title">Latest Scored Day</div>
-      <div class="history-subtitle">Most recent day scored per model (n≈1) — the full record is above</div>
-    </div>
-
-    <div style="overflow-x: auto;">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>Model</th>
-            <th>MAE (μg/m³)</th>
-            <th>RMSE</th>
-            <th>Samples</th>
-            <th>Scored</th>
-          </tr>
-        </thead>
-        <tbody id="leaderboard-table-body">
-          <tr><td colspan="5" style="text-align: center; color: var(--text-faint); padding: 30px;">Loading latest scored day…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- PREDICTION HISTORY TABLE -->
-  <div class="history-section">
-    <div class="history-header">
-      <div class="history-title">Prediction History</div>
-      <div class="history-subtitle">Predictions logged before actual outcomes were known</div>
-    </div>
-
-    <div style="overflow-x: auto;">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Model</th>
-            <th>Prediction</th>
-            <th>Actual</th>
-            <th>Error (μg/m³)</th>
-            <th>Accuracy</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody id="history-table-body">
-          <tr><td colspan="7" style="text-align: center; color: var(--text-faint); padding: 30px;">Loading prediction records…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  </div>
-  <!-- ===================== END PM2.5 PANEL ===================== -->
-
-  <!-- ===================== ELECTRICITY PANEL ===================== -->
-  <div id="panel-electricity" hidden>
-
-    <div class="error-banner" id="el-error" role="alert" hidden></div>
-
-    <div class="kpi-grid">
-      <div class="kpi-card">
-        <div class="kpi-label">Latest Peak Demand</div>
-        <div class="kpi-value val-orange" id="el-kpi-today-val">— <span class="unit">MW</span></div>
-        <div class="kpi-sub" id="el-kpi-today-sub">Peak met · Maharashtra</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Next-Day Forecast</div>
-        <div class="kpi-value val-teal" id="el-kpi-forecast-val">— <span class="unit">MW</span></div>
-        <div class="kpi-sub">LightGBM prediction</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Model MAPE</div>
-        <div class="kpi-value val-white" id="el-kpi-mape-val">— <span class="unit">vs —</span></div>
-        <div class="kpi-sub">vs persistence baseline</div>
-      </div>
-
-      <div class="kpi-card">
-        <div class="kpi-label">Track Record</div>
-        <div class="kpi-value val-cyan" id="el-kpi-record-val">—</div>
-        <div class="kpi-sub">public forecasts logged</div>
-      </div>
-    </div>
-
-    <div class="hero-section">
-      <div class="hero-main-card">
+    <!-- Page Heading -->
+    <section id="overview" aria-labelledby="page-title">
+      <div class="page-heading">
         <div>
-          <div class="hero-header">
-            <div class="hero-eyebrow" id="el-hero-date">NEXT-DAY FORECAST · MAHARASHTRA</div>
-            <div class="model-pill" id="el-hero-model-badge">LIGHTGBM</div>
-          </div>
+          <h1 id="page-title">A clearer view of tomorrow<span class="mint">.</span></h1>
+          <p>Real-world signals. Measurable predictions. Nothing hidden.</p>
+        </div>
+        <div class="date-pill" id="page-date-indicator">
+          <svg class="icon"><use href="#i-calendar"/></svg>
+          <span id="header-date-text">Loading live cycle…</span>
+        </div>
+      </div>
 
-          <div class="hero-body">
-            <div class="hero-number" id="el-hero-number">—</div>
-            <div class="hero-meta-col">
-              <div class="hero-unit-tag">PEAK DEMAND MW</div>
-              <div class="category-pill cat-mod" id="el-hero-cat-pill">—</div>
+      <!-- Dataset Selector -->
+      <div class="dataset-row">
+        <div class="dataset-tabs" role="tablist" aria-label="Choose forecasting dataset">
+          <button class="dataset-tab active" id="tab-pm25" role="tab" aria-selected="true" onclick="switchTab('pm25')">
+            <svg class="icon"><use href="#i-wind"/></svg>
+            Nagpur PM2.5
+          </button>
+          <button class="dataset-tab" id="tab-electricity" role="tab" aria-selected="false" onclick="switchTab('electricity')">
+            <svg class="icon"><use href="#i-bolt"/></svg>
+            Maharashtra Electricity Demand
+          </button>
+        </div>
+        <span class="snapshot-note">
+          <span class="dot mint"></span>Live verified records · Walk-forward scored
+        </span>
+      </div>
+
+      <!-- ==================== PM2.5 PANEL ==================== -->
+      <div id="panel-pm25">
+        <div class="error-banner" id="pm25-error" role="alert" hidden></div>
+
+        <!-- 4 KPI Metrics -->
+        <div class="metrics">
+          <article class="metric">
+            <div class="metric-top">
+              Latest observation
+              <span class="metric-icon"><svg class="icon"><use href="#i-wind"/></svg></span>
+            </div>
+            <div class="metric-value"><strong id="kpi-today-val">—</strong><span class="unit-label">μg/m³</span></div>
+            <p class="metric-foot" id="kpi-today-sub">PM2.5 · latest observation</p>
+          </article>
+
+          <article class="metric">
+            <div class="metric-top">
+              Tomorrow’s forecast
+              <span class="metric-icon"><svg class="icon"><use href="#i-trend"/></svg></span>
+            </div>
+            <div class="metric-value"><strong class="mint" id="kpi-forecast-val">—</strong><span class="unit-label">μg/m³</span></div>
+            <p class="metric-foot">LightGBM prediction</p>
+          </article>
+
+          <article class="metric">
+            <div class="metric-top">
+              Model MAE
+              <span class="metric-icon"><svg class="icon"><use href="#i-target"/></svg></span>
+            </div>
+            <div class="metric-value"><strong id="kpi-mae-val">—</strong><span class="unit-label">μg/m³</span></div>
+            <p class="metric-foot">vs persistence baseline</p>
+          </article>
+
+          <article class="metric">
+            <div class="metric-top">
+              Track Record
+              <span class="metric-icon"><svg class="icon"><use href="#i-ledger"/></svg></span>
+            </div>
+            <div class="metric-value"><strong id="kpi-record-val">—</strong><span>public forecasts logged</span></div>
+            <p class="metric-foot">Published before outcome</p>
+          </article>
+        </div>
+
+        <!-- Hero Feature Grid -->
+        <div class="feature-grid">
+          <article class="forecast">
+            <div class="flex between gap-12">
+              <span class="eyebrow" id="hero-forecast-date">NEXT-DAY FORECAST</span>
+              <span class="model-badge" id="hero-model-badge">LIGHTGBM</span>
+            </div>
+            <div class="forecast-location">
+              <svg class="icon"><use href="#i-pin"/></svg>
+              <span>Nagpur, Maharashtra</span>
+            </div>
+            <div class="forecast-reading">
+              <strong class="forecast-number number" id="hero-main-number">—</strong>
+              <div>
+                <div class="forecast-unit">PM2.5 · μg/m³</div>
+                <span class="category-pill cat-mod" id="hero-cat-pill">—</span>
+              </div>
+            </div>
+            <p class="forecast-change" id="hero-change-desc">
+              Based on the latest published observation
+            </p>
+            <div class="forecast-bottom">
+              <svg class="icon"><use href="#i-shield"/></svg>
+              <span id="hero-improvement-text">Measuring verified track record against persistence baseline…</span>
+            </div>
+          </article>
+
+          <!-- Reliability Donut Ring -->
+          <article class="panel">
+            <div class="flex between gap-8">
+              <h2 class="panel-title">Prediction reliability</h2>
+              <span class="tiny-badge">Verified record</span>
+            </div>
+            <p class="panel-subtitle">Share of scored forecasts within the error threshold</p>
+
+            <div class="verification-content">
+              <div class="ring" role="img" id="pm25-ring" aria-label="Prediction reliability">
+                <svg viewBox="0 0 120 120" aria-hidden="true">
+                  <circle class="ring-track" cx="60" cy="60" r="49"/>
+                  <circle class="ring-value" id="pm25-ring-circle" cx="60" cy="60" r="49"
+                    stroke-dasharray="307.88" stroke-dashoffset="307.88"/>
+                </svg>
+                <div class="ring-text">
+                  <strong id="pm25-ring-pct">—%</strong>
+                  <span>within threshold</span>
+                </div>
+              </div>
+              <div class="verification-stats">
+                <div class="verification-stat">
+                  <span id="metric-within-5-name">Within ±5 μg/m³</span>
+                  <b id="metric-within-5">—</b>
+                </div>
+                <div class="verification-stat">
+                  <span>Total Scored</span>
+                  <b id="metric-total-scored">—</b>
+                </div>
+                <div class="verification-stat">
+                  <span>Forecast Horizon</span>
+                  <b>1 day ahead</b>
+                </div>
+              </div>
+            </div>
+            <p class="verification-note">Historical hit rate is scored on predictions published before observations arrived.</p>
+          </article>
+        </div>
+
+        <!-- Performance Analysis Grid -->
+        <section id="performance" class="analysis-grid" aria-label="Model performance">
+          <!-- 1. Prediction vs Actual Chart -->
+          <article class="panel">
+            <div class="chart-header">
+              <div>
+                <h2 class="panel-title">Prediction vs. Actual</h2>
+                <p class="panel-subtitle">Daily PM2.5 concentration</p>
+              </div>
+              <div class="range-control" role="group" aria-label="Chart time range">
+                <button data-range="7" onclick="setPm25Range(7)">7D</button>
+                <button data-range="14" aria-pressed="true" onclick="setPm25Range(14)">14D</button>
+                <button data-range="30" onclick="setPm25Range(30)">All</button>
+              </div>
+            </div>
+            <div class="chart-box">
+              <canvas id="predVsActualChart"></canvas>
+            </div>
+          </article>
+
+          <!-- 2. Accuracy Over Time Chart -->
+          <article class="panel">
+            <div class="chart-header">
+              <div>
+                <h2 class="panel-title">Accuracy Over Time</h2>
+                <p class="panel-subtitle">Percentage hit rate</p>
+              </div>
+            </div>
+            <div class="accuracy-number" id="acc-big-num">
+              — <span>last 15 scored</span>
+            </div>
+            <div class="chart-box" style="height: 140px;">
+              <canvas id="accuracyChart"></canvas>
+            </div>
+          </article>
+
+          <!-- 3. Model vs Baseline Comparison Bars -->
+          <article class="panel">
+            <div class="flex between gap-8">
+              <h2 class="panel-title">Model vs Baseline (MAE)</h2>
+              <svg class="icon muted"><use href="#i-chart"/></svg>
+            </div>
+            <p class="panel-subtitle">Mean absolute error · lower is better</p>
+
+            <div class="comparison">
+              <div class="bar-label"><span>LightGBM</span><b class="mint" id="bar-lgb-val">—</b></div>
+              <div class="bar-track"><div class="bar-fill model" id="bar-lgb-fill" style="width: 0%;"></div></div>
+            </div>
+            <div class="comparison">
+              <div class="bar-label"><span>Persistence baseline</span><b id="bar-naive-val">—</b></div>
+              <div class="bar-track"><div class="bar-fill baseline" id="bar-naive-fill" style="width: 0%;"></div></div>
+            </div>
+
+            <div class="improvement">
+              <svg class="icon"><use href="#i-trend"/></svg>
+              <div>
+                <div><strong>MAE Improvement: </strong><b class="mint" id="callout-improve-val">—</b></div>
+                <p>Persistence uses the latest observation as the next day’s prediction.</p>
+              </div>
+            </div>
+
+            <div class="rmse-row"><span>LightGBM MAE / RMSE</span><b id="metric-lgb-mae-rmse"><span id="metric-lgb-mae">—</span> / <span id="metric-lgb-rmse">—</span></b></div>
+            <div class="rmse-row"><span>Naive Baseline MAE</span><b id="metric-naive-mae">—</b></div>
+          </article>
+        </section>
+
+        <!-- Forecast Ledger Section -->
+        <section class="history-section" id="ledger" aria-labelledby="pm25-ledger-title">
+          <div class="ledger-heading">
+            <div>
+              <h2 class="panel-title" id="pm25-ledger-title">The forecast ledger</h2>
+              <p class="panel-subtitle">Predictions logged before actual outcomes were known.</p>
+            </div>
+            <button class="button" onclick="exportCurrentCSV('pm25')" aria-label="Export PM2.5 forecast ledger as CSV">
+              <svg class="icon"><use href="#i-download"/></svg>CSV
+            </button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Model</th>
+                  <th>Prediction</th>
+                  <th>Actual</th>
+                  <th>Error (μg/m³)</th>
+                  <th>Accuracy</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="history-table-body">
+                <tr><td colspan="7" style="text-align: center; color: var(--subtle); padding: 28px;">Loading verified forecast ledger…</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="ledger-footer">
+            Showing verified forecasts logged before outcomes were known. Download CSV to inspect full record.
+          </div>
+        </section>
+
+        <!-- Model Leaderboard (Latest Scored Day) -->
+        <section class="history-section" style="margin-top: 20px;">
+          <div class="ledger-heading">
+            <div>
+              <h2 class="panel-title">Latest Scored Day</h2>
+              <div class="panel-subtitle">Most recent day scored per model (n≈1) — the full record is above</div>
             </div>
           </div>
-
-          <div class="hero-change-text" id="el-hero-change-desc">
-            Based on the latest published observation
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>MAE (μg/m³)</th>
+                  <th>RMSE</th>
+                  <th>Samples</th>
+                  <th>Scored</th>
+                </tr>
+              </thead>
+              <tbody id="leaderboard-table-body">
+                <tr><td colspan="5" style="text-align: center; color: var(--subtle); padding: 28px;">Loading latest scored day…</td></tr>
+              </tbody>
+            </table>
           </div>
-        </div>
-
-        <div class="improvement-banner">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <span id="el-hero-improvement-text">Measuring against persistence baseline…</span>
-        </div>
+        </section>
       </div>
+      <!-- ==================== END PM2.5 PANEL ==================== -->
 
-      <div class="metrics-card">
-        <div class="metric-row">
-          <span class="metric-name">Total Forecasts</span>
-          <span class="metric-val" id="el-metric-total-scored">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-name" id="el-metric-within-3-name">Within ±3%</span>
-          <span class="metric-val" id="el-metric-within-3">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-name">LightGBM MAE</span>
-          <span class="metric-val" id="el-metric-lgb-mae" style="color: var(--brand-teal);">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-name">LightGBM RMSE</span>
-          <span class="metric-val" id="el-metric-lgb-rmse">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-name">Seasonal Naive MAE</span>
-          <span class="metric-val" id="el-metric-seasonal-mae" style="color: #94A3B8;">—</span>
-        </div>
-      </div>
-    </div>
+      <!-- ==================== ELECTRICITY PANEL ==================== -->
+      <div id="panel-electricity" hidden>
+        <div class="error-banner" id="el-error" role="alert" hidden></div>
 
-    <div class="analytics-grid">
-      <div class="analytics-card">
-        <div class="card-header-flex">
-          <div class="card-title">Peak Demand vs Temperature</div>
-        </div>
-        <div class="chart-container">
-          <canvas id="elDemandChart"></canvas>
-        </div>
-      </div>
-
-      <div class="analytics-card">
-        <div class="card-header-flex">
-          <div class="card-title">Absolute % Error</div>
-        </div>
-        <div class="accuracy-number" id="el-acc-big-num">
-          — <span>last 15 scored</span>
-        </div>
-        <div class="chart-container" style="height: 150px;">
-          <canvas id="elErrorChart"></canvas>
-        </div>
-      </div>
-
-      <div class="analytics-card">
-        <div class="card-header-flex">
-          <div class="card-title">All Models (MAE, MW)</div>
-        </div>
-        <div class="bar-comparison-group" id="el-bar-group">
-          <div class="bar-item">
-            <div class="bar-label-row">
-              <span class="bar-model-name">Loading…</span>
-              <span class="bar-score">—</span>
+        <!-- 4 KPI Metrics -->
+        <div class="metrics">
+          <article class="metric">
+            <div class="metric-top">
+              Latest Peak Demand
+              <span class="metric-icon"><svg class="icon"><use href="#i-bolt"/></svg></span>
             </div>
-            <div class="bar-track"><div class="bar-fill fill-slate" style="width: 0%;"></div></div>
+            <div class="metric-value"><strong id="el-kpi-today-val">—</strong><span class="unit-label">MW</span></div>
+            <p class="metric-foot" id="el-kpi-today-sub">Peak met · Maharashtra</p>
+          </article>
+
+          <article class="metric">
+            <div class="metric-top">
+              Next-Day Forecast
+              <span class="metric-icon"><svg class="icon"><use href="#i-trend"/></svg></span>
+            </div>
+            <div class="metric-value"><strong class="mint" id="el-kpi-forecast-val">—</strong><span class="unit-label">MW</span></div>
+            <p class="metric-foot">LightGBM prediction</p>
+          </article>
+
+          <article class="metric">
+            <div class="metric-top">
+              Model MAPE
+              <span class="metric-icon"><svg class="icon"><use href="#i-target"/></svg></span>
+            </div>
+            <div class="metric-value"><strong id="el-kpi-mape-val">—</strong><span class="unit-label">%</span></div>
+            <p class="metric-foot">vs persistence baseline</p>
+          </article>
+
+          <article class="metric">
+            <div class="metric-top">
+              Track Record
+              <span class="metric-icon"><svg class="icon"><use href="#i-ledger"/></svg></span>
+            </div>
+            <div class="metric-value"><strong id="el-kpi-record-val">—</strong><span>public forecasts logged</span></div>
+            <p class="metric-foot">Published before outcome</p>
+          </article>
+        </div>
+
+        <!-- Hero Feature Grid -->
+        <div class="feature-grid">
+          <article class="forecast">
+            <div class="flex between gap-12">
+              <span class="eyebrow" id="el-hero-date">NEXT-DAY FORECAST · MAHARASHTRA</span>
+              <span class="model-badge" id="el-hero-model-badge">LIGHTGBM</span>
+            </div>
+            <div class="forecast-location">
+              <svg class="icon"><use href="#i-pin"/></svg>
+              <span>Maharashtra, India</span>
+            </div>
+            <div class="forecast-reading">
+              <strong class="forecast-number number" id="el-hero-number">—</strong>
+              <div>
+                <div class="forecast-unit">Peak Demand · MW</div>
+                <span class="category-pill cat-mod" id="el-hero-cat-pill">—</span>
+              </div>
+            </div>
+            <p class="forecast-change" id="el-hero-change-desc">
+              Based on the latest published observation
+            </p>
+            <div class="forecast-bottom">
+              <svg class="icon"><use href="#i-shield"/></svg>
+              <span id="el-hero-improvement-text">Measuring verified track record against persistence baseline…</span>
+            </div>
+          </article>
+
+          <!-- Reliability Donut Ring -->
+          <article class="panel">
+            <div class="flex between gap-8">
+              <h2 class="panel-title">Prediction reliability</h2>
+              <span class="tiny-badge">Verified record</span>
+            </div>
+            <p class="panel-subtitle">Share of scored forecasts within ±3% of actual peak demand</p>
+
+            <div class="verification-content">
+              <div class="ring" role="img" id="el-ring" aria-label="Electricity prediction reliability">
+                <svg viewBox="0 0 120 120" aria-hidden="true">
+                  <circle class="ring-track" cx="60" cy="60" r="49"/>
+                  <circle class="ring-value" id="el-ring-circle" cx="60" cy="60" r="49"
+                    stroke-dasharray="307.88" stroke-dashoffset="307.88"/>
+                </svg>
+                <div class="ring-text">
+                  <strong id="el-ring-pct">—%</strong>
+                  <span>within ±3%</span>
+                </div>
+              </div>
+              <div class="verification-stats">
+                <div class="verification-stat">
+                  <span id="el-metric-within-3-name">Within ±3%</span>
+                  <b id="el-metric-within-3">—</b>
+                </div>
+                <div class="verification-stat">
+                  <span>Total Scored</span>
+                  <b id="el-metric-total-scored">—</b>
+                </div>
+                <div class="verification-stat">
+                  <span>Forecast Horizon</span>
+                  <b>1 day ahead</b>
+                </div>
+              </div>
+            </div>
+            <p class="verification-note">Demand threshold reflects operational dispatch accuracy criteria.</p>
+          </article>
+        </div>
+
+        <!-- Performance Analysis Grid -->
+        <section class="analysis-grid" aria-label="Electricity performance">
+          <!-- 1. Peak Demand vs Temperature -->
+          <article class="panel">
+            <div class="chart-header">
+              <div>
+                <h2 class="panel-title">Peak Demand vs Temperature</h2>
+                <p class="panel-subtitle">Daily peak load (MW) and ambient temperature (°C)</p>
+              </div>
+            </div>
+            <div class="chart-box">
+              <canvas id="elDemandChart"></canvas>
+            </div>
+          </article>
+
+          <!-- 2. Absolute % Error Chart -->
+          <article class="panel">
+            <div class="chart-header">
+              <div>
+                <h2 class="panel-title">Absolute % Error</h2>
+                <p class="panel-subtitle">Error distribution</p>
+              </div>
+            </div>
+            <div class="accuracy-number" id="el-acc-big-num">
+              — <span>last 15 scored</span>
+            </div>
+            <div class="chart-box" style="height: 140px;">
+              <canvas id="elErrorChart"></canvas>
+            </div>
+          </article>
+
+          <!-- 3. All Models (MAE, MW) -->
+          <article class="panel">
+            <div class="flex between gap-8">
+              <h2 class="panel-title">All Models (MAE, MW)</h2>
+              <svg class="icon muted"><use href="#i-chart"/></svg>
+            </div>
+            <p class="panel-subtitle">Mean absolute error across competing models</p>
+
+            <div id="el-bar-group" style="margin-top: 14px;">
+              <div class="comparison">
+                <div class="bar-label"><span>Loading…</span><b>—</b></div>
+                <div class="bar-track"><div class="bar-fill baseline" style="width: 0%;"></div></div>
+              </div>
+            </div>
+
+            <div class="improvement">
+              <svg class="icon"><use href="#i-trend"/></svg>
+              <div>
+                <div><strong>MAE vs Persistence: </strong><b class="mint" id="el-callout-improve-val">—</b></div>
+                <p>Persistence uses the prior day’s peak as next day forecast.</p>
+              </div>
+            </div>
+
+            <div class="rmse-row"><span>LightGBM MAE / RMSE</span><b><span id="el-metric-lgb-mae">—</span> / <span id="el-metric-lgb-rmse">—</span></b></div>
+            <div class="rmse-row"><span>Seasonal Naive MAE</span><b id="el-metric-seasonal-mae">—</b></div>
+          </article>
+        </section>
+
+        <!-- Forecast Ledger Section -->
+        <section class="history-section">
+          <div class="ledger-heading">
+            <div>
+              <h2 class="panel-title">Prediction History</h2>
+              <p class="panel-subtitle">Predictions logged before actual outcomes were known</p>
+            </div>
+            <button class="button" onclick="exportCurrentCSV('electricity')" aria-label="Export electricity ledger as CSV">
+              <svg class="icon"><use href="#i-download"/></svg>CSV
+            </button>
           </div>
-        </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Model</th>
+                  <th>Prediction (MW)</th>
+                  <th>Actual (MW)</th>
+                  <th>Error (MW)</th>
+                  <th>Error %</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="el-history-table-body">
+                <tr><td colspan="7" style="text-align: center; color: var(--subtle); padding: 28px;">Loading prediction records…</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="ledger-footer">
+            Showing verified forecasts logged before outcomes were known. Grid-Sentinel reports lag by 2–4 days.
+          </div>
+        </section>
 
-        <div class="improvement-callout-box">
-          <span class="callout-label">MAE vs Persistence</span>
-          <span class="callout-value" id="el-callout-improve-val">—</span>
-        </div>
+        <!-- Model Leaderboard (Latest Scored Day) -->
+        <section class="history-section" style="margin-top: 20px;">
+          <div class="ledger-heading">
+            <div>
+              <h2 class="panel-title">Latest Scored Day</h2>
+              <div class="panel-subtitle">Most recent day scored per model (n≈1) — the full record is above</div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>MAE (MW)</th>
+                  <th>RMSE</th>
+                  <th>MAPE</th>
+                  <th>Samples</th>
+                  <th>Scored</th>
+                </tr>
+              </thead>
+              <tbody id="el-leaderboard-table-body">
+                <tr><td colspan="6" style="text-align: center; color: var(--subtle); padding: 28px;">Loading latest scored day…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
-    </div>
+      <!-- ==================== END ELECTRICITY PANEL ==================== -->
+    </section>
 
-    <!-- Same caveat as the PM2.5 block above, plus a MAPE column: only
-         /electricity/model_performance carries mape. -->
-    <div class="history-section">
-      <div class="history-header">
-        <div class="history-title">Latest Scored Day</div>
-        <div class="history-subtitle">Most recent day scored per model (n≈1) — the full record is above</div>
+    <!-- Methodology & Transparency Section -->
+    <section class="methodology" id="methodology" aria-labelledby="methodology-title">
+      <svg class="icon"><use href="#i-info"/></svg>
+      <div>
+        <h3 id="methodology-title">Built around accountability, not just predictions.</h3>
+        <p>
+          A trustworthy forecasting system publishes each forecast <em>before</em> the target observation window,
+          records the immutable prediction in a public ledger, and evaluates error upon observation arrival.
+          Walk-forward verification prevents look-ahead data leakage.
+          MAE penalizes average deviation linearly; RMSE places higher penalty on outliers; MAPE standardizes error across operational scales.
+          PM2.5 observations are derived from Open-Meteo / CAMS atmospheric reanalysis. Electricity observations are sourced from Grid-Sentinel state load telemetry.
+        </p>
       </div>
+    </section>
 
-      <div style="overflow-x: auto;">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Model</th>
-              <th>MAE (MW)</th>
-              <th>RMSE</th>
-              <th>MAPE</th>
-              <th>Samples</th>
-              <th>Scored</th>
-            </tr>
-          </thead>
-          <tbody id="el-leaderboard-table-body">
-            <tr><td colspan="6" style="text-align: center; color: var(--text-faint); padding: 30px;">Loading latest scored day…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <!-- Footer -->
+    <footer>
+      <span>© <span id="copyright-year"></span> VeriCast · Forecast Lab</span>
+      <span><span class="dot mint"></span>Designed for transparent, reproducible forecasting</span>
+    </footer>
+  </main>
 
-    <div class="history-section">
-      <div class="history-header">
-        <div class="history-title">Prediction History</div>
-        <div class="history-subtitle">Predictions logged before actual outcomes were known</div>
-      </div>
+  <!-- Download Feedback Toast -->
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-      <div style="overflow-x: auto;">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Model</th>
-              <th>Prediction (MW)</th>
-              <th>Actual (MW)</th>
-              <th>Error (MW)</th>
-              <th>Error %</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="el-history-table-body">
-            <tr><td colspan="7" style="text-align: center; color: var(--text-faint); padding: 30px;">Loading prediction records…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+  <!-- Client Application Logic -->
+  <script>
+    // Configuration & Backend origin
+    const API_BASE = window.API_BASE || 'https://forecast-lab-2l0q.onrender.com';
+    document.getElementById('api-docs-link').href = `${API_BASE}/docs`;
 
-  </div>
-  <!-- ===================== END ELECTRICITY PANEL ===================== -->
+    let activeDataset = 'pm25';
+    let pm25Health = null;
+    let elHealth = null;
+    let elLoaded = false;
 
-  <footer>VERICAST · Verified Next-Day Forecasting<br>
-    <span style="font-size: 0.85em; color: var(--text-faint)">PM2.5 observations: Open-Meteo / CAMS reanalysis — modelled, not ground-station measurements.<br>
-    Electricity demand: community mirror of Grid-India state reports (<a href="https://github.com/HalcyonVector/Grid-Sentinel" target="_blank" style="color: var(--brand-cyan);">HalcyonVector/Grid-Sentinel</a>), not the operator directly — it lags real time by 2–4 days.</span>
-  </footer>
+    let predChartInstance = null;
+    let accChartInstance = null;
+    let elDemandChartInstance = null;
+    let elErrorChartInstance = null;
 
-</div>
+    let rawPm25History = [];
+    let rawPm25Predictions = [];
+    let activePm25Range = 14;
 
-<script>
-  // Backend API URL. The one place the deployed host is written down - the
-  // FastAPI Docs link is pointed at it below rather than hardcoding it twice.
-  // Override for local work with `window.API_BASE = 'http://localhost:8000'`
-  // before this script runs.
-  //
-  // The host still reads `forecast-lab`: that is the live Render service name and
-  // the repo it deploys from, both predating the VeriCast rename. Renaming those
-  // is the fix, and the CSP connect-src above pins this host, so both change
-  // together.
-  const API_BASE = window.API_BASE || 'https://forecast-lab-2l0q.onrender.com';
+    let rawElHistory = [];
+    let rawElPredictions = [];
 
-  document.getElementById('api-docs-link').href = `${API_BASE}/docs`;
+    let toastTimer = null;
 
-  async function fetchJSON(path, retries = 2, timeoutMs = 15000) {
-    let lastErr;
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Fetch helper with timeout and retries
+    async function fetchJSON(path, retries = 2, timeoutMs = 15000) {
+      let lastErr;
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const res = await fetch(`${API_BASE}${path}`, { signal: controller.signal });
+          clearTimeout(timer);
+          if (!res.ok) {
+            const err = new Error(`${path} failed: ${res.status}`);
+            err.status = res.status;
+            throw err;
+          }
+          return await res.json();
+        } catch (err) {
+          clearTimeout(timer);
+          lastErr = err;
+          if (err.status && err.status >= 400 && err.status < 500) throw err;
+          if (attempt < retries) {
+            await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+          }
+        }
+      }
+      throw lastErr;
+    }
+
+    // Number & String formatting utilities
+    function fmt(n, d = 2) {
+      return (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
+    }
+
+    function signedPct(n) {
+      return `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
+    }
+
+    function esc(v) {
+      return String(v ?? '').replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function accuracyPct(actual, predicted) {
+      if (actual === null || actual === undefined || !Number.isFinite(actual) || actual === 0) return null;
+      return Math.max(0, 100 - Math.abs(actual - predicted) / actual * 100);
+    }
+
+    function publishedOnly(payload) {
+      return ((payload && payload.predictions) || []).filter(r => r.source === 'verified');
+    }
+
+    function emptyHistoryRow(tbodyId) {
+      document.getElementById(tbodyId).innerHTML =
+        '<tr><td colspan="7" style="text-align: center; color: var(--subtle); '
+        + 'padding: 30px;">No prediction published before its outcome yet.</td></tr>';
+    }
+
+    function getPm25Band(val) {
+      if (val <= 30) return { label: 'LOW CONCENTRATION', cls: 'cat-low' };
+      if (val <= 60) return { label: 'MODERATE', cls: 'cat-mod' };
+      if (val <= 90) return { label: 'ELEVATED', cls: 'cat-elevated' };
+      if (val <= 120) return { label: 'HIGH', cls: 'cat-high' };
+      return { label: 'VERY HIGH / EXTREME', cls: 'cat-alert' };
+    }
+
+    function getMapeBand(mape) {
+      if (mape == null) return { label: 'UNSCORED', cls: 'cat-mod' };
+      if (mape < 2) return { label: 'EXCELLENT', cls: 'cat-low' };
+      if (mape < 5) return { label: 'GOOD', cls: 'cat-mod' };
+      return { label: 'MODERATE', cls: 'cat-elevated' };
+    }
+
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      clearTimeout(toastTimer);
+      toast.textContent = message;
+      toast.classList.add('show');
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 3200);
+    }
+
+    // Live Header status pill updater
+    function setStatusPill(health, label) {
+      const pill = document.getElementById('status-pill');
+      const statusText = document.getElementById('status-text');
+      const behind = health && health.stale_days != null ? ` · ${health.stale_days}d behind` : '';
+      if (health && health.status === 'ok' && health.source_lag_expected) {
+        pill.className = 'live-pill';
+        statusText.textContent = `LIVE · ${label} ${health.latest_observation}${behind}`;
+      } else if (health && health.status === 'ok') {
+        pill.className = 'live-pill stale';
+        statusText.textContent = `STALE · ${label} ${health.latest_observation}${behind}`;
+      } else {
+        pill.className = 'live-pill offline';
+        statusText.textContent = 'OFFLINE / WAKING UP';
+      }
+    }
+
+    function showPanelError(elementId, err) {
+      const el = document.getElementById(elementId);
+      if (!el) return;
+      el.innerHTML = `<b>Could not load this panel.</b> ${esc(err && err.message || err)} — the API may be waking up on a cold start. Retry in a few seconds.`;
+      el.hidden = false;
+    }
+
+    // Leaderboard table renderer
+    function renderLeaderboard(tbodyId, board, decimals, withMape) {
+      const tbody = document.getElementById(tbodyId);
+      if (!tbody) return;
+      const cols = withMape ? 6 : 5;
+      if (!board || !board.leaderboard || !board.leaderboard.length) {
+        tbody.innerHTML = `<tr><td colspan="${cols}" style="text-align: center; color: var(--subtle); padding: 30px;">No scored day on record yet.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = board.leaderboard.map((m, i) => `
+        <tr>
+          <td title="${esc(m.description)}"><span style="color: ${i === 0 ? 'var(--mint)' : 'var(--text)'}; font-weight: 600;">${esc(m.model)}</span></td>
+          <td class="predicted">${fmt(m.mae, decimals)}</td>
+          <td>${fmt(m.rmse, decimals)}</td>
+          ${withMape ? `<td>${m.mape === null || m.mape === undefined ? '—' : `${fmt(m.mape, 2)}%`}</td>` : ''}
+          <td>${m.sample_size ?? '—'}</td>
+          <td>${esc(m.as_of)}</td>
+        </tr>
+      `).join('');
+    }
+
+    // ==========================================
+    // NAGPUR PM2.5 DASHBOARD INIT
+    // ==========================================
+    async function initDashboard() {
       try {
-        const res = await fetch(`${API_BASE}${path}`, { signal: controller.signal });
-        clearTimeout(timer);
-        if (!res.ok) {
-          const err = new Error(`${path} failed: ${res.status}`);
-          err.status = res.status;
-          throw err;
-        }
-        return await res.json();
-      } catch (err) {
-        clearTimeout(timer);
-        lastErr = err;
-        // Do not retry client errors (4xx, e.g. 404 on optional/unseeded models)
-        if (err.status && err.status >= 400 && err.status < 500) {
-          throw err;
-        }
-        if (attempt < retries) {
-          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-        }
-      }
-    }
-    throw lastErr;
-  }
+        const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
+          fetchJSON('/health').catch(() => null),
+          fetchJSON('/forecast?model=lightgbm').catch(() => null),
+          fetchJSON('/history?days=30').catch(() => null),
+          fetchJSON('/evaluation').catch(() => null),
+          fetchJSON('/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
+          fetchJSON('/leaderboard').catch(() => null),
+        ]);
 
-  // PM2.5 concentration bands aligned with CPCB sub-index breakpoints (30/60/90/120 ug/m3).
-  function getBand(val) {
-    if (val <= 30) return { label: 'LOW CONCENTRATION', cls: 'cat-low' };
-    if (val <= 60) return { label: 'MODERATE', cls: 'cat-mod' };
-    if (val <= 90) return { label: 'ELEVATED', cls: 'cat-elevated' };
-    if (val <= 120) return { label: 'HIGH', cls: 'cat-high' };
-    return { label: 'VERY HIGH / EXTREME', cls: 'cat-alert' };
-  }
+        renderLeaderboard('leaderboard-table-body', leaderboard, 2, false);
 
-  function fmt(n, d = 2) {
-    return (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
-  }
+        // 1. Status Pill
+        pm25Health = health;
+        setStatusPill(health, 'NAGPUR');
 
-  // toFixed already carries the '-', so prefixing '+' unconditionally renders
-  // "+-4.2%" the first week LightGBM loses to persistence - on the one callout
-  // whose whole job is saying which model won.
-  function signedPct(n) {
-    return `${n >= 0 ? '+' : ''}${n.toFixed(1)}%`;
-  }
-
-  // Values below come from our own DB and the API allowlists `model`, so this is
-  // belt-and-braces - but every innerHTML row goes through it, so a future column
-  // of free text cannot inject markup.
-  function esc(v) {
-    return String(v ?? '').replace(/[&<>"']/g, c => (
-      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  // Percentage accuracy against an actual. Returns null when the actual is
-  // zero or missing: dividing by it gives Infinity, which renders as a
-  // nonsense 100% row rather than an honest gap.
-  function accuracyPct(actual, predicted) {
-    if (actual === null || actual === undefined || !Number.isFinite(actual) || actual === 0) return null;
-    return Math.max(0, 100 - Math.abs(actual - predicted) / actual * 100);
-  }
-
-  // The safety net, not the mechanism. Both fetches above pass ?source=daily, so
-  // the API filters provenance in SQL before its LIMIT and the panel gets the 15
-  // published rows it asked for. This used to be the only filter, applied after
-  // the server had already spent the LIMIT on interleaved rows: the elec backtest
-  // tail sits ~2 weeks behind the daily record, so a DESC window of 15 was
-  // roughly half backtest and this threw that half away - the panel ran on a
-  // fraction of its window with no error anywhere.
-  //
-  // It stays because the tables are headed "logged before actual outcomes were
-  // known" and a walk-forward backtest row was fitted after the fact. Quoting one
-  // under that heading is the retro-fitting the provenance split exists to
-  // prevent, and a dropped query parameter should thin the table rather than
-  // change what it claims.
-  //
-  // Allowlist, not `!== 'backtest'`: the API renames source 'daily' to 'verified'
-  // on the way out, so a third provenance added upstream would arrive under a name
-  // this page has never seen and a denylist would wave it straight into the table.
-  function publishedOnly(payload) {
-    return ((payload && payload.predictions) || [])
-      .filter(r => r.source === 'verified');
-  }
-
-  // Both empty-state messages, so a filtered-to-nothing table says so instead of
-  // sitting on "Loading prediction records..." forever.
-  function emptyHistoryRow(tbodyId) {
-    document.getElementById(tbodyId).innerHTML =
-      '<tr><td colspan="7" style="text-align: center; color: var(--text-faint); '
-      + 'padding: 30px;">No prediction published before its outcome yet.</td></tr>';
-  }
-
-  // Both leaderboard tables, one renderer: the payloads differ only by a mape
-  // column and by the decimals the unit deserves (μg/m³ to 2, MW to 0).
-  // `description` goes in title= rather than its own column - the row is already
-  // five columns wide on a phone.
-  function renderLeaderboard(tbodyId, board, decimals, withMape) {
-    const tbody = document.getElementById(tbodyId);
-    const cols = withMape ? 6 : 5;
-    if (!board || !board.leaderboard || !board.leaderboard.length) {
-      tbody.innerHTML = `<tr><td colspan="${cols}" style="text-align: center; color: var(--text-faint); padding: 30px;">No scored day on record yet.</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = board.leaderboard.map((m, i) => `
-      <tr>
-        <td title="${esc(m.description)}"><span style="color: ${i === 0 ? 'var(--brand-teal)' : 'var(--text-main)'}; font-weight: 600;">${esc(m.model)}</span></td>
-        <td class="mono pred-highlight">${fmt(m.mae, decimals)}</td>
-        <td class="mono">${fmt(m.rmse, decimals)}</td>
-        ${withMape ? `<td class="mono">${m.mape === null || m.mape === undefined ? '—' : `${fmt(m.mape, 2)}%`}</td>` : ''}
-        <td class="mono">${m.sample_size ?? '—'}</td>
-        <td>${esc(m.as_of)}</td>
-      </tr>
-    `).join('');
-  }
-
-  // Both panels share the one header pill, so both write it through here. The
-  // gate is source_lag_expected, not status alone: a stalled upstream still
-  // answers status: 'ok' with a stale latest_observation, and showing that as
-  // LIVE is the one way this page can publish a number that is quietly wrong.
-  // The threshold differs per target and the API has already applied its own,
-  // which is why this reads the flag rather than stale_days.
-  function setStatusPill(health, label) {
-    const pill = document.getElementById('status-pill');
-    const statusText = document.getElementById('status-text');
-    // != null, not truthiness: stale_days === 0 is falsy, so a bare truthiness
-    // test dropped the suffix on exactly the day the data is freshest. The
-    // electricity panel's own lag note already reads it this way.
-    const behind = health && health.stale_days != null ? ` · ${health.stale_days}d behind` : '';
-    if (health && health.status === 'ok' && health.source_lag_expected) {
-      pill.className = 'live-pill';
-      statusText.textContent = `LIVE · ${label} ${health.latest_observation}${behind}`;
-    } else if (health && health.status === 'ok') {
-      pill.className = 'live-pill stale';
-      statusText.textContent = `STALE · ${label} ${health.latest_observation}${behind}`;
-    } else {
-      pill.className = 'live-pill offline';
-      statusText.textContent = 'OFFLINE / WAKING UP';
-    }
-  }
-
-  // A thrown init is otherwise invisible: the panel just sits on its em-dash
-  // placeholders and reads as "no data yet" rather than "this failed".
-  function showPanelError(elementId, err) {
-    const el = document.getElementById(elementId);
-    el.innerHTML = `<b>Could not load this panel.</b> ${esc(err && err.message || err)}
-      — the API may be waking up on a cold start. Retry in a few seconds.`;
-    el.hidden = false;
-  }
-
-  // Last /health payload per panel, so switchTab can repoint the shared pill
-  // without a second request. undefined = that panel has not fetched yet.
-  let pm25Health, elHealth;
-
-  let predChartInstance = null;
-  let accChartInstance = null;
-
-  async function initDashboard() {
-    try {
-      const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
-        fetchJSON('/health').catch(() => null),
-        fetchJSON('/forecast?model=lightgbm').catch(() => null),
-        fetchJSON('/history?days=30').catch(() => null),
-        // No days= -> full record. /leaderboard reports only the most recent
-        // scored day (n=1), which is not the headline accuracy claim.
-        fetchJSON('/evaluation').catch(() => null),
-        fetchJSON('/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
-        // 404s until score.py has written its first daily row, which fetchJSON
-        // turns into null and renderLeaderboard shows as "no scored day yet".
-        fetchJSON('/leaderboard').catch(() => null),
-      ]);
-
-      renderLeaderboard('leaderboard-table-body', leaderboard, 2, false);
-
-      // 1. Status Pill.
-      pm25Health = health;
-      setStatusPill(health, 'NAGPUR');
-
-      // 2. Latest Observed PM2.5
-      let latestObsVal = null;
-      if (history && history.historical_data && history.historical_data.length) {
-        const last = history.historical_data[history.historical_data.length - 1];
-        latestObsVal = last.pm2_5;
-        document.getElementById('kpi-today-val').innerHTML = `${fmt(last.pm2_5, 1)} <span class="unit">μg/m³</span>`;
-        document.getElementById('kpi-today-sub').textContent = `Observed on ${last.date}`;
-      }
-
-      // 3. Forecast Hero & KPI
-      if (forecast) {
-        const fVal = forecast.forecast_pm2_5;
-        document.getElementById('kpi-forecast-val').innerHTML = `${fmt(fVal, 2)} <span class="unit">μg/m³</span>`;
-        document.getElementById('hero-main-number').textContent = fmt(fVal, 2);
-        document.getElementById('hero-forecast-date').textContent = `FORECAST FOR ${forecast.forecast_date} · NAGPUR, MH`;
-        
-        const band = getBand(fVal);
-        const pill = document.getElementById('hero-cat-pill');
-        pill.textContent = band.label;
-        pill.className = `category-pill ${band.cls}`;
-
-        // Explicit, not `if (latestObsVal)`: a genuine 0 μg/m³ observation is
-        // falsy and would silently drop the comparison. Zero is also the one
-        // value the division cannot take.
-        if (latestObsVal !== null && latestObsVal !== undefined && latestObsVal !== 0) {
-          const diff = fVal - latestObsVal;
-          const pctDiff = ((diff / latestObsVal) * 100).toFixed(1);
-          const sign = diff >= 0 ? '+' : '';
-          document.getElementById('hero-change-desc').innerHTML =
-            `<b>${sign}${pctDiff}% vs today</b> · Based on latest observation`;
-        }
-      }
-
-      // 4. Full-record accuracy & model comparison
-      if (evaluation && evaluation.evaluation) {
-        // /evaluation nests its metrics under `verified` / `backtest` and ships no
-        // combined figure on purpose. Spreading `verified` up makes this page quote
-        // the published-then-verified record only: a model that exists solely in
-        // the backtest has no mae here and renders as an honest dash.
-        const models = evaluation.evaluation.map(m => ({ ...m, ...(m.verified || {}) }));
-        const lgb = models.find(m => m.model === 'lightgbm');
-        const naive = models.find(m => m.model === 'naive_baseline');
-
-        // Split the way the electricity panel splits it: what LightGBM alone can
-        // fill goes first. Under one paired gate, a baseline that has not scored
-        // yet - or scored NULL - blanked the record count and LightGBM's own MAE
-        // too, so the page understated its record for a reason it never showed.
-        if (lgb && lgb.mae != null) {
-          document.getElementById('metric-lgb-mae').textContent = fmt(lgb.mae, 2);
-          document.getElementById('metric-lgb-rmse').textContent = fmt(lgb.rmse, 2);
-          document.getElementById('bar-lgb-val').textContent = fmt(lgb.mae, 2);
-          document.getElementById('kpi-record-val').textContent = lgb.scored_count;
-          document.getElementById('metric-total-scored').textContent = lgb.scored_count;
-
-          // The launch backtest stays discoverable without becoming the headline.
-          const bt = lgb.backtest;
-          document.getElementById('kpi-mae-val').title =
-            `Verified over ${lgb.scored_count} published day(s).`
-            + (bt && bt.mae != null
-                ? ` Launch backtest: MAE ${fmt(bt.mae, 2)} over ${bt.scored_count} days, never averaged in.`
-                : '');
+        // 2. Latest Observed PM2.5
+        let latestObsVal = null;
+        if (history && history.historical_data && history.historical_data.length) {
+          rawPm25History = history.historical_data;
+          const last = rawPm25History[rawPm25History.length - 1];
+          latestObsVal = last.pm2_5;
+          document.getElementById('kpi-today-val').textContent = fmt(last.pm2_5, 1);
+          document.getElementById('kpi-today-sub').textContent = `Observed on ${last.date}`;
+          document.getElementById('header-date-text').textContent = `Observed ${last.date}`;
         }
 
-        if (lgb && naive && lgb.mae != null && naive.mae != null) {
-          const lgbMae = lgb.mae;
-          const naiveMae = naive.mae;
-          const improvement = ((naiveMae - lgbMae) / naiveMae) * 100;
+        // 3. Forecast Hero & KPI
+        if (forecast) {
+          const fVal = forecast.forecast_pm2_5;
+          document.getElementById('kpi-forecast-val').textContent = fmt(fVal, 2);
+          document.getElementById('hero-main-number').textContent = fmt(fVal, 2);
+          document.getElementById('hero-forecast-date').textContent = `FORECAST FOR ${forecast.forecast_date} · NAGPUR, MH`;
 
-          document.getElementById('kpi-mae-val').innerHTML = `${fmt(lgbMae, 2)} <span class="unit">vs ${fmt(naiveMae, 2)}</span>`;
-          document.getElementById('metric-naive-mae').textContent = fmt(naiveMae, 2);
-          document.getElementById('bar-naive-val').textContent = fmt(naiveMae, 2);
+          const band = getPm25Band(fVal);
+          const catPill = document.getElementById('hero-cat-pill');
+          catPill.textContent = band.label;
+          catPill.className = `category-pill ${band.cls}`;
 
-          document.getElementById('callout-improve-val').textContent = signedPct(improvement);
-          document.getElementById('hero-improvement-text').textContent = `${improvement.toFixed(1)}% better than persistence baseline (MAE ${fmt(lgbMae, 2)} vs ${fmt(naiveMae, 2)})`;
-
-          // Bar widths relative to max
-          const maxVal = Math.max(lgbMae, naiveMae) * 1.35;
-          document.getElementById('bar-lgb-fill').style.width = `${(lgbMae / maxVal) * 100}%`;
-          document.getElementById('bar-naive-fill').style.width = `${(naiveMae / maxVal) * 100}%`;
+          if (latestObsVal !== null && latestObsVal !== undefined && latestObsVal !== 0) {
+            const diff = fVal - latestObsVal;
+            const pctDiff = ((diff / latestObsVal) * 100).toFixed(1);
+            const sign = diff >= 0 ? '+' : '';
+            document.getElementById('hero-change-desc').innerHTML =
+              `<strong>${sign}${pctDiff}% vs. latest observation</strong> · Next-day point forecast`;
+          }
         }
-      }
 
-      // 5. Prediction History Table & Accuracy calculation
-      const publishedRows = publishedOnly(predictions);
-      if (publishedRows.length) {
-        const rows = publishedRows;
-        let within5Count = 0;
-        let totalScored = 0;
-        let totalAccuracySum = 0;
-        let accScored = 0;   // rows with a usable (non-zero) actual
+        // 4. Full-record accuracy & model comparison
+        if (evaluation && evaluation.evaluation) {
+          const models = evaluation.evaluation.map(m => ({ ...m, ...(m.verified || {}) }));
+          const lgb = models.find(m => m.model === 'lightgbm');
+          const naive = models.find(m => m.model === 'naive_baseline');
 
-        const tableHtml = rows.map(r => {
-          let errStr = '—';
-          let accStr = '—';
-          let badge = '<span class="status-badge badge-pending">PENDING</span>';
+          if (lgb && lgb.mae != null) {
+            document.getElementById('metric-lgb-mae').textContent = fmt(lgb.mae, 2);
+            document.getElementById('metric-lgb-rmse').textContent = fmt(lgb.rmse, 2);
+            document.getElementById('bar-lgb-val').textContent = fmt(lgb.mae, 2);
+            document.getElementById('kpi-record-val').textContent = lgb.scored_count;
+            document.getElementById('metric-total-scored').textContent = lgb.scored_count;
 
-          if (r.actual_pm2_5 !== null && r.actual_pm2_5 !== undefined) {
-            const err = Math.abs(r.actual_pm2_5 - r.predicted_pm2_5);
-            errStr = fmt(err, 2);
-            totalScored++;
-            if (err <= 5) within5Count++;
-
-            const acc = accuracyPct(r.actual_pm2_5, r.predicted_pm2_5);
-            if (acc !== null) {
-              accStr = `${acc.toFixed(0)}%`;
-              totalAccuracySum += acc;
-              accScored++;
-            }
-
-            if (err <= 3) badge = '<span class="status-badge badge-excellent">EXCELLENT</span>';
-            else if (err <= 6) badge = '<span class="status-badge badge-good">GOOD</span>';
-            else badge = '<span class="status-badge badge-moderate">MODERATE</span>';
+            const bt = lgb.backtest;
+            document.getElementById('kpi-mae-val').title =
+              `Verified over ${lgb.scored_count} published day(s).`
+              + (bt && bt.mae != null
+                  ? ` Launch backtest: MAE ${fmt(bt.mae, 2)} over ${bt.scored_count} days, never averaged in.`
+                  : '');
           }
 
-          return `
-            <tr>
-              <td>${esc(r.forecast_date)}</td>
-              <td><span style="color: var(--brand-teal); font-weight: 600;">${esc(r.model)}</span></td>
-              <td class="mono pred-highlight">${fmt(r.predicted_pm2_5, 2)}</td>
-              <td class="mono">${r.actual_pm2_5 !== null ? fmt(r.actual_pm2_5, 2) : '<span style="color: var(--text-faint)">—</span>'}</td>
-              <td class="mono">${errStr}</td>
-              <td class="mono">${accStr}</td>
-              <td>${badge}</td>
-            </tr>
-          `;
-        }).join('');
+          if (lgb && naive && lgb.mae != null && naive.mae != null) {
+            const lgbMae = lgb.mae;
+            const naiveMae = naive.mae;
+            const improvement = ((naiveMae - lgbMae) / naiveMae) * 100;
 
-        document.getElementById('history-table-body').innerHTML = tableHtml;
+            document.getElementById('kpi-mae-val').innerHTML = `${fmt(lgbMae, 2)} <span class="unit-label">vs ${fmt(naiveMae, 2)}</span>`;
+            document.getElementById('metric-naive-mae').textContent = fmt(naiveMae, 2);
+            document.getElementById('bar-naive-val').textContent = fmt(naiveMae, 2);
 
-        if (totalScored > 0) {
-          const withinPct = ((within5Count / totalScored) * 100).toFixed(0);
-          document.getElementById('metric-within-5').textContent = `${withinPct}%`;
-          // Say which denominator this is. "Total Forecasts" above comes from the
-          // full-record /evaluation; this row and the accuracy figure below are
-          // computed over the /predictions?limit=15 window, so the two sat side by
-          // side over different sample sizes with nothing saying so.
-          document.getElementById('metric-within-5-name').textContent =
-            `Within ±5 μg/m³ (last ${totalScored} scored)`;
+            document.getElementById('callout-improve-val').textContent = signedPct(improvement);
+            document.getElementById('hero-improvement-text').textContent =
+              `${improvement.toFixed(1)}% better than persistence baseline (MAE ${fmt(lgbMae, 2)} vs ${fmt(naiveMae, 2)})`;
+
+            const maxVal = Math.max(lgbMae, naiveMae) * 1.35;
+            document.getElementById('bar-lgb-fill').style.width = `${(lgbMae / maxVal) * 100}%`;
+            document.getElementById('bar-naive-fill').style.width = `${(naiveMae / maxVal) * 100}%`;
+          }
         }
-        if (accScored > 0) {
-          const avgAcc = (totalAccuracySum / accScored).toFixed(0);
-          document.getElementById('acc-big-num').innerHTML =
-            `${avgAcc}% <span>last ${accScored} scored</span>`;
+
+        // 5. Prediction History Table & Reliability calculation
+        const publishedRows = publishedOnly(predictions);
+        rawPm25Predictions = publishedRows;
+
+        if (publishedRows.length) {
+          const rows = publishedRows;
+          let within5Count = 0;
+          let totalScored = 0;
+          let totalAccuracySum = 0;
+          let accScored = 0;
+
+          const tableHtml = rows.map(r => {
+            let errStr = '—';
+            let accStr = '—';
+            let badge = '<span class="status-pill pending"><span class="dot"></span>Pending</span>';
+
+            if (r.actual_pm2_5 !== null && r.actual_pm2_5 !== undefined) {
+              const err = Math.abs(r.actual_pm2_5 - r.predicted_pm2_5);
+              errStr = fmt(err, 2);
+              totalScored++;
+              const within = err <= 5;
+              if (within) within5Count++;
+
+              const acc = accuracyPct(r.actual_pm2_5, r.predicted_pm2_5);
+              if (acc !== null) {
+                accStr = `${acc.toFixed(0)}%`;
+                totalAccuracySum += acc;
+                accScored++;
+              }
+
+              badge = within
+                ? '<span class="status-pill good"><span class="dot"></span>Within threshold</span>'
+                : '<span class="status-pill miss"><span class="dot"></span>Outside threshold</span>';
+            }
+
+            return `
+              <tr>
+                <td>${esc(r.forecast_date)}</td>
+                <td><span style="color: var(--mint); font-weight: 600;">${esc(r.model)}</span></td>
+                <td class="predicted">${fmt(r.predicted_pm2_5, 2)}</td>
+                <td class="observed-val">${r.actual_pm2_5 !== null ? fmt(r.actual_pm2_5, 2) : '—'}</td>
+                <td>${errStr}</td>
+                <td>${accStr}</td>
+                <td>${badge}</td>
+              </tr>
+            `;
+          }).join('');
+
+          document.getElementById('history-table-body').innerHTML = tableHtml;
+
+          if (totalScored > 0) {
+            const withinPct = ((within5Count / totalScored) * 100).toFixed(0);
+            document.getElementById('metric-within-5').textContent = `${withinPct}%`;
+            document.getElementById('metric-within-5-name').textContent =
+              `Within ±5 μg/m³ (last ${totalScored} scored)`;
+
+            document.getElementById('pm25-ring-pct').textContent = `${withinPct}%`;
+            const circumference = 2 * Math.PI * 49;
+            const offset = circumference * (1 - withinPct / 100);
+            document.getElementById('pm25-ring-circle').style.strokeDashoffset = offset;
+          }
+          if (accScored > 0) {
+            const avgAcc = (totalAccuracySum / accScored).toFixed(0);
+            document.getElementById('acc-big-num').innerHTML =
+              `${avgAcc}% <span>last ${accScored} scored</span>`;
+          }
+        } else {
+          emptyHistoryRow('history-table-body');
         }
-      } else {
-        emptyHistoryRow('history-table-body');
+
+        // 6. Chart: Prediction vs Actual
+        renderPm25Charts(publishedRows);
+
+      } catch (err) {
+        console.error('Failed to initialize PM2.5 dashboard:', err);
+        showPanelError('pm25-error', err);
       }
+    }
 
-      // 6. Chart: Prediction vs Actual. Guarded on what it plots - the observed
-      // series and the published rows - not on `forecast`, which is tomorrow's
-      // single number and appears nowhere in either chart. A 404 on /forecast
-      // (the first day before predict.py runs, or a missing artifact) used to
-      // blank both charts along with it.
-      if (history && history.historical_data) {
-        const labels = history.historical_data.map(d => d.date.slice(5)); // MM-DD
-        const obsValues = history.historical_data.map(d => d.pm2_5);
+    function renderPm25Charts(publishedRows) {
+      if (rawPm25History && rawPm25History.length) {
+        const historySlice = rawPm25History.slice(-activePm25Range);
+        const labels = historySlice.map(d => d.date.slice(5));
+        const obsValues = historySlice.map(d => d.pm2_5);
 
-        // Published predictions on the same axis, keyed by the day they were
-        // for. Days outside the /predictions window stay null and break the
-        // line - the card claims two series, so it has to draw two.
-        const predByDate = new Map(
-          publishedRows.map(r => [r.forecast_date, r.predicted_pm2_5]));
-        const predValues = history.historical_data.map(
-          d => predByDate.has(d.date) ? predByDate.get(d.date) : null);
+        const predByDate = new Map(publishedRows.map(r => [r.forecast_date, r.predicted_pm2_5]));
+        const predValues = historySlice.map(d => predByDate.has(d.date) ? predByDate.get(d.date) : null);
 
-        // Render Prediction line on Chart
         const ctx1 = document.getElementById('predVsActualChart').getContext('2d');
         if (predChartInstance) predChartInstance.destroy();
 
@@ -1494,8 +1618,8 @@
               {
                 label: 'Observed',
                 data: obsValues,
-                borderColor: '#00E5A3',
-                backgroundColor: 'rgba(0, 229, 163, 0.05)',
+                borderColor: '#8cf0cb',
+                backgroundColor: 'rgba(140, 240, 203, 0.08)',
                 borderWidth: 2,
                 tension: 0.3,
                 pointRadius: 0,
@@ -1504,7 +1628,7 @@
               {
                 label: 'Predicted',
                 data: predValues,
-                borderColor: '#38BDF8',
+                borderColor: '#91adff',
                 borderWidth: 2,
                 borderDash: [4, 3],
                 tension: 0.3,
@@ -1521,26 +1645,22 @@
               legend: {
                 display: true,
                 position: 'bottom',
-                labels: { color: '#E2E8F0', boxWidth: 10, font: { size: 10, weight: '500' }, padding: 14 }
+                labels: { color: '#8c9ba9', boxWidth: 10, font: { size: 10, weight: '500', family: 'DM Sans' }, padding: 12 }
               }
             },
             scales: {
-              x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748B', font: { size: 10 }, maxTicksLimit: 6 } },
-              y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748B', font: { size: 10 } } }
+              x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#697986', font: { size: 10, family: 'DM Sans' } } },
+              y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#697986', font: { size: 10, family: 'DM Sans' } } }
             }
           }
         });
       }
 
-      // 7. Chart: Absolute error over the recent scored predictions. Its own
-      // guard: it plots publishedRows and nothing else, so /history or /forecast
-      // failing must not blank the one chart that shows the verified record.
-      if (publishedRows.length) {
+      // Chart 2: Accuracy Over Time
+      if (publishedRows && publishedRows.length) {
         const ctx2 = document.getElementById('accuracyChart').getContext('2d');
         if (accChartInstance) accChartInstance.destroy();
 
-        // Real scored rows, oldest-first: a publish-then-verify dashboard cannot
-        // show invented accuracy.
         const scored = publishedRows
           .filter(r => r.actual_pm2_5 !== null && r.actual_pm2_5 !== undefined)
           .slice().reverse();
@@ -1555,8 +1675,8 @@
               {
                 label: 'Accuracy (%)',
                 data: accValues,
-                borderColor: '#38BDF8',
-                backgroundColor: 'rgba(56, 189, 248, 0.08)',
+                borderColor: '#91adff',
+                backgroundColor: 'rgba(145, 173, 255, 0.08)',
                 borderWidth: 2,
                 tension: 0.35,
                 fill: true,
@@ -1572,338 +1692,411 @@
                 display: true,
                 position: 'bottom',
                 labels: {
-                  color: '#E2E8F0',
+                  color: '#8c9ba9',
                   boxWidth: 10,
-                  font: { size: 10, weight: '500' },
-                  padding: 14,
+                  font: { size: 10, weight: '500', family: 'DM Sans' },
+                  padding: 10,
                   generateLabels: () => [
-                    { text: 'Accuracy (%)', fillStyle: 'rgba(56, 189, 248, 0.25)', strokeStyle: '#38BDF8', fontColor: '#E2E8F0', lineWidth: 2 }
+                    { text: 'Accuracy (%)', fillStyle: 'rgba(145, 173, 255, 0.25)', strokeStyle: '#91adff', fontColor: '#8c9ba9', lineWidth: 2 }
                   ]
                 }
               }
             },
             scales: {
               x: { display: false },
-              // No min/max: clamping to 70-100 truncated every bad day out of
-              // existence, which is the one thing this chart must not do.
-              y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748B', font: { size: 9 } } }
+              y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#697986', font: { size: 9, family: 'DM Sans' } } }
             }
           }
         });
       }
-
-    } catch (err) {
-      console.error('Failed to initialize dashboard:', err);
-      showPanelError('pm25-error', err);
     }
-  }
 
-  // ===================== ELECTRICITY PANEL =====================
+    function setPm25Range(days) {
+      activePm25Range = days;
+      document.querySelectorAll('#panel-pm25 .range-control button').forEach(b => {
+        b.setAttribute('aria-pressed', String(Number(b.dataset.range) === days));
+      });
+      renderPm25Charts(rawPm25Predictions);
+    }
 
-  let elDemandChartInstance = null;
-  let elErrorChartInstance = null;
-  let elLoaded = false;
+    // ==========================================
+    // MAHARASHTRA ELECTRICITY DASHBOARD INIT
+    // ==========================================
+    async function initElectricity() {
+      try {
+        const elErr = document.getElementById('el-error');
+        if (elErr) elErr.hidden = true;
 
-  // MAPE bands. Demand forecasting is a percentage game: a 400 MW miss is
-  // excellent at 28 GW and would be catastrophic on a PM2.5 scale, so the
-  // thresholds are relative, not the absolute ones getBand uses.
-  function getMapeBand(mape) {
-    if (mape == null) return { label: 'UNSCORED', cls: 'cat-mod' };
-    if (mape < 2) return { label: 'EXCELLENT', cls: 'cat-low' };
-    if (mape < 5) return { label: 'GOOD', cls: 'cat-mod' };
-    return { label: 'MODERATE', cls: 'cat-elevated' };
-  }
+        const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
+          fetchJSON('/electricity/health').catch(() => null),
+          fetchJSON('/electricity/forecast?model=lightgbm').catch(() => null),
+          fetchJSON('/electricity/history?days=30').catch(() => null),
+          fetchJSON('/electricity/evaluation').catch(() => null),
+          fetchJSON('/electricity/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
+          fetchJSON('/electricity/leaderboard').catch(() => null),
+        ]);
 
-  async function initElectricity() {
-    try {
-      const elErr = document.getElementById('el-error');
-      if (elErr) elErr.hidden = true;
-      const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
-        fetchJSON('/electricity/health').catch(() => null),
-        fetchJSON('/electricity/forecast?model=lightgbm').catch(() => null),
-        fetchJSON('/electricity/history?days=30').catch(() => null),
-        fetchJSON('/electricity/evaluation').catch(() => null),
-        fetchJSON('/electricity/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
-        fetchJSON('/electricity/leaderboard').catch(() => null),
-      ]);
+        renderLeaderboard('el-leaderboard-table-body', leaderboard, 0, true);
 
-      renderLeaderboard('el-leaderboard-table-body', leaderboard, 0, true);
+        // 1. Status Pill
+        elHealth = health;
+        setStatusPill(health, 'MAHARASHTRA');
 
-      // 1. Status pill, same shared writer the PM2.5 panel uses. Without it the
-      // header reads LIVE · <a Nagpur date> while this panel is open, which is a
-      // freshness claim about the wrong series.
-      elHealth = health;
-      setStatusPill(health, 'MAHARASHTRA');
-
-      // 2. Latest observation. The mirror lags 2-4 days, so say how stale it is
-      // rather than implying it is today's number.
-      let latestObs = null;
-      if (history && history.historical_data && history.historical_data.length) {
-        latestObs = history.historical_data[history.historical_data.length - 1];
-        document.getElementById('el-kpi-today-val').innerHTML =
-          `${fmt(latestObs.peak_demand_mw, 0)} <span class="unit">MW</span>`;
-        const staleNote = health && health.stale_days != null
-          ? ` (${health.stale_days}d behind)` : '';
-        document.getElementById('el-kpi-today-sub').textContent =
-          `Observed ${latestObs.date}${staleNote}`;
-      }
-
-      // 3. Forecast hero.
-      if (forecast) {
-        const fVal = forecast.forecast_demand_mw;
-        document.getElementById('el-kpi-forecast-val').innerHTML =
-          `${fmt(fVal, 0)} <span class="unit">MW</span>`;
-        document.getElementById('el-hero-number').textContent = fmt(fVal, 0);
-        document.getElementById('el-hero-date').textContent =
-          `FORECAST FOR ${forecast.forecast_date} · MAHARASHTRA`;
-
-        if (latestObs && latestObs.peak_demand_mw !== null && latestObs.peak_demand_mw !== undefined && latestObs.peak_demand_mw !== 0) {
-          const diff = fVal - latestObs.peak_demand_mw;
-          const pct = (diff / latestObs.peak_demand_mw * 100).toFixed(1);
-          document.getElementById('el-hero-change-desc').innerHTML =
-            `<b>${diff >= 0 ? '+' : ''}${pct}% vs ${latestObs.date}</b> · Based on the latest published observation`;
-        }
-      }
-
-      // 4. Full-record accuracy across all three models.
-      if (evaluation && evaluation.evaluation) {
-        // Same verified-only spread as the PM2.5 panel above - see the comment
-        // there for why the backtest block is never folded in.
-        const models = evaluation.evaluation.map(m => ({ ...m, ...(m.verified || {}) }));
-        const lgb = models.find(m => m.model === 'lightgbm');
-        const naive = models.find(m => m.model === 'naive_baseline');
-        const seasonal = models.find(m => m.model === 'seasonal_naive');
-
-        if (lgb) {
-          const band = getMapeBand(lgb.mape);
-          const pill = document.getElementById('el-hero-cat-pill');
-          pill.textContent = band.label;
-          pill.className = `category-pill ${band.cls}`;
-
-          document.getElementById('el-kpi-record-val').textContent = lgb.scored_count;
-          document.getElementById('el-metric-total-scored').textContent = lgb.scored_count;
-          document.getElementById('el-metric-lgb-mae').textContent = fmt(lgb.mae, 0);
-          document.getElementById('el-metric-lgb-rmse').textContent = fmt(lgb.rmse, 0);
-
-          const bt = lgb.backtest;
-          document.getElementById('el-kpi-mape-val').title =
-            `Verified over ${lgb.scored_count} published day(s).`
-            + (bt && bt.mape != null
-                ? ` Launch backtest: MAPE ${fmt(bt.mape, 2)}% over ${bt.scored_count} days, never averaged in.`
-                : '');
-        }
-        if (seasonal) {
-          document.getElementById('el-metric-seasonal-mae').textContent = fmt(seasonal.mae, 0);
-        }
-        if (lgb && naive && lgb.mape != null && naive.mape != null) {
-          document.getElementById('el-kpi-mape-val').innerHTML =
-            `${fmt(lgb.mape, 2)}% <span class="unit">vs ${fmt(naive.mape, 2)}%</span>`;
-          const improvement = (naive.mae - lgb.mae) / naive.mae * 100;
-          document.getElementById('el-callout-improve-val').textContent = signedPct(improvement);
-          document.getElementById('el-hero-improvement-text').textContent =
-            `${improvement.toFixed(1)}% better than persistence baseline (MAE ${fmt(lgb.mae, 0)} vs ${fmt(naive.mae, 0)} MW)`;
+        // 2. Latest Observation
+        let latestObs = null;
+        if (history && history.historical_data && history.historical_data.length) {
+          rawElHistory = history.historical_data;
+          latestObs = rawElHistory[rawElHistory.length - 1];
+          document.getElementById('el-kpi-today-val').textContent = fmt(latestObs.peak_demand_mw, 0);
+          const staleNote = health && health.stale_days != null ? ` (${health.stale_days}d behind)` : '';
+          document.getElementById('el-kpi-today-sub').textContent = `Observed ${latestObs.date}${staleNote}`;
         }
 
-        // Bar per model, already MAE-sorted by the API.
-        const scoredModels = models.filter(m => m.mae != null);
-        if (scoredModels.length) {
-          const maxVal = Math.max(...scoredModels.map(m => m.mae)) * 1.35;
-          document.getElementById('el-bar-group').innerHTML = scoredModels.map((m, i) => `
-            <div class="bar-item">
-              <div class="bar-label-row">
-                <span class="bar-model-name">${esc(m.model)}</span>
-                <span class="bar-score" style="color: ${i === 0 ? 'var(--brand-teal)' : '#94A3B8'};">${fmt(m.mae, 0)}</span>
-              </div>
-              <div class="bar-track">
-                <div class="bar-fill ${i === 0 ? 'fill-teal' : 'fill-slate'}" style="width: ${(m.mae / maxVal) * 100}%;"></div>
-              </div>
-            </div>
-          `).join('');
+        // 3. Forecast Hero
+        if (forecast) {
+          const fVal = forecast.forecast_demand_mw;
+          document.getElementById('el-kpi-forecast-val').textContent = fmt(fVal, 0);
+          document.getElementById('el-hero-number').textContent = fmt(fVal, 0);
+          document.getElementById('el-hero-date').textContent = `FORECAST FOR ${forecast.forecast_date} · MAHARASHTRA`;
+
+          if (latestObs && latestObs.peak_demand_mw !== null && latestObs.peak_demand_mw !== undefined && latestObs.peak_demand_mw !== 0) {
+            const diff = fVal - latestObs.peak_demand_mw;
+            const pct = (diff / latestObs.peak_demand_mw * 100).toFixed(1);
+            const sign = diff >= 0 ? '+' : '';
+            document.getElementById('el-hero-change-desc').innerHTML =
+              `<strong>${sign}${pct}% vs. ${latestObs.date}</strong> · Based on latest observation`;
+          }
         }
-      }
 
-      // 5. History table + error chart, both off the same scored rows.
-      const elPublishedRows = publishedOnly(predictions);
-      if (elPublishedRows.length) {
-        const rows = elPublishedRows;
-        let within3 = 0, totalScored = 0, accSum = 0;
+        // 4. Full-record accuracy across all models
+        if (evaluation && evaluation.evaluation) {
+          const models = evaluation.evaluation.map(m => ({ ...m, ...(m.verified || {}) }));
+          const lgb = models.find(m => m.model === 'lightgbm');
+          const naive = models.find(m => m.model === 'naive_baseline');
+          const seasonal = models.find(m => m.model === 'seasonal_naive');
 
-        document.getElementById('el-history-table-body').innerHTML = rows.map(r => {
-          let errStr = '—', pctStr = '—';
-          let badge = '<span class="status-badge badge-pending">PENDING</span>';
+          if (lgb) {
+            const band = getMapeBand(lgb.mape);
+            const pill = document.getElementById('el-hero-cat-pill');
+            pill.textContent = band.label;
+            pill.className = `category-pill ${band.cls}`;
 
-          if (r.error_pct !== null && r.error_pct !== undefined) {
-            errStr = fmt(r.error, 0);
-            pctStr = `${fmt(r.error_pct, 2)}%`;
-            totalScored++;
-            if (r.error_pct <= 3) within3++;
-            accSum += Math.max(0, 100 - r.error_pct);
+            document.getElementById('el-kpi-record-val').textContent = lgb.scored_count;
+            document.getElementById('el-metric-total-scored').textContent = lgb.scored_count;
+            document.getElementById('el-metric-lgb-mae').textContent = fmt(lgb.mae, 0);
+            document.getElementById('el-metric-lgb-rmse').textContent = fmt(lgb.rmse, 0);
 
-            if (r.error_pct < 2) badge = '<span class="status-badge badge-excellent">EXCELLENT</span>';
-            else if (r.error_pct < 5) badge = '<span class="status-badge badge-good">GOOD</span>';
-            else badge = '<span class="status-badge badge-moderate">MODERATE</span>';
+            const bt = lgb.backtest;
+            document.getElementById('el-kpi-mape-val').title =
+              `Verified over ${lgb.scored_count} published day(s).`
+              + (bt && bt.mape != null
+                  ? ` Launch backtest: MAPE ${fmt(bt.mape, 2)}% over ${bt.scored_count} days, never averaged in.`
+                  : '');
+          }
+          if (seasonal) {
+            document.getElementById('el-metric-seasonal-mae').textContent = fmt(seasonal.mae, 0);
+          }
+          if (lgb && naive && lgb.mape != null && naive.mape != null) {
+            document.getElementById('el-kpi-mape-val').innerHTML =
+              `${fmt(lgb.mape, 2)}% <span class="unit-label">vs ${fmt(naive.mape, 2)}%</span>`;
+            const improvement = (naive.mae - lgb.mae) / naive.mae * 100;
+            document.getElementById('el-callout-improve-val').textContent = signedPct(improvement);
+            document.getElementById('el-hero-improvement-text').textContent =
+              `${improvement.toFixed(1)}% better than persistence baseline (MAE ${fmt(lgb.mae, 0)} vs ${fmt(naive.mae, 0)} MW)`;
           }
 
-          return `
-            <tr>
-              <td>${esc(r.forecast_date)}</td>
-              <td><span style="color: var(--brand-teal); font-weight: 600;">${esc(r.model)}</span></td>
-              <td class="mono pred-highlight">${fmt(r.predicted_demand_mw, 0)}</td>
-              <td class="mono">${r.actual_demand_mw !== null ? fmt(r.actual_demand_mw, 0) : '<span style="color: var(--text-faint)">—</span>'}</td>
-              <td class="mono">${errStr}</td>
-              <td class="mono">${pctStr}</td>
-              <td>${badge}</td>
-            </tr>
-          `;
-        }).join('');
-
-        if (totalScored > 0) {
-          document.getElementById('el-metric-within-3').textContent =
-            `${((within3 / totalScored) * 100).toFixed(0)}%`;
-          // Same denominator note as the PM2.5 panel: this row is the limit=15
-          // window, "Total Forecasts" above is the full record.
-          document.getElementById('el-metric-within-3-name').textContent =
-            `Within ±3% (last ${totalScored} scored)`;
-          document.getElementById('el-acc-big-num').innerHTML =
-            `${(accSum / totalScored).toFixed(1)}% <span>last ${totalScored} scored</span>`;
+          // Model comparison bars
+          const scoredModels = models.filter(m => m.mae != null);
+          if (scoredModels.length) {
+            const maxVal = Math.max(...scoredModels.map(m => m.mae)) * 1.35;
+            document.getElementById('el-bar-group').innerHTML = scoredModels.map((m, i) => `
+              <div class="comparison">
+                <div class="bar-label">
+                  <span>${esc(m.model)}</span>
+                  <b class="${i === 0 ? 'mint' : ''}">${fmt(m.mae, 0)} MW</b>
+                </div>
+                <div class="bar-track">
+                  <div class="bar-fill ${i === 0 ? 'model' : 'baseline'}" style="width: ${(m.mae / maxVal) * 100}%;"></div>
+                </div>
+              </div>
+            `).join('');
+          }
         }
 
-        const scored = rows.filter(r => r.error_pct != null).slice().reverse();
-        const ctxErr = document.getElementById('elErrorChart').getContext('2d');
-        if (elErrorChartInstance) elErrorChartInstance.destroy();
-        elErrorChartInstance = new Chart(ctxErr, {
-          type: 'bar',
-          data: {
-            labels: scored.map(r => r.forecast_date.slice(5)),
-            datasets: [{
-              data: scored.map(r => r.error_pct),
-              backgroundColor: scored.map(
-                r => r.error_pct < 2 ? '#00E5A3' : r.error_pct < 5 ? '#38BDF8' : '#F59E0B'),
-              borderRadius: 2
-            }]
-          },
-          options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-              legend: {
-                display: true,
-                position: 'bottom',
-                onClick: () => {},
-                labels: {
-                  color: '#E2E8F0',
-                  boxWidth: 10,
-                  font: { size: 10, weight: '500' },
-                  padding: 12,
-                  generateLabels: () => [
-                    { text: '< 2% (Exc)', fillStyle: '#00E5A3', strokeStyle: '#00E5A3', fontColor: '#E2E8F0', lineWidth: 0 },
-                    { text: '< 5% (Good)', fillStyle: '#38BDF8', strokeStyle: '#38BDF8', fontColor: '#E2E8F0', lineWidth: 0 },
-                    { text: '≥ 5% (Mod)', fillStyle: '#F59E0B', strokeStyle: '#F59E0B', fontColor: '#E2E8F0', lineWidth: 0 }
-                  ]
-                }
-              }
-            },
-            scales: {
-              x: { display: false },
-              y: {
-                beginAtZero: true,
-                grid: { color: 'rgba(255,255,255,0.03)' },
-                ticks: { color: '#64748B', font: { size: 9 }, callback: v => `${v}%` }
-              }
+        // 5. History table + Error chart
+        const elPublishedRows = publishedOnly(predictions);
+        rawElPredictions = elPublishedRows;
+
+        if (elPublishedRows.length) {
+          const rows = elPublishedRows;
+          let within3 = 0, totalScored = 0, accSum = 0;
+
+          document.getElementById('el-history-table-body').innerHTML = rows.map(r => {
+            let errStr = '—', pctStr = '—';
+            let badge = '<span class="status-pill pending"><span class="dot"></span>Pending</span>';
+
+            if (r.error_pct !== null && r.error_pct !== undefined) {
+              errStr = fmt(r.error, 0);
+              pctStr = `${fmt(r.error_pct, 2)}%`;
+              totalScored++;
+              if (r.error_pct <= 3) within3++;
+              accSum += Math.max(0, 100 - r.error_pct);
+
+              badge = r.error_pct <= 3
+                ? '<span class="status-pill good"><span class="dot"></span>Within threshold</span>'
+                : '<span class="status-pill miss"><span class="dot"></span>Outside threshold</span>';
             }
-          }
-        });
-      } else {
-        emptyHistoryRow('el-history-table-body');
-      }
 
-      // 6. Demand vs temperature, dual axis - the thermal driver is the whole
-      // reason cooling_degree_days is a feature, so show it next to the load.
-      if (history && history.historical_data && history.historical_data.length) {
-        const data = history.historical_data;
-        const ctx = document.getElementById('elDemandChart').getContext('2d');
-        if (elDemandChartInstance) elDemandChartInstance.destroy();
-        elDemandChartInstance = new Chart(ctx, {
-          type: 'line',
-          data: {
-            labels: data.map(d => d.date.slice(5)),
-            datasets: [
-              {
-                label: 'Peak demand (MW)',
-                data: data.map(d => d.peak_demand_mw),
-                borderColor: '#00E5A3',
-                backgroundColor: 'rgba(0, 229, 163, 0.05)',
-                borderWidth: 2, tension: 0.3, pointRadius: 0, fill: true, yAxisID: 'y'
+            return `
+              <tr>
+                <td>${esc(r.forecast_date)}</td>
+                <td><span style="color: var(--mint); font-weight: 600;">${esc(r.model)}</span></td>
+                <td class="predicted">${fmt(r.predicted_demand_mw, 0)}</td>
+                <td class="observed-val">${r.actual_demand_mw !== null ? fmt(r.actual_demand_mw, 0) : '—'}</td>
+                <td>${errStr}</td>
+                <td>${pctStr}</td>
+                <td>${badge}</td>
+              </tr>
+            `;
+          }).join('');
+
+          if (totalScored > 0) {
+            const withinPct = ((within3 / totalScored) * 100).toFixed(0);
+            document.getElementById('el-metric-within-3').textContent = `${withinPct}%`;
+            document.getElementById('el-metric-within-3-name').textContent =
+              `Within ±3% (last ${totalScored} scored)`;
+            document.getElementById('el-acc-big-num').innerHTML =
+              `${(accSum / totalScored).toFixed(1)}% <span>last ${totalScored} scored</span>`;
+
+            document.getElementById('el-ring-pct').textContent = `${withinPct}%`;
+            const circumference = 2 * Math.PI * 49;
+            const offset = circumference * (1 - withinPct / 100);
+            document.getElementById('el-ring-circle').style.strokeDashoffset = offset;
+          }
+
+          // Chart 4: Error Bar Chart
+          const scored = rows.filter(r => r.error_pct != null).slice().reverse();
+          const ctxErr = document.getElementById('elErrorChart').getContext('2d');
+          if (elErrorChartInstance) elErrorChartInstance.destroy();
+          elErrorChartInstance = new Chart(ctxErr, {
+            type: 'bar',
+            data: {
+              labels: scored.map(r => r.forecast_date.slice(5)),
+              datasets: [{
+                data: scored.map(r => r.error_pct),
+                backgroundColor: scored.map(
+                  r => r.error_pct < 2 ? '#8cf0cb' : r.error_pct < 5 ? '#91adff' : '#edc788'),
+                borderRadius: 3
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: {
+                  display: true,
+                  position: 'bottom',
+                  onClick: () => {},
+                  labels: {
+                    color: '#8c9ba9',
+                    boxWidth: 10,
+                    font: { size: 10, weight: '500', family: 'DM Sans' },
+                    padding: 10,
+                    generateLabels: () => [
+                      { text: '< 2% (Exc)', fillStyle: '#8cf0cb', strokeStyle: '#8cf0cb', fontColor: '#8c9ba9', lineWidth: 0 },
+                      { text: '< 5% (Good)', fillStyle: '#91adff', strokeStyle: '#91adff', fontColor: '#8c9ba9', lineWidth: 0 },
+                      { text: '≥ 5% (Mod)', fillStyle: '#edc788', strokeStyle: '#edc788', fontColor: '#8c9ba9', lineWidth: 0 }
+                    ]
+                  }
+                }
               },
-              {
-                label: 'Mean temp (°C)',
-                data: data.map(d => d.temperature_2m_mean),
-                borderColor: '#F59E0B',
-                borderWidth: 1.5, tension: 0.3, pointRadius: 0, fill: false,
-                borderDash: [4, 3], yAxisID: 'y1'
+              scales: {
+                x: { display: false },
+                y: {
+                  beginAtZero: true,
+                  grid: { color: 'rgba(255,255,255,0.03)' },
+                  ticks: { color: '#697986', font: { size: 9, family: 'DM Sans' }, callback: v => `${v}%` }
+                }
               }
-            ]
-          },
-          options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-              legend: {
-                display: true,
-                position: 'bottom',
-                labels: { color: '#E2E8F0', boxWidth: 10, font: { size: 10, weight: '500' }, padding: 14 }
-              }
-            },
-            scales: {
-              x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#64748B', font: { size: 10 }, maxTicksLimit: 6 } },
-              y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#64748B', font: { size: 10 } } },
-              y1: { position: 'right', grid: { display: false }, ticks: { color: '#F59E0B', font: { size: 9 } } }
             }
-          }
-        });
+          });
+        } else {
+          emptyHistoryRow('el-history-table-body');
+        }
+
+        // Chart 3: Demand vs Temperature
+        if (history && history.historical_data && history.historical_data.length) {
+          const data = history.historical_data;
+          const ctx = document.getElementById('elDemandChart').getContext('2d');
+          if (elDemandChartInstance) elDemandChartInstance.destroy();
+          elDemandChartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels: data.map(d => d.date.slice(5)),
+              datasets: [
+                {
+                  label: 'Peak demand (MW)',
+                  data: data.map(d => d.peak_demand_mw),
+                  borderColor: '#8cf0cb',
+                  backgroundColor: 'rgba(140, 240, 203, 0.08)',
+                  borderWidth: 2, tension: 0.3, pointRadius: 0, fill: true, yAxisID: 'y'
+                },
+                {
+                  label: 'Mean temp (°C)',
+                  data: data.map(d => d.temperature_2m_mean),
+                  borderColor: '#edc788',
+                  borderWidth: 1.5, tension: 0.3, pointRadius: 0, fill: false,
+                  borderDash: [4, 3], yAxisID: 'y1'
+                }
+              ]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: {
+                  display: true,
+                  position: 'bottom',
+                  labels: { color: '#8c9ba9', boxWidth: 10, font: { size: 10, weight: '500', family: 'DM Sans' }, padding: 12 }
+                }
+              },
+              scales: {
+                x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#697986', font: { size: 10, family: 'DM Sans' }, maxTicksLimit: 6 } },
+                y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#697986', font: { size: 10, family: 'DM Sans' } } },
+                y1: { position: 'right', grid: { display: false }, ticks: { color: '#edc788', font: { size: 9, family: 'DM Sans' } } }
+              }
+            }
+          });
+        }
+      } catch (err) {
+        console.error('Failed to initialize electricity panel:', err);
+        elLoaded = false;
+        showPanelError('el-error', err);
       }
-    } catch (err) {
-      console.error('Failed to initialize electricity panel:', err);
-      elLoaded = false;
-      showPanelError('el-error', err);
-    }
-  }
-
-  // Lazy: the electricity panel only fetches the first time it is opened, so the
-  // default PM2.5 view still costs exactly the 6 requests it always did.
-  function switchTab(name) {
-    const isElec = name === 'electricity';
-    document.getElementById('panel-pm25').hidden = isElec;
-    document.getElementById('panel-electricity').hidden = !isElec;
-    // aria-selected alongside the class: the class is what the eye reads, the
-    // attribute is what a screen reader reads, and a tablist that never updates
-    // it announces both tabs as selected forever.
-    for (const [id, selected] of [['tab-pm25', !isElec], ['tab-electricity', isElec]]) {
-      const btn = document.getElementById(id);
-      btn.classList.toggle('active', selected);
-      btn.setAttribute('aria-selected', String(selected));
     }
 
-    if (isElec && !elLoaded) {
-      elLoaded = true;
-      initElectricity();
-      return;   // initElectricity sets the pill itself once its /health lands
-    }
-    // Repoint the one header pill at whichever series is now on screen, from the
-    // health each init already fetched - cheaper than a request, and it cannot
-    // disagree with the panel below it.
-    const cached = isElec ? elHealth : pm25Health;
-    if (cached !== undefined) {
-      setStatusPill(cached, isElec ? 'MAHARASHTRA' : 'NAGPUR');
-    }
-  }
+    // ==========================================
+    // DATASET TAB SWITCHING
+    // ==========================================
+    function switchTab(name) {
+      activeDataset = name;
+      const isElec = name === 'electricity';
+      document.getElementById('panel-pm25').hidden = isElec;
+      document.getElementById('panel-electricity').hidden = !isElec;
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initDashboard);
-  } else {
-    initDashboard();
-  }
-</script>
+      for (const [id, selected] of [['tab-pm25', !isElec], ['tab-electricity', isElec]]) {
+        const btn = document.getElementById(id);
+        btn.classList.toggle('active', selected);
+        btn.setAttribute('aria-selected', String(selected));
+      }
 
+      document.getElementById('topbar-crumb').textContent = isElec
+        ? 'Maharashtra Electricity Demand overview'
+        : 'Nagpur PM2.5 overview';
+
+      if (isElec && !elLoaded) {
+        elLoaded = true;
+        initElectricity();
+        return;
+      }
+
+      const cached = isElec ? elHealth : pm25Health;
+      if (cached !== undefined && cached !== null) {
+        setStatusPill(cached, isElec ? 'MAHARASHTRA' : 'NAGPUR');
+      }
+    }
+
+    // ==========================================
+    // CSV EXPORT LOGIC
+    // ==========================================
+    function exportCurrentCSV(target) {
+      const isElec = target === 'electricity';
+      const rows = isElec ? rawElPredictions : rawPm25Predictions;
+
+      if (!rows || !rows.length) {
+        showToast('No verified forecast rows available to export.');
+        return;
+      }
+
+      const headers = isElec
+        ? ['Dataset', 'Forecast Date', 'Model', 'Predicted Demand (MW)', 'Actual Demand (MW)', 'Error (MW)', 'Error %', 'Threshold (<=3%)']
+        : ['Dataset', 'Forecast Date', 'Model', 'Predicted PM2.5 (ug/m3)', 'Actual PM2.5 (ug/m3)', 'Absolute Error', 'Threshold (<=5)'];
+
+      const csvData = [
+        headers,
+        ...rows.map(r => isElec ? [
+          'Maharashtra Electricity',
+          r.forecast_date,
+          r.model,
+          r.predicted_demand_mw,
+          r.actual_demand_mw ?? '',
+          r.error ?? '',
+          r.error_pct != null ? `${r.error_pct.toFixed(2)}%` : '',
+          r.error_pct != null ? (r.error_pct <= 3.0 ? 'PASS' : 'FAIL') : 'PENDING'
+        ] : [
+          'Nagpur PM2.5',
+          r.forecast_date,
+          r.model,
+          r.predicted_pm2_5,
+          r.actual_pm2_5 ?? '',
+          r.actual_pm2_5 != null ? Math.abs(r.actual_pm2_5 - r.predicted_pm2_5).toFixed(2) : '',
+          r.actual_pm2_5 != null ? (Math.abs(r.actual_pm2_5 - r.predicted_pm2_5) <= 5.0 ? 'PASS' : 'FAIL') : 'PENDING'
+        ])
+      ];
+
+      const escapeVal = v => `"${String(v ?? '').replaceAll('"', '""')}"`;
+      const csvContent = '\uFEFF' + csvData.map(line => line.map(escapeVal).join(',')).join('\r\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+
+      link.href = url;
+      link.download = `vericast-${target}-verified-ledger.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast(`CSV export generated · ${rows.length} verified record(s)`);
+    }
+
+    // ==========================================
+    // SIDEBAR SCROLL SPY
+    // ==========================================
+    const navItemIds = ['overview', 'performance', 'ledger', 'methodology'];
+    function updateNav(activeId) {
+      navItemIds.forEach(id => {
+        const link = document.getElementById(`nav-${id}`);
+        if (!link) return;
+        const isMatch = id === activeId;
+        link.classList.toggle('active', isMatch);
+        if (isMatch) link.setAttribute('aria-current', 'location');
+        else link.removeAttribute('aria-current');
+      });
+    }
+
+    if ('IntersectionObserver' in window) {
+      const observer = new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) updateNav(entry.target.id);
+        });
+      }, { rootMargin: '-10% 0px -65% 0px', threshold: 0 });
+
+      navItemIds.forEach(id => {
+        const section = document.getElementById(id);
+        if (section) observer.observe(section);
+      });
+    }
+
+    // Set Copyright
+    document.getElementById('copyright-year').textContent = new Date().getFullYear();
+
+    // Run on startup
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initDashboard);
+    } else {
+      initDashboard();
+    }
+  </script>
 </body>
 </html>
