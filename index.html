@@ -463,11 +463,19 @@
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 22px 26px;
+      margin-top: 24px;
       margin-bottom: 24px;
     }
     .methodology .icon { width: 22px; height: 22px; flex-shrink: 0; color: var(--mint); margin-top: 2px; }
     .methodology h3 { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
     .methodology p { font-size: 11px; color: var(--muted); line-height: 1.8; }
+
+    /* Sticky navbar scroll offsets */
+    #pm25-overview, #pm25-performance, #pm25-methodology, #pm25-ledger, #pm25-accountability,
+    #el-overview, #el-performance, #el-methodology, #el-ledger, #el-accountability,
+    .overview-section, .analysis-grid, .history-section, .methodology {
+      scroll-margin-top: 76px;
+    }
 
     /* Ledger Table & History Section */
     .history-section {
@@ -642,14 +650,14 @@
     </symbol>
   </svg>
 
-  <a href="#overview" class="skip-link">Skip to dashboard</a>
+  <a href="#pm25-overview" class="skip-link" id="skip-link">Skip to dashboard</a>
 
   <!-- Main Container -->
   <main>
     <!-- Top Navbar (Expansive full-width navigation) -->
     <header class="navbar">
       <div class="nav-left">
-        <a href="#overview" class="brand" aria-label="VeriCast home">
+        <a href="#pm25-overview" class="brand" id="brand-link" aria-label="VeriCast home">
           <div class="brand-mark">
             <svg class="icon"><use href="#i-trend"/></svg>
           </div>
@@ -658,10 +666,10 @@
 
         <!-- Navigation: Overview -> Model performance -> Methodology -> Forecast ledger -->
         <nav class="nav-links" aria-label="Main navigation">
-          <a href="#overview" class="active" id="nav-overview">Overview</a>
-          <a href="#performance" id="nav-performance">Model performance</a>
-          <a href="#methodology" id="nav-methodology">Methodology</a>
-          <a href="#ledger" id="nav-ledger">Forecast ledger</a>
+          <a href="#pm25-overview" class="active" id="nav-overview">Overview</a>
+          <a href="#pm25-performance" id="nav-performance">Model performance</a>
+          <a href="#pm25-methodology" id="nav-methodology">Methodology</a>
+          <a href="#pm25-ledger" id="nav-ledger">Forecast ledger</a>
         </nav>
       </div>
 
@@ -676,8 +684,8 @@
       </div>
     </header>
 
-    <!-- SECTION 1: OVERVIEW -->
-    <section id="overview" aria-labelledby="page-title">
+    <!-- Header & Dataset Selector -->
+    <div class="dashboard-header-container">
       <div class="page-heading">
         <div>
           <h1 id="page-title">A clearer view of tomorrow<span class="mint">.</span></h1>
@@ -705,11 +713,14 @@
           <span class="dot mint"></span>Live verified records · Walk-forward scored
         </span>
       </div>
+    </div>
 
-      <!-- ==================== PM2.5 PANEL ==================== -->
-      <div id="panel-pm25">
-        <div class="error-banner" id="pm25-error" role="alert" hidden></div>
+    <!-- ==================== PM2.5 PANEL ==================== -->
+    <div id="panel-pm25">
+      <div class="error-banner" id="pm25-error" role="alert" hidden></div>
 
+      <!-- SECTION 1: OVERVIEW (KPI Metrics + Hero Feature Grid) -->
+      <section id="pm25-overview" class="overview-section" aria-label="PM2.5 overview">
         <!-- 4 KPI Metrics -->
         <div class="metrics">
           <article class="metric">
@@ -814,9 +825,10 @@
             <p class="verification-note">Historical hit rate is scored on predictions published before observations arrived.</p>
           </article>
         </div>
+      </section>
 
-        <!-- SECTION 2: MODEL PERFORMANCE (Centered, well-proportioned charts) -->
-        <section id="performance" class="analysis-grid" aria-label="Model performance">
+      <!-- SECTION 2: MODEL PERFORMANCE (Centered, well-proportioned charts) -->
+      <section id="pm25-performance" class="analysis-grid" aria-label="Model performance">
           <!-- 1. Prediction vs Actual Chart -->
           <article class="panel">
             <div class="chart-header">
@@ -881,26 +893,11 @@
           </article>
         </section>
 
-        <!-- SECTION 3: METHODOLOGY -->
-        <section class="methodology" id="methodology" aria-labelledby="methodology-title">
-          <svg class="icon"><use href="#i-shield"/></svg>
-          <div>
-            <h3 id="methodology-title">Built around accountability, not just predictions.</h3>
-            <p>
-              A trustworthy forecasting system publishes each forecast <em>before</em> the target observation window,
-              records the immutable prediction in a public ledger, and evaluates error upon observation arrival.
-              Walk-forward verification prevents look-ahead data leakage.
-              MAE penalizes average deviation linearly; RMSE places higher penalty on outliers; MAPE standardizes error across operational scales.
-              PM2.5 observations are derived from Open-Meteo / CAMS atmospheric reanalysis. Electricity observations are sourced from Grid-Sentinel state load telemetry.
-            </p>
-          </div>
-        </section>
-
-        <!-- SECTION 4A: LATEST SCORED DAY ACROSS MODELS (Moved UP before Forecast Ledger) -->
-        <section class="history-section">
+        <!-- SECTION 3: LATEST SCORED DAY ACROSS MODELS (Methodology Anchor) -->
+        <section class="history-section" id="pm25-methodology" aria-labelledby="pm25-leaderboard-title">
           <div class="ledger-heading">
             <div>
-              <h2 class="panel-title">Latest Scored Day across Models</h2>
+              <h2 class="panel-title" id="pm25-leaderboard-title">Latest Scored Day across Models</h2>
               <div class="panel-subtitle">Most recent day scored per model (n≈1) — the full record is below</div>
             </div>
           </div>
@@ -922,8 +919,8 @@
           </div>
         </section>
 
-        <!-- SECTION 4B: THE FORECAST LEDGER (History table placed after Latest Scored Day) -->
-        <section class="history-section" id="ledger" aria-labelledby="pm25-ledger-title">
+        <!-- SECTION 4: THE FORECAST LEDGER -->
+        <section class="history-section" id="pm25-ledger" aria-labelledby="pm25-ledger-title">
           <div class="ledger-heading">
             <div>
               <h2 class="panel-title" id="pm25-ledger-title">The forecast ledger</h2>
@@ -955,6 +952,21 @@
             Showing verified forecasts logged before outcomes were known. Download CSV to inspect full record.
           </div>
         </section>
+
+        <!-- SECTION 5: ACCOUNTABILITY STATEMENT (Moved to end of page) -->
+        <section class="methodology" id="pm25-accountability" aria-labelledby="methodology-title">
+          <svg class="icon"><use href="#i-shield"/></svg>
+          <div>
+            <h3 id="methodology-title">Built around accountability, not just predictions.</h3>
+            <p>
+              A trustworthy forecasting system publishes each forecast <em>before</em> the target observation window,
+              records the immutable prediction in a public ledger, and evaluates error upon observation arrival.
+              Walk-forward verification prevents look-ahead data leakage.
+              MAE penalizes average deviation linearly; RMSE places higher penalty on outliers; MAPE standardizes error across operational scales.
+              PM2.5 observations are derived from Open-Meteo / CAMS atmospheric reanalysis. Electricity observations are sourced from Grid-Sentinel state load telemetry.
+            </p>
+          </div>
+        </section>
       </div>
       <!-- ==================== END PM2.5 PANEL ==================== -->
 
@@ -962,8 +974,10 @@
       <div id="panel-electricity" hidden>
         <div class="error-banner" id="el-error" role="alert" hidden></div>
 
-        <!-- 4 KPI Metrics -->
-        <div class="metrics">
+        <!-- SECTION 1: OVERVIEW (KPI Metrics + Hero Feature Grid) -->
+        <section id="el-overview" class="overview-section" aria-label="Electricity overview">
+          <!-- 4 KPI Metrics -->
+          <div class="metrics">
           <article class="metric">
             <div class="metric-top">
               Latest Peak Demand
@@ -1066,9 +1080,10 @@
             <p class="verification-note">Demand threshold reflects operational dispatch accuracy criteria.</p>
           </article>
         </div>
+      </section>
 
-        <!-- SECTION 2: MODEL PERFORMANCE (Electricity - Centered charts) -->
-        <section class="analysis-grid" aria-label="Electricity performance">
+      <!-- SECTION 2: MODEL PERFORMANCE (Electricity - Centered charts) -->
+      <section id="el-performance" class="analysis-grid" aria-label="Electricity performance">
           <!-- 1. Peak Demand vs Temperature -->
           <article class="panel">
             <div class="chart-header">
@@ -1126,23 +1141,11 @@
           </article>
         </section>
 
-        <!-- SECTION 3: METHODOLOGY (Electricity) -->
-        <section class="methodology" aria-labelledby="el-methodology-title">
-          <svg class="icon"><use href="#i-shield"/></svg>
-          <div>
-            <h3 id="el-methodology-title">Operational Grid Telemetry &amp; Walk-Forward Auditing</h3>
-            <p>
-              Electricity demand forecasts are verified against Maharashtra state transmission load met telemetry via Grid-Sentinel.
-              Evaluations separate real-time daily operational forecasts from walk-forward backtests to ensure verifiable track records.
-            </p>
-          </div>
-        </section>
-
-        <!-- SECTION 4A: LATEST SCORED DAY ACROSS MODELS (Moved UP before Forecast Ledger) -->
-        <section class="history-section">
+        <!-- SECTION 3: LATEST SCORED DAY ACROSS MODELS (Electricity Methodology Anchor) -->
+        <section class="history-section" id="el-methodology" aria-labelledby="el-leaderboard-title">
           <div class="ledger-heading">
             <div>
-              <h2 class="panel-title">Latest Scored Day across Models</h2>
+              <h2 class="panel-title" id="el-leaderboard-title">Latest Scored Day across Models</h2>
               <div class="panel-subtitle">Most recent day scored per model (n≈1) — the full record is below</div>
             </div>
           </div>
@@ -1165,11 +1168,11 @@
           </div>
         </section>
 
-        <!-- SECTION 4B: THE FORECAST LEDGER (History table placed after Latest Scored Day) -->
-        <section class="history-section">
+        <!-- SECTION 4: THE FORECAST LEDGER (Prediction History) -->
+        <section class="history-section" id="el-ledger" aria-labelledby="el-ledger-title">
           <div class="ledger-heading">
             <div>
-              <h2 class="panel-title">Prediction History</h2>
+              <h2 class="panel-title" id="el-ledger-title">Prediction History</h2>
               <p class="panel-subtitle">Predictions logged before actual outcomes were known</p>
             </div>
             <button class="button" onclick="exportCurrentCSV('electricity')" aria-label="Export electricity ledger as CSV">
@@ -1198,9 +1201,20 @@
             Showing verified forecasts logged before outcomes were known. Grid-Sentinel reports lag by 2–4 days.
           </div>
         </section>
+
+        <!-- SECTION 5: ACCOUNTABILITY STATEMENT (Moved to end of page) -->
+        <section class="methodology" id="el-accountability" aria-labelledby="el-methodology-title">
+          <svg class="icon"><use href="#i-shield"/></svg>
+          <div>
+            <h3 id="el-methodology-title">Operational Grid Telemetry &amp; Walk-Forward Auditing</h3>
+            <p>
+              Electricity demand forecasts are verified against Maharashtra state transmission load met telemetry via Grid-Sentinel.
+              Evaluations separate real-time daily operational forecasts from walk-forward backtests to ensure verifiable track records.
+            </p>
+          </div>
+        </section>
       </div>
       <!-- ==================== END ELECTRICITY PANEL ==================== -->
-    </section>
 
     <!-- Footer -->
     <footer>
@@ -1924,6 +1938,9 @@
         btn.setAttribute('aria-selected', String(selected));
       }
 
+      updateNavLinks(name);
+      setupScrollSpy(name);
+
       if (isElec && !elLoaded) {
         elLoaded = true;
         initElectricity();
@@ -1991,30 +2008,98 @@
     }
 
     // ==========================================
-    // NAVBAR SCROLL SPY
+    // NAVBAR NAVIGATION & SCROLL MANAGEMENT
     // ==========================================
-    const navItemIds = ['overview', 'performance', 'methodology', 'ledger'];
-    function updateNav(activeId) {
-      navItemIds.forEach(id => {
-        const link = document.getElementById(`nav-${id}`);
+    const navSectionKeys = ['overview', 'performance', 'methodology', 'ledger'];
+
+    function updateNavLinks(dataset) {
+      const isElec = dataset === 'electricity';
+      const prefix = isElec ? 'el-' : 'pm25-';
+      const targets = {
+        'nav-overview': `${prefix}overview`,
+        'nav-performance': `${prefix}performance`,
+        'nav-methodology': `${prefix}methodology`,
+        'nav-ledger': `${prefix}ledger`
+      };
+      for (const [navId, targetId] of Object.entries(targets)) {
+        const el = document.getElementById(navId);
+        if (el) el.setAttribute('href', `#${targetId}`);
+      }
+      const brand = document.getElementById('brand-link');
+      if (brand) brand.setAttribute('href', `#${prefix}overview`);
+      const skip = document.getElementById('skip-link');
+      if (skip) skip.setAttribute('href', `#${prefix}overview`);
+    }
+
+    function scrollToTargetSection(targetId) {
+      const targetEl = document.getElementById(targetId);
+      if (!targetEl) return;
+      const nav = document.querySelector('.navbar');
+      const navHeight = nav ? nav.offsetHeight : 56;
+      const elementPosition = targetEl.getBoundingClientRect().top;
+      const offsetPosition = elementPosition + window.pageYOffset - navHeight - 16;
+
+      window.scrollTo({
+        top: offsetPosition,
+        behavior: 'smooth'
+      });
+
+      const key = targetId.replace(/^(pm25|el)-/, '');
+      updateNavHighlight(key);
+    }
+
+    function setupNavClickHandlers() {
+      document.querySelectorAll('.nav-links a').forEach(link => {
+        link.addEventListener('click', function(e) {
+          const href = this.getAttribute('href');
+          if (href && href.startsWith('#')) {
+            e.preventDefault();
+            scrollToTargetSection(href.substring(1));
+          }
+        });
+      });
+      const brandLink = document.getElementById('brand-link');
+      if (brandLink) {
+        brandLink.addEventListener('click', function(e) {
+          const href = this.getAttribute('href');
+          if (href && href.startsWith('#')) {
+            e.preventDefault();
+            scrollToTargetSection(href.substring(1));
+          }
+        });
+      }
+    }
+
+    function updateNavHighlight(activeKey) {
+      navSectionKeys.forEach(key => {
+        const link = document.getElementById(`nav-${key}`);
         if (!link) return;
-        const isMatch = id === activeId;
+        const isMatch = key === activeKey;
         link.classList.toggle('active', isMatch);
         if (isMatch) link.setAttribute('aria-current', 'location');
         else link.removeAttribute('aria-current');
       });
     }
 
-    if ('IntersectionObserver' in window) {
-      const observer = new IntersectionObserver(entries => {
+    let scrollSpyObserver = null;
+    function setupScrollSpy(tab) {
+      if (!('IntersectionObserver' in window)) return;
+      if (scrollSpyObserver) {
+        scrollSpyObserver.disconnect();
+      }
+      const prefix = tab === 'electricity' ? 'el-' : 'pm25-';
+      scrollSpyObserver = new IntersectionObserver(entries => {
         entries.forEach(entry => {
-          if (entry.isIntersecting) updateNav(entry.target.id);
+          if (entry.isIntersecting) {
+            const activeKey = entry.target.id.replace(/^(pm25|el)-/, '');
+            updateNavHighlight(activeKey);
+          }
         });
       }, { rootMargin: '-15% 0px -65% 0px', threshold: 0 });
 
-      navItemIds.forEach(id => {
-        const section = document.getElementById(id);
-        if (section) observer.observe(section);
+      navSectionKeys.forEach(key => {
+        const el = document.getElementById(`${prefix}${key}`);
+        if (el) scrollSpyObserver.observe(el);
       });
     }
 
@@ -2022,10 +2107,17 @@
     document.getElementById('copyright-year').textContent = new Date().getFullYear();
 
     // Run on startup
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', initDashboard);
-    } else {
+    function bootstrap() {
+      updateNavLinks('pm25');
+      setupNavClickHandlers();
+      setupScrollSpy('pm25');
       initDashboard();
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', bootstrap);
+    } else {
+      bootstrap();
     }
   </script>
 </body>
