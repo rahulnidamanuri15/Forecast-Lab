@@ -84,6 +84,16 @@ def main():
             if latest_obs is None:
                 check("Observations exist", False, "electricity_observations is empty")
                 print("=" * 62)
+                # Same as the PM2.5 twin: the empty-table path returns before the
+                # end-of-main alert, so alert here explicitly.
+                try:
+                    send_alert(
+                        "VeriCast Electricity Diagnostic Gate FAILED",
+                        f"No electricity observations at all for {STATE}; pipeline "
+                        f"has nothing to score or publish from. Do not publish.",
+                    )
+                except Exception:
+                    pass
                 return False
 
             stale_days = (local_time.today() - latest_obs).days

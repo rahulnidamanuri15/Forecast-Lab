@@ -34,10 +34,12 @@ concurrency:
 jobs:
   gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       CITY: Nagpur      # require_city_of_record refuses anything else at import
       STATE: Maharashtra
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
       # The deployed API. Set the API_BASE repository variable to point this at a
       # different host; the default is the one index.html and the CSP already pin.
       API_BASE: ${{ vars.API_BASE || 'https://forecast-lab-2l0q.onrender.com' }}
@@ -57,10 +59,20 @@ jobs:
 
       # Render free tier sleeps after 15 minutes idle and answers the first
       # request with a cold start, which outlasts the gate's 10s httpx timeout and
-      # would FAIL every HTTP check on a service that is fine. One throwaway
-      # request wakes it; `|| true` because this step is not the check.
+      # would FAIL every HTTP check on a service that is fine. Retry the wake-up
+      # up to 3 times; `|| true` because this step is not the check.
       - name: Wake the deployed API
-        run: curl -sS -m 120 -o /dev/null "$API_BASE/health" || true
+        timeout-minutes: 5
+        run: |
+          for i in 1 2 3; do
+            if curl -sS -m 120 -o /dev/null "$API_BASE/health"; then
+              echo "API awake on attempt $i."
+              break
+            fi
+            echo "Wake attempt $i failed; retrying in 20s..."
+            sleep 20
+          done || true
 
       - name: Run the go-live gate
+        timeout-minutes: 10
         run: python verify_deployment_readiness.py

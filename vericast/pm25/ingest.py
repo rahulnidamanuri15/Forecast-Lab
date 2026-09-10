@@ -1,3 +1,4 @@
+import math
 import os
 import time
 import httpx
@@ -52,20 +53,25 @@ def get_last_observed_date(cur):
     return row[0] if row else None
 
 
-def get_earliest_hole(cur, since):
-    """Earliest date in [since, yesterday] this city has no usable pm2_5 for, or None.
+def get_earliest_hole(cur, since, end=None):
+    """Earliest date in [since, end] this city has no usable pm2_5 for, or None.
 
     Covers both a missing row and a row with a NULL pm2_5 (a thin-hours day).
     generate_series is why this is one query: a LEFT JOIN against the dates that
     *should* exist finds an absent row, which no scan of stored rows can.
+
+    `end` defaults to yesterday for backwards compatibility, but callers should
+    pass the single yesterday value they already computed: calling
+    local_time.yesterday() twice across midnight gives an inconsistent range.
     """
+    end = end if end is not None else local_time.yesterday()
     cur.execute(
         """
         SELECT MIN(d.day)::date FROM generate_series(%s::date, %s::date, '1 day') d(day)
         LEFT JOIN observations o ON o.as_of = d.day AND o.city = %s
         WHERE o.as_of IS NULL OR o.pm2_5 IS NULL
         """,
-        (since, local_time.yesterday(), CITY),
+        (since, end, CITY),
     )
     return cur.fetchone()[0]
 
@@ -85,23 +91,30 @@ def resolve_date_range():
     One connection for both queries: they are sequential and read the same table.
     """
     require_database_url(DATABASE_URL)
+    # Single clock read: calling yesterday() twice across an IST midnight rollover
+    # previously gave an inconsistent [since, end] window.
+    yesterday = local_time.yesterday()
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             last_date = get_last_observed_date(cur)
 
             if last_date is None:
                 return (datetime.strptime(INITIAL_START, "%Y-%m-%d").date(),
-                        local_time.yesterday())
+                        yesterday)
 
             hole = get_earliest_hole(
-                cur, local_time.yesterday() - timedelta(days=RESCAN_DAYS))
+                cur, yesterday - timedelta(days=RESCAN_DAYS), yesterday)
 
     start = resume_start(last_date, hole)
     if hole and start == hole:
         print(f"Re-scanning from {hole}: earliest missing or NULL day in the last "
               f"{RESCAN_DAYS} days (a hole the monotonic resume would skip forever).")
+        if (yesterday - hole).days >= RESCAN_DAYS:
+            print(f"  [warn] hole {hole} sits at the edge of the {RESCAN_DAYS}-day "
+                  f"re-scan window; if the upstream never serves it, every run "
+                  f"re-queues from here. Investigate after repeated occurrences.")
 
-    return start, local_time.yesterday()
+    return start, yesterday
 
 
 def fetch_and_aggregate_data(start_date, end_date):
@@ -169,18 +182,24 @@ def fetch_and_aggregate_data(start_date, end_date):
     }, timeout=60)
     try:
         wx_data = wx_response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"Open-Meteo archive payload is not JSON: {exc}")
+    try:
         wx_daily = wx_data["daily"]
         wx_times = wx_daily["time"]
+        wx_temp = wx_daily["temperature_2m_mean"]
+        wx_wind = wx_daily["wind_speed_10m_max"]
+        wx_precip = wx_daily["precipitation_sum"]
     except (KeyError, TypeError) as exc:
         raise RuntimeError(f"Open-Meteo archive payload missing daily fields: {exc}")
+    if not (len(wx_times) == len(wx_temp) == len(wx_wind) == len(wx_precip)):
+        raise RuntimeError(
+            f"Open-Meteo archive length mismatch: {len(wx_times)} times vs "
+            f"{len(wx_temp)} temp vs {len(wx_wind)} wind vs {len(wx_precip)} precip")
 
     # Keyed on the date string the loop below looks up. A dict rather than
     # wx_times.index(date_str): that is O(n^2) on a 700-day backfill.
-    weather = dict(zip(wx_times, zip(
-        wx_daily["temperature_2m_mean"],
-        wx_daily["wind_speed_10m_max"],
-        wx_daily["precipitation_sum"],
-    )))
+    weather = dict(zip(wx_times, zip(wx_temp, wx_wind, wx_precip)))
 
     print(f"AQI hours: {len(pm2_5_values)}, missing: {sum(v is None for v in pm2_5_values)}")
     print(f"Weather days: {len(weather)}")
@@ -332,10 +351,23 @@ def insert_observations(records):
 
 def report_revisions(before, records):
     """Log days where CAMS ground-truth values were revised from prior stored observations."""
+    def _moved(old, new):
+        if new is None:
+            return True
+        try:
+            diff = abs(float(new) - float(old))
+        except (TypeError, ValueError):
+            return True
+        # NaN never compares: abs(nan - x) > eps is False, so a NaN revision
+        # would previously pass silently. Treat non-finite as a revision.
+        if not math.isfinite(diff):
+            return True
+        return diff > ACTUAL_TOLERANCE
+
     revised = [(as_of, before[as_of], new)
                for _, as_of, new, *_ in records
                if before.get(as_of) is not None
-               and (new is None or abs(new - before[as_of]) > ACTUAL_TOLERANCE)]
+               and _moved(before[as_of], new)]
     if not revised:
         return
 

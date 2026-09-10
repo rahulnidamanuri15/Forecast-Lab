@@ -5,14 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#090d12" />
 
-  <!-- Security: Strict Content Security Policy -->
+  <!-- Security: Strict Content Security Policy.
+    connect-src allows any onrender.com host (plus self/localhost) so a
+    window.API_BASE override is not blocked by a pinned production hostname.
+    The backend header in app.py is authoritative; this meta tag is the
+    defense-in-depth copy for file:// previews. 'unsafe-inline' stays: single
+    static file, no build step to hash. -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
     script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
     style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
     font-src https://fonts.gstatic.com;
     img-src 'self' data:;
-    connect-src https://forecast-lab-2l0q.onrender.com http://localhost:8000 http://127.0.0.1:8000;
+    connect-src 'self' https://*.onrender.com http://localhost:8000 http://127.0.0.1:8000;
+    object-src 'none';
+    frame-ancestors 'none';
     base-uri 'none';
     form-action 'none'">
 
@@ -1354,6 +1361,31 @@
       el.hidden = false;
     }
 
+    // Partial-failure banner: per-endpoint .catch(() => null) below lets the panels
+    // render what succeeded, but a silent null previously showed only em-dashes.
+    // Name the failed endpoints so a cold start or a 500 is distinguishable from
+    // "no data on record".
+    function notePartialFailures(elementId, failures) {
+      if (!failures.length) return;
+      const el = document.getElementById(elementId);
+      if (!el) return;
+      el.innerHTML = `<b>Some sections did not load:</b> ${esc(failures.join(', '))} — `
+        + `showing cached/available data as em-dashes. The API may be waking up; `
+        + `retry in a few seconds.`;
+      el.hidden = false;
+    }
+
+    // Chart.js is pinned via CDN with SRI. If the CDN is unreachable the global
+    // never appears and `new Chart` throws, killing the whole panel render. Guard
+    // every chart call site with this so a blocked CDN degrades to a banner.
+    function chartAvailable() {
+      return typeof Chart !== 'undefined';
+    }
+
+    function chartMissing(elementId) {
+      showPanelError(elementId, new Error('Chart.js failed to load from the CDN; charts unavailable while tables still work'));
+    }
+
     // Leaderboard table renderer
     function renderLeaderboard(tbodyId, board, decimals, withMape) {
       const tbody = document.getElementById(tbodyId);
@@ -1388,6 +1420,16 @@
           fetchJSON('/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
           fetchJSON('/leaderboard').catch(() => null),
         ]);
+
+        // Loud partials: name what failed instead of rendering bare em-dashes.
+        notePartialFailures('pm25-error', [
+          !health && '/health',
+          !forecast && '/forecast',
+          !history && '/history',
+          !evaluation && '/evaluation',
+          !predictions && '/predictions',
+          !leaderboard && '/leaderboard',
+        ].filter(Boolean));
 
         renderLeaderboard('leaderboard-table-body', leaderboard, 2, false);
 
@@ -1547,6 +1589,10 @@
     }
 
     function renderPm25Charts(publishedRows) {
+      if (!chartAvailable()) {
+        chartMissing('pm25-error');
+        return;
+      }
       if (rawPm25History && rawPm25History.length) {
         const historySlice = rawPm25History.slice(-activePm25Range);
         const labels = historySlice.map(d => d.date.slice(5));
@@ -1683,6 +1729,16 @@
           fetchJSON('/electricity/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
           fetchJSON('/electricity/leaderboard').catch(() => null),
         ]);
+
+        // Loud partials: same contract as the PM2.5 panel above.
+        notePartialFailures('el-error', [
+          !health && '/electricity/health',
+          !forecast && '/electricity/forecast',
+          !history && '/electricity/history',
+          !evaluation && '/electricity/evaluation',
+          !predictions && '/electricity/predictions',
+          !leaderboard && '/electricity/leaderboard',
+        ].filter(Boolean));
 
         renderLeaderboard('el-leaderboard-table-body', leaderboard, 0, true);
 
@@ -1823,6 +1879,9 @@
           }
 
           // Chart 4: Error Bar Chart
+          if (!chartAvailable()) {
+            chartMissing('el-error');
+          } else {
           const scored = rows.filter(r => r.error_pct != null).slice().reverse();
           const ctxErr = document.getElementById('elErrorChart').getContext('2d');
           if (elErrorChartInstance) elErrorChartInstance.destroy();
@@ -1868,12 +1927,15 @@
               }
             }
           });
+          } // end chart-available else for Chart 4
         } else {
           emptyHistoryRow('el-history-table-body');
         }
 
         // Chart 3: Demand vs Temperature
-        if (history && history.historical_data && history.historical_data.length) {
+        if (!chartAvailable()) {
+          chartMissing('el-error');
+        } else if (history && history.historical_data && history.historical_data.length) {
           const data = history.historical_data;
           const ctx = document.getElementById('elDemandChart').getContext('2d');
           if (elDemandChartInstance) elDemandChartInstance.destroy();
@@ -1958,6 +2020,9 @@
     // ==========================================
     function exportCurrentCSV(target) {
       const isElec = target === 'electricity';
+      // Verified-only is intentional: rawPm25Predictions/rawElPredictions already went
+      // through publishedOnly(), so the ledger exports the published-then-verified
+      // record, never the walk-forward launch backtest.
       const rows = isElec ? rawElPredictions : rawPm25Predictions;
 
       if (!rows || !rows.length) {

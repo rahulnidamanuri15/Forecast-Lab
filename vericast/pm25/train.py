@@ -23,6 +23,11 @@ FEATURE_COLUMNS = [
     "temperature_2m_mean", "wind_speed_10m_max", "precipitation_sum",
 ]
 
+# Shared baseline hyperparameters with vericast/elec/train.py, deliberately identical:
+# both targets are daily next-day regressions on lag/rolling/calendar features, and
+# per-target tuning lives in the weekly-retrain gate (vericast/gate.py holdout bars)
+# rather than in hand-tuned constants here. Diverge these only with a backtest delta
+# to justify it.
 PARAMS = {
     "objective": "regression",
     "metric": "mae",

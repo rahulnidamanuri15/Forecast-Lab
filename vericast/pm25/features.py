@@ -10,6 +10,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from vericast import (
+    acquire_pipeline_lock,
     alignment_sql,
     require_city_of_record,
     require_database_url,
@@ -77,7 +78,19 @@ ON CONFLICT (city, as_of) DO UPDATE SET
     temperature_2m_mean = EXCLUDED.temperature_2m_mean,
     wind_speed_10m_max  = EXCLUDED.wind_speed_10m_max,
     precipitation_sum   = EXCLUDED.precipitation_sum,
-    created_at          = CURRENT_TIMESTAMP;
+    created_at          = CURRENT_TIMESTAMP
+WHERE features.pm2_5_lag_1         IS DISTINCT FROM EXCLUDED.pm2_5_lag_1
+   OR features.pm10_lag_1          IS DISTINCT FROM EXCLUDED.pm10_lag_1
+   OR features.temperature_lag_1   IS DISTINCT FROM EXCLUDED.temperature_lag_1
+   OR features.wind_speed_lag_1    IS DISTINCT FROM EXCLUDED.wind_speed_lag_1
+   OR features.precipitation_lag_1 IS DISTINCT FROM EXCLUDED.precipitation_lag_1
+   OR features.pm2_5_roll_7        IS DISTINCT FROM EXCLUDED.pm2_5_roll_7
+   OR features.pm2_5_roll_30       IS DISTINCT FROM EXCLUDED.pm2_5_roll_30
+   OR features.pm10_roll_7         IS DISTINCT FROM EXCLUDED.pm10_roll_7
+   OR features.pm10_roll_30        IS DISTINCT FROM EXCLUDED.pm10_roll_30
+   OR features.temperature_2m_mean IS DISTINCT FROM EXCLUDED.temperature_2m_mean
+   OR features.wind_speed_10m_max  IS DISTINCT FROM EXCLUDED.wind_speed_10m_max
+   OR features.precipitation_sum   IS DISTINCT FROM EXCLUDED.precipitation_sum;
 """
 
 
@@ -98,9 +111,10 @@ def engineer_features():
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
+                # Serialize overlapping runs; released on COMMIT/ROLLBACK.
+                acquire_pipeline_lock(cur, "pm25_features")
                 cur.execute(ENGINEER_SQL, (CITY,))
                 written = cur.rowcount
-                conn.commit()
                 print(f"Upserted {written} feature rows for {CITY}")
 
                 cur.execute("""
@@ -119,7 +133,10 @@ def engineer_features():
                 print(f"  NULL pm2_5_roll_7: {no_roll7} (first 6 days + gap-spanning windows)")
                 print(f"  NULL pm2_5_roll_30: {no_roll30} (first 29 days + gap-spanning windows)")
 
+                # Validated BEFORE commit: a failed alignment rolls everything back
+                # instead of leaving bad rows committed.
                 verify_alignment(cur)
+                conn.commit()
     except Exception as e:
         print(f"Error engineering features: {e}")
         raise

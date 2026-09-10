@@ -51,6 +51,10 @@ TABLES = {
 
             day_of_week INTEGER,  -- 0=Monday, 6=Sunday
             month INTEGER,        -- 1-12
+            -- BOOLEAN here vs INT on electricity_features.is_weekend: intentional,
+            -- each matches its target's training frame (bool feeds float(True)=1.0
+            -- identically). Unified only with a retrain + backtest delta; the
+            -- leakage tests normalize via bool() so both read the same.
             is_weekend BOOLEAN,
 
             temperature_2m_mean FLOAT,
@@ -92,6 +96,7 @@ TABLES = {
     "model_performance": """
         CREATE TABLE IF NOT EXISTS model_performance (
             id SERIAL PRIMARY KEY,
+            city VARCHAR(100) NOT NULL DEFAULT 'Nagpur',
             score_date DATE NOT NULL,
             model VARCHAR(50) NOT NULL,
             mae FLOAT,
@@ -205,6 +210,17 @@ MIGRATIONS = (
     "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
     "ALTER TABLE electricity_model_performance "
     "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
+    # Multi-city unlock: model_performance predates the second target and has no
+    # city column, so require_city_of_record() pins the PM2.5 pipeline to Nagpur.
+    # This migration is additive and idempotent: existing deploys gain a backfilled
+    # city, new deploys get it from the CREATE TABLE above. The legacy
+    # UNIQUE(score_date, model) is kept (dropping constraints needs downtime); the
+    # new UNIQUE(city, score_date, model) is what future multi-city writers use.
+    "ALTER TABLE model_performance "
+    "ADD COLUMN IF NOT EXISTS city VARCHAR(100) NOT NULL DEFAULT 'Nagpur';",
+    "UPDATE model_performance SET city = 'Nagpur' WHERE city IS NULL;",
+    "CREATE UNIQUE INDEX IF NOT EXISTS model_performance_city_score_model_uidx "
+    "ON model_performance (city, score_date, model);",
     # Aggregate tables. A daily row scores one date against a UNIQUE(city,
     # forecast_date, model) predictions table, so its sample_size is 1 by
     # construction - anything larger came from a backtest.

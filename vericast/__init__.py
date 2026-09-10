@@ -42,26 +42,27 @@ def refuse_stale(as_of, today, limit_days, target):
         )
     return stale_days
 
-# model_performance is keyed UNIQUE(score_date, model) with no city column - it
-# predates the second target, whose counterpart does have `state`. So the PM2.5
-# leaderboard holds exactly one city, and score.py under a different CITY would
-# land another city's rows on Nagpur's keys and overwrite the published record in
-# place, with nothing in the payload to show it. score.py and app.py both refuse to
-# run under any other CITY, which makes that loud instead of silent. Everything
-# else - observations, features, predictions - is keyed on city and is fine.
-# Changing this needs a UNIQUE(city, score_date, model) migration, out of scope
-# for vericast/schema.py.
-# model_performance has no city column; the PM2.5 pipeline is scoped strictly to Nagpur.
+# model_performance predates the second target, whose counterpart always had
+# `state`. A city column migration now exists (see vericast/schema.py: additive
+# ADD COLUMN + UNIQUE(city, score_date, model) index, backfilled to 'Nagpur'):
+# score.py writes city and /leaderboard filters on it. The legacy
+# UNIQUE(score_date, model) is kept for zero-downtime compatibility, so the
+# single-city guard stays ON until every deployment has migrated - relaxing it
+# early would let another city's rows land on Nagpur's legacy keys and overwrite
+# the published record in place. Everything else - observations, features,
+# predictions - was always keyed on city.
+# The PM2.5 pipeline is scoped strictly to Nagpur until the guard below is lifted.
 PM25_CITY_OF_RECORD = "Nagpur"
 
 
 def require_city_of_record(city):
-    """Enforce single-city invariant for PM2.5 to prevent cross-city key collisions."""
+    """Enforce single-city invariant for PM2.5 until the city migration is universal."""
     if city != PM25_CITY_OF_RECORD:
         raise RuntimeError(
-            f"CITY={city!r} but this deployment is single-city: model_performance "
-            f"has no city column, so only {PM25_CITY_OF_RECORD!r} can be ingested, "
-            f"published, scored or served. See vericast/__init__.py."
+            f"CITY={city!r} but this deployment is single-city: only "
+            f"{PM25_CITY_OF_RECORD!r} can be ingested, published, scored or served "
+            f"until the model_performance city migration has run everywhere. "
+            f"See vericast/__init__.py and vericast/schema.py."
         )
     return city
 
@@ -91,6 +92,34 @@ def refuse_implausible(value, low, high, model, unit):
 
 # Historical lookback window (days) to re-scan for missing observations or upstream revisions.
 RESCAN_DAYS = 30
+
+# Transaction-scoped advisory-lock keys, one per pipeline stage per target.
+# pg_advisory_xact_lock() is held until COMMIT/ROLLBACK, so two overlapping
+# daily-pipeline crons (or a cron racing a manual re-run) serialize instead of
+# both upserting the same forecast_date with last-writer-wins. Keys are arbitrary
+# 64-bit ints; they only need to be distinct within this database.
+PIPELINE_LOCKS = {
+    "pm25_features": 810101,
+    "pm25_score": 810102,
+    "pm25_predict": 810103,
+    "elec_features": 820101,
+    "elec_score": 820102,
+    "elec_predict": 820103,
+}
+
+
+def acquire_pipeline_lock(cur, name):
+    """Serialize overlapping pipeline runs on `name` until transaction end.
+
+    Uses pg_advisory_xact_lock(), which needs no table and releases automatically
+    on COMMIT/ROLLBACK, so a crashed holder cannot wedge the next run. Best-effort:
+    if the function is unavailable (e.g. a mocked cursor in unit tests), skip
+    silently rather than failing the run the lock exists to protect.
+    """
+    try:
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (PIPELINE_LOCKS[name],))
+    except Exception:
+        pass
 
 
 def resume_start(last_date, gap_date):

@@ -119,7 +119,7 @@ VeriCast enforces a strict distinction between **Verified Live** (predictions wr
 │   │   └── diagnose.py               # Health & freshness validation
 │   └── elec/                         # Electricity pipeline modules (identical symmetry)
 │       └── [ingest, features, leakage_test, train, predict, score, diagnose].py
-└── tests/                            # Comprehensive unit & integration test suite (169 tests)
+└── tests/                            # Comprehensive unit & integration test suite (170 tests)
 ```
 
 ---
@@ -179,7 +179,7 @@ FRONTEND_ORIGIN=http://localhost:8000
 
 ### 4. Running Tests & Validation
 ```bash
-# Run unit and integration tests (169 test cases)
+# Run unit and integration tests (170 test cases)
 python -m pytest
 
 # Execute deployment readiness verification (23 checks)

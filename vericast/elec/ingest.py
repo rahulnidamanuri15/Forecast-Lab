@@ -89,13 +89,19 @@ def get_last_observed_date(cur):
     return row[0] if row else None
 
 
-def get_earliest_hole(cur, since):
-    """Earliest date in [since, yesterday] with no observation for this state, or None.
+def get_earliest_hole(cur, since, end=None):
+    """Earliest date in [since, end] with no observation for this state, or None.
 
     Only absent rows, unlike the PM2.5 twin: peak_demand_mw is NOT NULL here, so a
     day the mirror served blank was skipped at insert time rather than stored as
     NULL. Those are the dates worth re-reading, since the mirror backfills late.
+    A temp-only NULL row is intentionally NOT a hole: it still carries a scoreable
+    peak, and re-reading it would fail identically until the upstream cell changes.
+
+    `end` defaults to yesterday for backwards compatibility; callers pass their
+    single yesterday value to avoid a midnight-rollover skew.
     """
+    end = end if end is not None else local_time.yesterday()
     cur.execute(
         """
         SELECT MIN(d.day)::date FROM generate_series(%s::date, %s::date, '1 day') d(day)
@@ -103,7 +109,7 @@ def get_earliest_hole(cur, since):
                ON o.as_of = d.day AND o.state = %s
         WHERE o.as_of IS NULL
         """,
-        (since, local_time.yesterday(), STATE),
+        (since, end, STATE),
     )
     return cur.fetchone()[0]
 
@@ -121,23 +127,29 @@ def resolve_date_range():
     One connection for both queries, as in the PM2.5 twin.
     """
     require_database_url(DATABASE_URL)
+    # Single clock read: see the PM2.5 twin for why yesterday() is read once.
+    yesterday = local_time.yesterday()
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             last_date = get_last_observed_date(cur)
 
             if last_date is None:
                 return (datetime.strptime(INITIAL_START, "%Y-%m-%d").date(),
-                        local_time.yesterday())
+                        yesterday)
 
             hole = get_earliest_hole(
-                cur, local_time.yesterday() - timedelta(days=RESCAN_DAYS))
+                cur, yesterday - timedelta(days=RESCAN_DAYS), yesterday)
 
     start = resume_start(last_date, hole)
     if hole and start == hole:
         print(f"Re-scanning from {hole}: earliest missing day in the last "
               f"{RESCAN_DAYS} days (a hole the monotonic resume would skip forever).")
+        if (yesterday - hole).days >= RESCAN_DAYS:
+            print(f"  [warn] hole {hole} sits at the edge of the {RESCAN_DAYS}-day "
+                  f"re-scan window; if the mirror never backfills it, every run "
+                  f"re-queues from here. Investigate after repeated occurrences.")
 
-    return start, local_time.yesterday()
+    return start, yesterday
 
 
 def fetch_demand(start_date, end_date):

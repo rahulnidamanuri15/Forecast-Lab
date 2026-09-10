@@ -5,3 +5,5 @@
 -r requirements.txt
 
 pytest==9.1.1
+# Coverage for the score/features branches CI otherwise never measures.
+pytest-cov==7.0.0

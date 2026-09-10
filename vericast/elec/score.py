@@ -10,7 +10,12 @@ import numpy as np
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import reopen_revised_actuals, require_database_url, revision_sql
+from vericast import (
+    acquire_pipeline_lock,
+    reopen_revised_actuals,
+    require_database_url,
+    revision_sql,
+)
 
 load_dotenv()
 
@@ -19,6 +24,7 @@ STATE = os.getenv("STATE", "Maharashtra")
 
 # Attach arriving ground-truth observations to pending predictions.
 # Scoped to source='daily' and non-null predictions to preserve backtest provenance.
+# NaN/Infinity guards: see the PM2.5 twin for why non-finite actuals are excluded.
 SCORE_SQL = """
 UPDATE electricity_predictions p
 SET actual_demand_mw = o.peak_demand_mw
@@ -31,6 +37,8 @@ WHERE o.state = p.state
   AND p.predicted_demand_mw IS NOT NULL
   AND o.peak_demand_mw IS NOT NULL
   AND o.peak_demand_mw != 'NaN'::float
+  AND o.peak_demand_mw != 'Infinity'::float
+  AND o.peak_demand_mw != '-Infinity'::float
 RETURNING p.forecast_date, p.model, p.predicted_demand_mw, o.peak_demand_mw;
 """
 
@@ -64,6 +72,8 @@ def score_pending_predictions():
     require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            # Serialize overlapping scorers; released on COMMIT/ROLLBACK.
+            acquire_pipeline_lock(cur, "elec_score")
             reopened = reopen_revised_actuals(
                 cur, DIVERGED_SQL, REOPEN_SQL, STATE, "MW")
 
@@ -82,42 +92,58 @@ def score_pending_predictions():
                 print("No pending electricity predictions had an actual available.")
                 return 0
 
+            def _non_finite(v):
+                return isinstance(v, float) and (math.isnan(v) or math.isinf(v))
+
             groups = {}
             for forecast_date, model, predicted, actual in scored:
                 if predicted is None or actual is None:
                     continue
-                if isinstance(predicted, float) and math.isnan(predicted):
-                    print(f"  [skip] {forecast_date} {model}: predicted is NaN; not scoring")
+                if _non_finite(predicted):
+                    print(f"  [skip] {forecast_date} {model}: predicted is non-finite; not scoring")
                     continue
-                if isinstance(actual, float) and math.isnan(actual):
-                    print(f"  [skip] {forecast_date} {model}: actual is NaN; not scoring")
+                if _non_finite(actual):
+                    print(f"  [skip] {forecast_date} {model}: actual is non-finite; not scoring")
                     continue
                 groups.setdefault((forecast_date, model), []).append((predicted, actual))
 
+            # Per-group SAVEPOINTs: one corrupt day skips itself instead of rolling
+            # back every valid day scored in this run.
+            skipped = 0
             for (score_date, model), pairs in sorted(groups.items()):
-                predicted = np.array([p for p, _ in pairs], dtype=float)
-                actual = np.array([a for _, a in pairs], dtype=float)
-                mae = float(np.mean(np.abs(predicted - actual)))
-                rmse = float(np.sqrt(np.mean((predicted - actual) ** 2)))
-                # MAPE is undefined at actual == 0. Real peak demand is ~20-32 GW so
-                # this never fires, but a bad upstream parse landing a 0 shouldn't
-                # take the scoring step down.
-                nonzero = actual != 0
-                mape = (float(np.mean(np.abs((predicted[nonzero] - actual[nonzero])
-                                             / actual[nonzero])) * 100)
-                        if nonzero.any() else None)
+                cur.execute("SAVEPOINT score_day")
+                try:
+                    predicted = np.array([p for p, _ in pairs], dtype=float)
+                    actual = np.array([a for _, a in pairs], dtype=float)
+                    mae = float(np.mean(np.abs(predicted - actual)))
+                    rmse = float(np.sqrt(np.mean((predicted - actual) ** 2)))
+                    # MAPE is undefined at actual == 0. Real peak demand is ~20-32 GW so
+                    # this never fires, but a bad upstream parse landing a 0 shouldn't
+                    # take the scoring step down.
+                    nonzero = actual != 0
+                    mape = (float(np.mean(np.abs((predicted[nonzero] - actual[nonzero])
+                                                 / actual[nonzero])) * 100)
+                            if nonzero.any() else None)
 
-                if math.isnan(mae) or math.isnan(rmse) or (mape is not None and math.isnan(mape)):
-                    raise RuntimeError(
-                        f"Computed metric is NaN for {score_date} {model}; "
-                        "aborting transaction to avoid committing unmeasured actuals"
-                    )
+                    if not (math.isfinite(mae) and math.isfinite(rmse)
+                            and (mape is None or math.isfinite(mape))):
+                        raise ValueError(
+                            f"non-finite metric (mae={mae}, rmse={rmse}, mape={mape})")
 
-                cur.execute(UPSERT_PERF_SQL,
-                            (STATE, score_date, model, mae, rmse, mape, len(pairs)))
-                mape_str = f"{mape:.2f}%" if mape is not None else "n/a"
-                print(f"Scored {model} for {score_date}: MAE={mae:.2f} MW, "
-                      f"RMSE={rmse:.2f} MW, MAPE={mape_str} (n={len(pairs)})")
+                    cur.execute(UPSERT_PERF_SQL,
+                                (STATE, score_date, model, mae, rmse, mape, len(pairs)))
+                    cur.execute("RELEASE SAVEPOINT score_day")
+                    mape_str = f"{mape:.2f}%" if mape is not None else "n/a"
+                    print(f"Scored {model} for {score_date}: MAE={mae:.2f} MW, "
+                          f"RMSE={rmse:.2f} MW, MAPE={mape_str} (n={len(pairs)})")
+                except Exception as exc:
+                    cur.execute("ROLLBACK TO SAVEPOINT score_day")
+                    cur.execute("RELEASE SAVEPOINT score_day")
+                    skipped += 1
+                    print(f"  [skip] {score_date} {model}: {exc}; day skipped, rest committed")
+            if skipped:
+                print(f"  [warn] {skipped} day(s) skipped for non-finite metrics; "
+                      f"valid days committed normally.")
 
             conn.commit()
 

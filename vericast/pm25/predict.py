@@ -15,11 +15,13 @@ from vericast import (
     PM25_MAX,
     PM25_MIN,
     PM25_STALE_LIMIT_DAYS,
+    acquire_pipeline_lock,
     local_time,
     refuse_implausible,
     refuse_stale,
     require_city_of_record,
     require_database_url,
+    send_alert,
 )
 from vericast.pm25.train import FEATURE_COLUMNS
 
@@ -57,12 +59,20 @@ def get_latest_feature_row(cur):
 
 
 def make_daily_prediction():
-    """Make a daily prediction for the day after the latest observation and store it"""
+    """Make a daily prediction for the day after the latest observation and store it.
+
+    Returns True on a full or deliberately-degraded run (missing artifact or NULL
+    features skip that arm with a WARN; diagnose.py owns the completeness gate and
+    fails the pipeline there). Partial runs alert loudly so exit 0 is never silent.
+    """
     require_database_url(DATABASE_URL)
+    # Load the artifact BEFORE opening a pooled connection: holding a Neon slot
+    # open while reading a model file wastes one of 8 pool connections.
+    lgbm_model = load_lightgbm_model()
     # The connection is the context manager, as in score.py: a raise anywhere
     # below closes it instead of leaking it against Neon's connection limit.
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
-        lgbm_model = load_lightgbm_model()
+        acquire_pipeline_lock(cur, "pm25_predict")
 
         today = local_time.today()
         yesterday = today - timedelta(days=1)
@@ -78,7 +88,7 @@ def make_daily_prediction():
 
         row = cur.fetchone()
         if not row:
-            raise Exception("No observations found")
+            raise RuntimeError("No observations found")
 
         as_of, pm2_5 = row
         forecast_date = as_of + timedelta(days=1)
@@ -102,9 +112,11 @@ def make_daily_prediction():
             created_at = CURRENT_TIMESTAMP;
         """
 
+        skipped = []
         if pm2_5 is None:
             print(f"[WARN] Latest observation ({as_of}) has NULL pm2_5; "
                   f"skipping naive_baseline forecast for {forecast_date}.")
+            skipped.append("naive_baseline (NULL observation)")
         else:
             pm2_5 = refuse_implausible(pm2_5, PM25_MIN, PM25_MAX,
                                        "naive_baseline", UNIT)
@@ -113,10 +125,13 @@ def make_daily_prediction():
 
         # LightGBM prediction, if a trained artifact is available. Conditions on the
         # latest features row, whose lag/rolling values are what predict forecast_date.
-        if lgbm_model is not None:
+        if lgbm_model is None:
+            skipped.append("lightgbm (missing artifact)")
+        else:
             feature_row = get_latest_feature_row(cur)
             if feature_row is None:
                 print("[WARN] No features row found; skipping LightGBM forecast.")
+                skipped.append("lightgbm (no features row)")
             else:
                 feat_as_of = feature_row[0]
                 feature_values = feature_row[1:]
@@ -127,9 +142,11 @@ def make_daily_prediction():
                         f"observation ({as_of}); has vericast/pm25/features.py been run for "
                         f"today's data yet? Skipping LightGBM forecast."
                     )
+                    skipped.append(f"lightgbm (features {feat_as_of} != obs {as_of})")
                 elif any(v is None for v in feature_values):
                     print("[WARN] Latest features row has NULL values (likely a date gap); "
                           "skipping LightGBM forecast to avoid a garbage prediction.")
+                    skipped.append("lightgbm (NULL features)")
                 else:
                     X = np.array([feature_values], dtype=float)
                     lgbm_pred = float(lgbm_model.predict(X)[0])
@@ -141,6 +158,18 @@ def make_daily_prediction():
 
         # Atomic commit for the forecast date across all models.
         conn.commit()
+
+        if skipped:
+            # Loud partial run: exit code stays 0 because diagnose.py (step 6/6) owns
+            # the completeness gate, but a WARN-only skip previously looked identical
+            # to a full run in the Actions log.
+            print(f"[WARN] Partial PM2.5 publish for {forecast_date}: "
+                  f"skipped {', '.join(skipped)}.")
+            send_alert(
+                "VeriCast PM2.5 partial publish",
+                f"Forecast for {forecast_date} published with skips: "
+                f"{', '.join(skipped)}. diagnose.py will gate completeness.",
+            )
 
         return True
 

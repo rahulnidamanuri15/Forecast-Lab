@@ -103,6 +103,17 @@ def main():
             if latest_obs is None:
                 check("Observations exist", False, f"no observations for {CITY}")
                 print("=" * 60)
+                # The most severe case: without this alert an empty table fails
+                # silently, since none of the checks below run to trigger the
+                # end-of-main send_alert.
+                try:
+                    send_alert(
+                        "VeriCast PM2.5 Diagnostic Gate FAILED",
+                        f"No observations at all for {CITY}; pipeline has nothing "
+                        f"to score or publish from. Do not publish.",
+                    )
+                except Exception:
+                    pass
                 return False
 
             stale_days = (local_time.today() - latest_obs).days

@@ -9,7 +9,12 @@ import os
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import alignment_sql, require_database_url, verify_alignment as check_alignment
+from vericast import (
+    acquire_pipeline_lock,
+    alignment_sql,
+    require_database_url,
+    verify_alignment as check_alignment,
+)
 
 load_dotenv()
 
@@ -76,7 +81,18 @@ ON CONFLICT (state, as_of) DO UPDATE SET
     is_weekend          = EXCLUDED.is_weekend,
     temperature_2m_mean = EXCLUDED.temperature_2m_mean,
     temperature_2m_max  = EXCLUDED.temperature_2m_max,
-    created_at          = CURRENT_TIMESTAMP;
+    created_at          = CURRENT_TIMESTAMP
+WHERE electricity_features.demand_lag_1        IS DISTINCT FROM EXCLUDED.demand_lag_1
+   OR electricity_features.demand_lag_2        IS DISTINCT FROM EXCLUDED.demand_lag_2
+   OR electricity_features.demand_lag_6        IS DISTINCT FROM EXCLUDED.demand_lag_6
+   OR electricity_features.demand_roll_7_mean  IS DISTINCT FROM EXCLUDED.demand_roll_7_mean
+   OR electricity_features.demand_roll_7_max   IS DISTINCT FROM EXCLUDED.demand_roll_7_max
+   OR electricity_features.demand_roll_30_mean IS DISTINCT FROM EXCLUDED.demand_roll_30_mean
+   OR electricity_features.temp_lag_1          IS DISTINCT FROM EXCLUDED.temp_lag_1
+   OR electricity_features.temp_roll_7         IS DISTINCT FROM EXCLUDED.temp_roll_7
+   OR electricity_features.cooling_degree_days IS DISTINCT FROM EXCLUDED.cooling_degree_days
+   OR electricity_features.temperature_2m_mean IS DISTINCT FROM EXCLUDED.temperature_2m_mean
+   OR electricity_features.temperature_2m_max  IS DISTINCT FROM EXCLUDED.temperature_2m_max;
 """
 
 
@@ -94,9 +110,10 @@ def engineer_features():
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
+                # Serialize overlapping runs; released on COMMIT/ROLLBACK.
+                acquire_pipeline_lock(cur, "elec_features")
                 cur.execute(ENGINEER_SQL, (STATE,))
                 written = cur.rowcount
-                conn.commit()
                 print(f"Upserted {written} feature rows for {STATE}")
 
                 cur.execute("""
@@ -117,7 +134,10 @@ def engineer_features():
 
                 # An AssertionError here exits non-zero, so the pipeline stops
                 # before predict.py publishes a forecast built on a broken join.
+                # Validated BEFORE commit: a failed alignment rolls everything back
+                # instead of leaving bad rows committed.
                 verify_alignment(cur)
+                conn.commit()
     except Exception as e:
         print(f"Error engineering electricity features: {e}")
         raise

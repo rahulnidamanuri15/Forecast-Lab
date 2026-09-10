@@ -54,6 +54,24 @@ async def lifespan(_app: FastAPI):
             kwargs={"options": "-c statement_timeout=10000"},  # 10s statement timeout to protect pool
         )
         _pool.open()
+        # Fail-fast boot check: a bad DSN previously surfaced only on the first
+        # request as a 500. Log loudly here so a misconfigured deploy is obvious
+        # in the startup logs instead of masquerading as runtime flakiness.
+        # Non-fatal: Render cold-starts the web service before the DB is reachable,
+        # so a hard raise here would crash-loop a healthy deploy.
+        try:
+            with _pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+        except Exception as exc:
+            log.warning("database boot check failed (%s); serving, requests may 503/500 "
+                        "until the database is reachable", type(exc).__name__)
+        # Single-process rate limiter (see below): warn when running multi-worker,
+        # where each worker enforces its own independent bucket.
+        if os.getenv("WEB_CONCURRENCY", "1") not in ("1",):
+            log.warning("WEB_CONCURRENCY=%s: in-memory rate limiter is per-process; "
+                        "effective limit scales with workers. Use 1 worker or an "
+                        "external store.", os.getenv("WEB_CONCURRENCY"))
         yield
     finally:
         if _pool is not None:
@@ -96,6 +114,11 @@ async def cache_control(request, call_next):
 
 
 # In-memory rate limiting (120 req/min per client IP) to protect the DB connection pool.
+# SINGLE-PROCESS ONLY: buckets live in this process's dict, reset on restart, and
+# are NOT shared across uvicorn --workers > 1 or multiple Render instances. Deploy
+# with 1 worker (current default: `uvicorn app:app` with no --workers flag). If you
+# scale horizontally, replace this with a shared store (Redis) - otherwise the
+# effective limit multiplies by the worker/instance count.
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 120
 RATE_LIMIT_MAX_CLIENTS = 10_000
@@ -193,13 +216,21 @@ async def serve_dashboard():
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # connect-src uses a wildcard for onrender.com (plus 'self' and localhost) so
+    # a window.API_BASE override (used by the readiness gate and self-hosters)
+    # is not blocked by a pinned production hostname. 'unsafe-inline' stays because
+    # the dashboard is a single static file with inline <script>/<style> and no
+    # build step to hash; object-src/frame-ancestors close the embedding vectors
+    # that inline allowances would otherwise open.
     response.headers["Content-Security-Policy"] = (
         "default-src 'none'; "
         "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; "
         "img-src 'self' data:; "
-        "connect-src 'self' https://forecast-lab-2l0q.onrender.com http://localhost:8000 http://127.0.0.1:8000; "
+        "connect-src 'self' https://*.onrender.com http://localhost:8000 http://127.0.0.1:8000; "
+        "object-src 'none'; "
+        "frame-ancestors 'none'; "
         "base-uri 'none'; "
         "form-action 'none'"
     )
@@ -370,13 +401,31 @@ async def get_leaderboard():
                 # writes one aggregate row per model at the last evaluated date, so a
                 # backtest re-run today would carry the most recent score_date and
                 # become the published leaderboard with a sample_size in the hundreds.
-                cur.execute("""
-                    SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
-                    FROM model_performance
-                    WHERE source = 'daily'
-                    ORDER BY model, score_date DESC
-                """)
-                rows = cur.fetchall()
+                #
+                # city filter is the multi-city half of the schema.py migration: rows
+                # are now written with city, so the leaderboard scopes to this
+                # deployment's CITY. The fallback covers databases the migration has
+                # not run on yet (city column absent -> UndefinedColumn -> retry
+                # without the filter rather than 500ing the endpoint).
+                try:
+                    cur.execute("""
+                        SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
+                        FROM model_performance
+                        WHERE source = 'daily' AND city = %s
+                        ORDER BY model, score_date DESC
+                    """, (CITY,))
+                    rows = cur.fetchall()
+                except Exception as exc:
+                    if "city" not in str(exc).lower() and "column" not in str(exc).lower():
+                        raise
+                    conn.rollback()
+                    cur.execute("""
+                        SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
+                        FROM model_performance
+                        WHERE source = 'daily'
+                        ORDER BY model, score_date DESC
+                    """)
+                    rows = cur.fetchall()
 
         if not rows:
             raise HTTPException(status_code=404, detail="No model performance data found")

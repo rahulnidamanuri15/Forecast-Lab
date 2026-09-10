@@ -31,9 +31,11 @@ permissions:
 jobs:
   pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       CITY: Nagpur
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -43,24 +45,33 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        timeout-minutes: 10
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: 1/6 Ingest observations
+        timeout-minutes: 10
         run: python -m vericast.pm25.ingest
 
       - name: 2/6 Engineer features
+        timeout-minutes: 10
         run: python -m vericast.pm25.features
 
       - name: 3/6 Leakage test
+        timeout-minutes: 10
         run: python -m vericast.pm25.leakage_test
 
       - name: 4/6 Score pending predictions
+        timeout-minutes: 10
         run: python -m vericast.pm25.score
 
       - name: 5/6 Make new forecast
+        timeout-minutes: 10
         run: python -m vericast.pm25.predict
 
       - name: 6/6 Verify forecast is publishable
+        timeout-minutes: 10
         run: python -m vericast.pm25.diagnose
 
   # Deliberately no `needs:` - the two targets share nothing but the database.
@@ -68,9 +79,11 @@ jobs:
   # that stall block the live PM2.5 forecast, which has its own working upstream.
   electricity:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       STATE: Maharashtra
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -80,22 +93,31 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        timeout-minutes: 10
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: 1/6 Ingest demand and temperature
+        timeout-minutes: 10
         run: python -m vericast.elec.ingest
 
       - name: 2/6 Engineer features
+        timeout-minutes: 10
         run: python -m vericast.elec.features
 
       - name: 3/6 Leakage test
+        timeout-minutes: 10
         run: python -m vericast.elec.leakage_test
 
       - name: 4/6 Score pending predictions
+        timeout-minutes: 10
         run: python -m vericast.elec.score
 
       - name: 5/6 Make new forecast
+        timeout-minutes: 10
         run: python -m vericast.elec.predict
 
       - name: 6/6 Verify forecast is publishable
+        timeout-minutes: 10
         run: python -m vericast.elec.diagnose
