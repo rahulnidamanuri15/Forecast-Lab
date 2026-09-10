@@ -673,9 +673,10 @@ def main():
         print("\nNext steps:")
         print("  1. Deploy to your chosen platform (Render, Fly.io, etc.)")
         print("  2. Set environment variables: DATABASE_URL (required), STATE, "
-              "FRONTEND_ORIGIN. CITY must stay Nagpur - model_performance has no "
-              "city column, so require_city_of_record refuses anything else at "
-              "import, here and in app.py.")
+              "FRONTEND_ORIGIN. CITY must stay Nagpur - require_city_of_record "
+              "refuses anything else at import, here and in app.py, until the "
+              "model_performance city migration (vericast/schema.py) has run "
+              "everywhere.")
         print("  3. Verify GitHub Actions workflow runs successfully")
         print("  4. Monitor the system for 24-48 hours before marking as production")
         return True
