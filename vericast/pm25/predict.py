@@ -25,7 +25,7 @@ from vericast import (
 )
 from vericast.pm25.train import FEATURE_COLUMNS
 from vericast.artifacts import load_model, model_exists
-from vericast.publication import require_advance_forecast
+from vericast.publication import publish_predictions
 
 load_dotenv()
 
@@ -97,7 +97,6 @@ def make_daily_prediction():
 
         # Validate that the observation is fresh enough to anchor a forecast.
         stale_days = refuse_stale(as_of, today, PM25_STALE_LIMIT_DAYS, "PM2.5")
-        require_advance_forecast(forecast_date, "UTC")
         if as_of != yesterday:
             print(f"[WARN] Most recent observation is from {as_of}, {stale_days} "
                   f"day(s) old (expected data through {yesterday}). Forecasting "
@@ -105,13 +104,14 @@ def make_daily_prediction():
 
         print(f"Making prediction for {forecast_date} based on {as_of}'s observation")
 
-        # Upsert prediction into the public record with source='daily'.
+        # Stage validated values; classify the whole batch only after inference.
         upsert_sql = """
-        INSERT INTO predictions (city, forecast_date, predicted_pm2_5, model)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (city, forecast_date, model) DO NOTHING;
+        INSERT INTO predictions (city, forecast_date, predicted_pm2_5, model, source, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (city, forecast_date, model, source) DO NOTHING;
         """
 
+        records = []
         skipped = []
         if pm2_5 is None:
             print(f"[WARN] Latest observation ({as_of}) has NULL pm2_5; "
@@ -120,8 +120,8 @@ def make_daily_prediction():
         else:
             pm2_5 = refuse_implausible(pm2_5, PM25_MIN, PM25_MAX,
                                        "naive_baseline", UNIT)
-            cur.execute(upsert_sql, (CITY, forecast_date, pm2_5, "naive_baseline"))
-            print(f"[OK] Stored naive_baseline prediction for {forecast_date}: {pm2_5:.2f} PM2.5")
+            records.append((CITY, forecast_date, pm2_5, "naive_baseline"))
+            print(f"[OK] Prepared naive_baseline prediction for {forecast_date}: {pm2_5:.2f} PM2.5")
 
         # LightGBM prediction, if a trained artifact is available. Conditions on the
         # latest features row, whose lag/rolling values are what predict forecast_date.
@@ -153,11 +153,10 @@ def make_daily_prediction():
 
                     lgbm_pred = refuse_implausible(lgbm_pred, PM25_MIN, PM25_MAX,
                                                    "lightgbm", UNIT)
-                    cur.execute(upsert_sql, (CITY, forecast_date, lgbm_pred, "lightgbm"))
-                    print(f"[OK] Stored lightgbm prediction for {forecast_date}: {lgbm_pred:.2f} PM2.5")
+                    records.append((CITY, forecast_date, lgbm_pred, "lightgbm"))
+                    print(f"[OK] Prepared lightgbm prediction for {forecast_date}: {lgbm_pred:.2f} PM2.5")
 
-        # Recheck after inference: crossing the cutoff rolls back all inserts.
-        require_advance_forecast(forecast_date, "UTC")
+        publish_predictions(cur, upsert_sql, records, forecast_date, "UTC")
         # Atomic commit for the forecast date across all models.
         conn.commit()
 

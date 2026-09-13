@@ -7,6 +7,7 @@ are authoritative; a corrupt bundle never silently falls back to a legacy model.
 import json
 import os
 import tempfile
+from datetime import date
 from pathlib import Path
 
 import lightgbm as lgb
@@ -32,9 +33,37 @@ def read_bundle(model_path):
         raise ValueError("Invalid model bundle")
     window = payload["window"]
     if (not all(isinstance(window.get(k), str) for k in ("first", "last"))
-            or not isinstance(window.get("rows"), int) or window["rows"] <= 0):
+            or type(window.get("rows")) is not int or window["rows"] <= 0):
         raise ValueError("Invalid model training window")
+    try:
+        first, last = (date.fromisoformat(window[k]) for k in ("first", "last"))
+    except ValueError as exc:
+        raise ValueError("Invalid model training window dates") from exc
+    if first > last or window["rows"] > (last - first).days + 1:
+        raise ValueError("Invalid model training window range")
     return payload
+
+
+def model_metadata(model_path, expected_features=None):
+    """Validate the same authoritative artifact inference uses, without exposing it.
+
+    Metadata describes the currently deployed artifact, not historical predictions.
+    A corrupt bundle must not fall back to a stale legacy text model.
+    """
+    payload = read_bundle(model_path)
+    model = (lgb.Booster(model_str=payload["model"]) if payload is not None
+             else lgb.Booster(model_file=str(model_path)))
+    if expected_features is not None and model.num_feature() != expected_features:
+        raise ValueError("Model feature count does not match the pipeline")
+    return {
+        "status": "ok",
+        "artifact_format": "bundle" if payload is not None else "legacy",
+        "bundle_version": payload["version"] if payload is not None else None,
+        "training_window": payload["window"] if payload is not None else None,
+        "feature_count": model.num_feature(),
+        "horizon_days": 1,
+        "scope": "current_deployment",
+    }
 
 
 def load_model(model_path):

@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
 from typing import Optional
@@ -15,9 +16,16 @@ from typing import Optional
 from vericast import (
     ELEC_STALE_LIMIT_DAYS,
     PM25_STALE_LIMIT_DAYS,
+    MODEL_PM25,
+    MODEL_ELEC,
     local_time,
     require_city_of_record,
 )
+
+from vericast.artifacts import model_metadata
+from vericast.publication import publication_timing
+from vericast.pm25.train import FEATURE_COLUMNS as PM25_FEATURE_COLUMNS
+from vericast.elec.train import FEATURE_COLUMNS as ELEC_FEATURE_COLUMNS
 
 load_dotenv()
 
@@ -51,7 +59,10 @@ async def lifespan(_app: FastAPI):
             timeout=10,                              # wait for a free slot, then fail
             check=ConnectionPool.check_connection,   # verify connection health on checkout
             open=False,
-            kwargs={"options": "-c statement_timeout=10000"},  # 10s statement timeout to protect pool
+            # Preserve DSN options (notably search_path) so pooled API reads use
+            # the same schema as workers. Enforce the timeout last.
+            kwargs={"options": conninfo_to_dict(DATABASE_URL).get("options", "")
+                    + " -c statement_timeout=10000"},
         )
         _pool.open()
         # Fail-fast boot check: a bad DSN previously surfaced only on the first
@@ -83,8 +94,8 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="VeriCast API",
     description=(
-        f"Read-only public record of next-day forecasts published before the "
-        f"actual was knowable: {CITY} PM2.5 (ug/m3) and {STATE} peak demand met (MW)."
+        f"Read-only t+1 prediction record with separate advance forecasts, delayed "
+        f"estimates, and backtests: {CITY} PM2.5 (ug/m3) and {STATE} peak demand met (MW)."
     ),
     version="0.1.0",
     lifespan=lifespan,
@@ -242,15 +253,12 @@ def serve_dashboard():
 PM25_MODELS = {"lightgbm", "naive_baseline"}
 
 @app.get("/forecast")
-def get_forecast(model: str = "lightgbm"):
-    """Return the latest forecast that was published before its actual existed.
+def get_forecast(model: str = "lightgbm", source: str = "daily"):
+    """Latest prediction in one provenance; 'latest' selects daily/nowcast only.
 
-    Filtered to source = 'daily', not merely labelled like /predictions. This is the
-    dashboard headline: the backtest record runs to 2026-08-28 and the daily record
-    is ahead of it, so an unfiltered `ORDER BY forecast_date DESC LIMIT 1` would
-    serve a walk-forward row fitted after the fact on any day the daily row is
-    missing. `source` is echoed anyway so the caller never has to trust the filter.
+    Default remains advance-only. Scoring status is separate from timing_status.
     """
+    provenance_clause = source_filter(source, allow_latest=True)
 
     if model not in PM25_MODELS:
         raise HTTPException(
@@ -262,7 +270,7 @@ def get_forecast(model: str = "lightgbm"):
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         forecast_date,
                         predicted_pm2_5,
@@ -273,8 +281,8 @@ def get_forecast(model: str = "lightgbm"):
                     FROM predictions
                     WHERE city = %s
                       AND model = %s
-                      AND source = 'daily'
-                    ORDER BY forecast_date DESC
+                      AND {provenance_clause}
+                    ORDER BY forecast_date DESC, created_at DESC
                     LIMIT 1
                     """,
                     (CITY, model),
@@ -299,8 +307,9 @@ def get_forecast(model: str = "lightgbm"):
                 float(actual) if actual is not None else None
             ),
             "status": "verified" if actual is not None else "pending",
-            "created_at": created_at.isoformat(),
+            "created_at": created_at.isoformat() if created_at else None,
             "source": PROVENANCE.get(source, source),
+            **timing_payload(forecast_date, created_at, source, "UTC"),
         }
 
     except HTTPException:
@@ -313,10 +322,56 @@ MODEL_DESCRIPTIONS = {
     "lightgbm": "LightGBM with lagged and rolling features",
 }
 
-# Provenance buckets, in the order they are reported. 'daily' is renamed `verified`
-# in the payload because that is what it means to a reader: the row was published
-# before its actual existed.
-PROVENANCE = {"daily": "verified", "backtest": "backtest"}
+# Keep the legacy API alias `verified` for daily provenance. It means issued
+# before target midnight, NOT that an actual has arrived (see `status`).
+# `publication_source` exposes the stored name without breaking existing clients.
+PROVENANCE = {"daily": "verified", "nowcast": "nowcast", "backtest": "backtest"}
+
+
+def source_filter(source, allow_latest=False):
+    """SQL fragments from a closed allowlist; never interpolate caller input."""
+    clauses = {
+        "daily": "source = 'daily'",
+        "nowcast": "source = 'nowcast'",
+        "backtest": "source = 'backtest'",
+    }
+    if allow_latest:
+        clauses["latest"] = "source IN ('daily', 'nowcast')"
+    if source not in clauses:
+        raise HTTPException(status_code=400, detail=f"Unsupported source: {source}")
+    return clauses[source]
+
+
+def timing_payload(forecast_date, created_at, source, zone):
+    timing = publication_timing(forecast_date, zone, created_at)
+    classified_source = timing.pop("source")
+    if source == "backtest" or created_at is None:
+        timing.update(issued_at=created_at,
+                      timing_status="backtest" if source == "backtest" else "unknown")
+    return {"publication_source": source, **timing,
+            "provenance_consistent": (classified_source == source
+                                      if created_at is not None and source != "backtest"
+                                      else None)}
+
+
+def artifact_diagnostics(path, features, zone):
+    try:
+        artifact = model_metadata(path, len(features))
+    except Exception as exc:
+        log.warning("artifact diagnostic failed: %s", type(exc).__name__)
+        artifact = {"status": "error", "detail": "Model artifact missing or invalid"}
+    return {"model_bundle": artifact, "horizon_days": 1, "target_timezone": zone,
+            "publication_policy": "Before target midnight: daily; at/after: nowcast"}
+
+
+@app.get("/diagnostics")
+def diagnostics():
+    return artifact_diagnostics(MODEL_PM25, PM25_FEATURE_COLUMNS, "UTC")
+
+
+@app.get("/electricity/diagnostics")
+def electricity_diagnostics():
+    return artifact_diagnostics(MODEL_ELEC, ELEC_FEATURE_COLUMNS, "Asia/Kolkata")
 
 
 def _by_provenance(rows, metric_names, descriptions, window_days):
@@ -324,7 +379,7 @@ def _by_provenance(rows, metric_names, descriptions, window_days):
     model with a separate block per provenance.
 
     Shared by /evaluation and /electricity/evaluation, which differ only in their
-    metrics (electricity adds MAPE) and descriptions. The two provenances never
+    metrics (electricity adds MAPE) and descriptions. The three provenances never
     merge here: there is deliberately no combined figure to quote.
     """
     by_model = {}
@@ -386,51 +441,25 @@ def _leaderboard(rows, metric_names, descriptions):
 
 
 @app.get("/leaderboard")
-def get_leaderboard():
-    """
-    Get the leaderboard of model performance, read live from model_performance.
-    For each model, returns its most recent scored MAE/RMSE (i.e. the latest
-    score_date on record for that model), not a fixed backtest snapshot.
-    """
+def get_leaderboard(source: str = "daily"):
+    """Latest scored day per model in exactly one provenance, never combined."""
+    provenance_clause = source_filter(source)
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # DISTINCT ON is Postgres-specific and exactly fits "latest per group".
-                #
-                # source = 'daily' is not optional: experiments/save_backtest_results.py
-                # writes one aggregate row per model at the last evaluated date, so a
-                # backtest re-run today would carry the most recent score_date and
-                # become the published leaderboard with a sample_size in the hundreds.
-                #
-                # city filter is the multi-city half of the schema.py migration: rows
-                # are now written with city, so the leaderboard scopes to this
-                # deployment's CITY. The fallback covers databases the migration has
-                # not run on yet (city column absent -> UndefinedColumn -> retry
-                # without the filter rather than 500ing the endpoint).
-                try:
-                    cur.execute("""
-                        SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
-                        FROM model_performance
-                        WHERE source = 'daily' AND city = %s
-                        ORDER BY model, score_date DESC
-                    """, (CITY,))
-                    rows = cur.fetchall()
-                except Exception as exc:
-                    if "city" not in str(exc).lower() and "column" not in str(exc).lower():
-                        raise
-                    conn.rollback()
-                    cur.execute("""
-                        SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
-                        FROM model_performance
-                        WHERE source = 'daily'
-                        ORDER BY model, score_date DESC
-                    """)
-                    rows = cur.fetchall()
+                cur.execute(f"""
+                    SELECT DISTINCT ON (model) model, mae, rmse, sample_size, score_date
+                    FROM model_performance
+                    WHERE {provenance_clause} AND city = %s
+                    ORDER BY model, score_date DESC
+                """, (CITY,))
+                rows = cur.fetchall()
 
         if not rows:
             raise HTTPException(status_code=404, detail="No model performance data found")
 
         return {
+            "source": PROVENANCE[source],
             "leaderboard": _leaderboard(rows, ("mae", "rmse"), MODEL_DESCRIPTIONS),
             # One bad day can invert /evaluation's ranking at sample_size 1. Saying
             # so is the fix: the multi-day record is the claim, this is the last
@@ -539,7 +568,7 @@ def get_predictions(
                     SELECT forecast_date, model, predicted_pm2_5, actual_pm2_5, created_at, source
                     FROM predictions
                     WHERE {where_clause}
-                    ORDER BY forecast_date DESC, model
+                    ORDER BY forecast_date DESC, model, source
                     LIMIT %s OFFSET %s
                 """, params)
 
@@ -571,6 +600,7 @@ def get_predictions(
                 # launch record. A caller that does not passes ?source=daily,
                 # which filters before the LIMIT rather than after it.
                 "source": PROVENANCE.get(row_source, row_source),
+                **timing_payload(forecast_date, created_at, row_source, "UTC"),
             })
 
         return {
@@ -665,10 +695,9 @@ def get_evaluation(days: Optional[int] = Query(None, ge=0)):
 
         return {
             "evaluation": evaluation,
-            "note": ("`verified` covers forecasts published before the actual was "
-                     "knowable - the record this project exists to keep. `backtest` "
-                     "is the walk-forward launch record, measured with the actual "
-                     "already in hand. Quote them separately."),
+            "note": ("`verified` covers advance forecasts issued before target midnight. "
+                     "`nowcast` covers delayed estimates issued at or after cutoff. "
+                     "`backtest` is the walk-forward launch record. All metrics remain separate."),
         }
     except HTTPException:
         raise
@@ -811,13 +840,9 @@ def electricity_health():
 
 
 @app.get("/electricity/forecast")
-def get_electricity_forecast(model: str = "lightgbm"):
-    """Latest peak-demand forecast (MW) published before its actual existed.
-
-    Filtered to source = 'daily' for the same reason as /forecast: this feeds the
-    dashboard headline, and an unfiltered LIMIT 1 would present a walk-forward
-    backtest row as a live forecast whenever today's daily row is absent.
-    """
+def get_electricity_forecast(model: str = "lightgbm", source: str = "daily"):
+    """Latest demand prediction; 'latest' includes daily and nowcast, not backtest."""
+    provenance_clause = source_filter(source, allow_latest=True)
     if model not in ELEC_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
 
@@ -825,12 +850,12 @@ def get_electricity_forecast(model: str = "lightgbm"):
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT forecast_date, predicted_demand_mw, actual_demand_mw,
                            model, created_at, source
                     FROM electricity_predictions
-                    WHERE state = %s AND model = %s AND source = 'daily'
-                    ORDER BY forecast_date DESC
+                    WHERE state = %s AND model = %s AND {provenance_clause}
+                    ORDER BY forecast_date DESC, created_at DESC
                     LIMIT 1
                     """,
                     (STATE, model),
@@ -849,8 +874,9 @@ def get_electricity_forecast(model: str = "lightgbm"):
             "model": model_name,
             "actual_demand_mw": float(actual) if actual is not None else None,
             "status": "verified" if actual is not None else "pending",
-            "created_at": created_at.isoformat(),
+            "created_at": created_at.isoformat() if created_at else None,
             "source": PROVENANCE.get(source, source),
+            **timing_payload(forecast_date, created_at, source, "Asia/Kolkata"),
         }
     except HTTPException:
         raise
@@ -943,7 +969,7 @@ def get_electricity_predictions(
                            actual_demand_mw, created_at, source
                     FROM electricity_predictions
                     WHERE {where_clause}
-                    ORDER BY forecast_date DESC, model
+                    ORDER BY forecast_date DESC, model, source
                     LIMIT %s OFFSET %s
                 """, params)
 
@@ -970,6 +996,7 @@ def get_electricity_predictions(
                 "created_at": created_at.isoformat() if created_at else None,
                 # Labelled, not filtered by default - see /predictions.
                 "source": PROVENANCE.get(row_source, row_source),
+                **timing_payload(forecast_date, created_at, row_source, "Asia/Kolkata"),
             })
 
         return {"predictions": predictions, "count": len(predictions)}
@@ -1046,9 +1073,9 @@ def get_electricity_evaluation(days: Optional[int] = Query(None, ge=0)):
         return {
             "state": STATE,
             "evaluation": evaluation,
-            "note": ("`verified` covers forecasts published before the actual was "
-                     "knowable. `backtest` is the walk-forward launch record. "
-                     "Quote them separately."),
+            "note": ("`verified` covers advance forecasts issued before target midnight. "
+                     "`nowcast` covers delayed estimates issued at or after cutoff. "
+                     "`backtest` is the walk-forward launch record. Quote them separately."),
         }
     except HTTPException:
         raise
@@ -1057,24 +1084,20 @@ def get_electricity_evaluation(days: Optional[int] = Query(None, ge=0)):
 
 
 @app.get("/electricity/leaderboard")
-def get_electricity_leaderboard():
-    """Most recent scored MAE/RMSE/MAPE per electricity model.
-
-    The counterpart of /leaderboard, over electricity_model_performance. Same
-    caveat: this is the latest scored *day*, so sample_size is normally 1 -
-    /electricity/evaluation is the accuracy claim.
-    """
+def get_electricity_leaderboard(source: str = "daily"):
+    """Latest scored demand day per model in exactly one provenance."""
+    provenance_clause = source_filter(source)
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 # DISTINCT ON as in /leaderboard, plus a STATE filter this table can
                 # apply and model_performance cannot. source = 'daily' keeps a
                 # backtest re-run out of the published leaderboard.
-                cur.execute("""
+                cur.execute(f"""
                     SELECT DISTINCT ON (model)
                            model, mae, rmse, mape, sample_size, score_date
                     FROM electricity_model_performance
-                    WHERE state = %s AND source = 'daily'
+                    WHERE state = %s AND {provenance_clause}
                     ORDER BY model, score_date DESC
                 """, (STATE,))
                 rows = cur.fetchall()
@@ -1084,6 +1107,7 @@ def get_electricity_leaderboard():
 
         return {
             "state": STATE,
+            "source": PROVENANCE[source],
             "leaderboard": _leaderboard(rows, ("mae", "rmse", "mape"),
                                         ELEC_MODEL_DESCRIPTIONS),
             "note": ("Each row is a model's most recently scored day, so a "

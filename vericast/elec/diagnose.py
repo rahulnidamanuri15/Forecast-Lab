@@ -29,6 +29,8 @@ from vericast import (
     send_alert,
 )
 from vericast.elec.train import FEATURE_COLUMNS
+from vericast.artifacts import model_metadata
+from vericast.publication import publication_timing
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -69,9 +71,11 @@ def main():
 
     all_ok = True
 
-    exists = os.path.exists(MODEL_PATH)
-    all_ok &= check(f"Model file found at ./{MODEL_PATH}", exists,
-                    f"cwd={os.getcwd()}" if not exists else "")
+    try:
+        metadata = model_metadata(MODEL_PATH, len(FEATURE_COLUMNS))
+        all_ok &= check("Authoritative model artifact is valid", True, str(metadata))
+    except Exception as exc:
+        all_ok &= check("Authoritative model artifact is valid", False, type(exc).__name__)
 
     require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
@@ -157,11 +161,17 @@ def main():
             # already in hand, can't satisfy the gate.
             expected_date = latest_obs + timedelta(days=1)
             cur.execute("""
-                SELECT model, predicted_demand_mw
+                SELECT model, predicted_demand_mw, source, created_at
                 FROM electricity_predictions
-                WHERE state = %s AND forecast_date = %s AND source = 'daily'
+                WHERE state = %s AND forecast_date = %s AND source IN ('daily', 'nowcast')
+                ORDER BY created_at
             """, (STATE, expected_date))
-            published = dict(cur.fetchall())
+            rows = cur.fetchall()
+            published = {model: value for model, value, source, issued_at in rows}
+            for model, value, source, issued_at in rows:
+                valid = (issued_at is not None and
+                         publication_timing(expected_date, "Asia/Kolkata", issued_at)["source"] == source)
+                all_ok &= check(f"{model} issuance provenance", valid, source)
             print(f"  Expected forecast_date:  {expected_date}")
 
             # Expect only what predict.py would actually have published; the rule

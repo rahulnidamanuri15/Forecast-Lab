@@ -139,7 +139,7 @@ SELECT p.forecast_date, p.model, p.{actual}, o.{observed}
 FROM {predictions} p
 JOIN {observations} o ON o.{key} = p.{key} AND o.as_of = p.forecast_date
 WHERE p.{key} = %s
-  AND p.source = 'daily'
+  AND p.source IN ('daily', 'nowcast')
   AND p.{actual} IS NOT NULL
   AND (o.{observed} IS NULL
        OR ABS(p.{actual} - o.{observed}) > {eps})
@@ -154,7 +154,7 @@ FROM {observations} o
 WHERE o.{key} = p.{key}
   AND o.as_of = p.forecast_date
   AND p.{key} = %s
-  AND p.source = 'daily'
+  AND p.source IN ('daily', 'nowcast')
   AND p.{actual} IS NOT NULL
   AND p.{predicted} IS NOT NULL
   AND o.{observed} IS NOT NULL

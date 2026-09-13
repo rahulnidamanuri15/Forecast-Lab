@@ -15,7 +15,8 @@ from vericast import (
 )
 from vericast.elec.train import FEATURE_COLUMNS as ELEC_FEATURE_COLUMNS
 from vericast.pm25.train import FEATURE_COLUMNS
-from vericast.artifacts import load_model
+from vericast.artifacts import model_metadata
+from vericast.publication import publication_timing
 
 load_dotenv()
 
@@ -56,6 +57,7 @@ TARGETS = {
         "value": "predicted_pm2_5",
         "fmt": ".2f",
         "unit": "ug/m3",
+        "timezone": "UTC",
         "models": ("lightgbm", "naive_baseline"),
     },
     "electricity": {
@@ -69,6 +71,7 @@ TARGETS = {
         "value": "predicted_demand_mw",
         "fmt": ".0f",
         "unit": "MW",
+        "timezone": "Asia/Kolkata",
         "models": ("lightgbm", "naive_baseline"),
     },
 }
@@ -259,12 +262,9 @@ def check_model_artifact(target="PM2.5"):
     """Validate the authoritative bundle (or a legacy model), not a stale text file."""
     model_path = TARGETS[target]["artifact"]
     try:
-        model = load_model(model_path)
         expected = len(TARGETS[target]["feature_columns"])
-        if model.num_feature() != expected:
-            print(f"FAIL: {target} artifact feature count does not match {expected}")
-            return False
-        print(f"PASS: {target} model artifact loads with {expected} features")
+        metadata = model_metadata(model_path, expected)
+        print(f"PASS: {target} authoritative artifact: {metadata}")
         return True
     except Exception as exc:
         print(f"FAIL: {target} model artifact cannot be loaded: {type(exc).__name__}")
@@ -302,13 +302,14 @@ def check_prediction_exists(model="lightgbm", target="PM2.5"):
                 latest_obs_date = latest_obs.date() if hasattr(latest_obs, 'date') else latest_obs
                 expected_forecast_date = latest_obs_date + timedelta(days=1)
 
-                # source = 'daily' only: a backtest row on that date was written with
-                # the actual in hand, so it proves nothing about today's pipeline.
+                # Backtests cannot satisfy the live pipeline gate. Both live
+                # provenances can, provided their recorded issuance agrees.
                 cur.execute(f"""
-                    SELECT forecast_date, {t['value']}
+                    SELECT forecast_date, {t['value']}, source, created_at
                     FROM {t['predictions']}
                     WHERE {t['key']} = %s AND model = %s AND forecast_date = %s
-                      AND source = 'daily'
+                      AND source IN ('daily', 'nowcast')
+                    ORDER BY created_at DESC LIMIT 1
                 """, (t["key_value"], model, expected_forecast_date))
 
                 row = cur.fetchone()
@@ -318,7 +319,11 @@ def check_prediction_exists(model="lightgbm", target="PM2.5"):
                           f"date {expected_forecast_date}")
                     return False
 
-                forecast_date, predicted_value = row
+                forecast_date, predicted_value, source, issued_at = row
+                if (issued_at is None or publication_timing(
+                        forecast_date, t["timezone"], issued_at)["source"] != source):
+                    print(f"FAIL: {target} {model} issuance provenance is inconsistent")
+                    return False
                 if predicted_value is None:
                     print(f"FAIL: {target} {model} prediction exists for {forecast_date} "
                           f"but {t['value']} is NULL")
@@ -362,7 +367,8 @@ def check_forecast_date_logic(target="PM2.5"):
                     cur.execute(f"""
                         SELECT forecast_date
                         FROM {t['predictions']}
-                        WHERE {t['key']} = %s AND model = %s AND source = 'daily'
+                        WHERE {t['key']} = %s AND model = %s
+                          AND source IN ('daily', 'nowcast')
                         ORDER BY forecast_date DESC
                         LIMIT 1
                     """, (t["key_value"], model))
@@ -404,42 +410,61 @@ def check_api_health_endpoint():
         print(f"FAIL: Error checking /health endpoint: {e}")
         return False
 
-def check_api_forecast_endpoint():
-    """Check that /forecast endpoint returns 200"""
-    try:
-        response = httpx.get(f'{API_BASE}/forecast?model=lightgbm', timeout=10.0)
-        if response.status_code == 200:
-            data = response.json()
-            print(f"PASS: /forecast?model=lightgbm returns 200 (forecast: {data.get('forecast_pm2_5', 'N/A')} PM2.5)")
-        else:
-            print(f"FAIL: /forecast?model=lightgbm returns status {response.status_code}")
-            return False
+def live_forecast_valid(data):
+    """A scored nowcast is still a delayed estimate, never an advance forecast."""
+    source = data.get("publication_source")
+    return (source in ("daily", "nowcast")
+            and data.get("source") == ("verified" if source == "daily" else "nowcast")
+            and data.get("timing_status") == (
+                "advance_forecast" if source == "daily" else "delayed_estimate")
+            and data.get("provenance_consistent") is True
+            and data.get("horizon_days") == 1
+            and bool(data.get("issued_at")) and bool(data.get("cutoff")))
 
-        # Naive baseline too: a missing artifact 404s one model, not both.
-        response = httpx.get(f'{API_BASE}/forecast?model=naive_baseline', timeout=10.0)
-        if response.status_code == 200:
+
+def live_leaderboards_valid(base=""):
+    """Require each isolated board, or prove its 404 means no scored rows."""
+    for source, alias in (("daily", "verified"), ("nowcast", "nowcast")):
+        path = f"{base}/leaderboard?source={source}"
+        response = httpx.get(f"{API_BASE}{path}", timeout=10.0)
+        if response.status_code == 404:
+            rows = httpx.get(
+                f"{API_BASE}{base}/predictions?source={source}&scored_only=true&limit=1",
+                timeout=10.0)
+            if rows.status_code == 200 and rows.json().get("count") == 0:
+                print(f"PASS: {path} has no scored records yet")
+                continue
+        elif response.status_code == 200:
             data = response.json()
-            print(f"PASS: /forecast?model=naive_baseline returns 200 (forecast: {data.get('forecast_pm2_5', 'N/A')} PM2.5)")
-            return True
-        else:
-            print(f"FAIL: /forecast?model=naive_baseline returns status {response.status_code}")
-            return False
+            if data.get("source") == alias and data.get("leaderboard"):
+                print(f"PASS: {path} is isolated ({alias})")
+                continue
+        print(f"FAIL: {path} missing or inconsistent with its scored records")
+        return False
+    return True
+
+
+def check_api_forecast_endpoint():
+    """Require latest live predictions with explicit timing, plus bundle status."""
+    try:
+        for model in ("lightgbm", "naive_baseline"):
+            path = f"/forecast?model={model}&source=latest"
+            response = httpx.get(f"{API_BASE}{path}", timeout=10.0)
+            if response.status_code != 200 or not live_forecast_valid(response.json()):
+                print(f"FAIL: {path} missing or has invalid issuance metadata")
+                return False
+        response = httpx.get(f"{API_BASE}/diagnostics", timeout=10.0)
+        return (response.status_code == 200
+                and response.json().get("model_bundle", {}).get("status") == "ok")
     except Exception as e:
         print(f"FAIL: Error checking /forecast endpoint: {e}")
         return False
 
+
 def check_api_leaderboard_endpoint():
-    """Check that /leaderboard endpoint returns 200"""
+    """Validate advance and nowcast boards without requiring advance data."""
     try:
-        response = httpx.get(f'{API_BASE}/leaderboard', timeout=10.0)
-        if response.status_code == 200:
-            data = response.json()
-            leaderboard_count = len(data.get('leaderboard', []))
-            print(f"PASS: /leaderboard endpoint returns 200 ({leaderboard_count} models)")
-            return True
-        else:
-            print(f"FAIL: /leaderboard endpoint returns status {response.status_code}")
-            return False
+        return live_leaderboards_valid()
     except Exception as e:
         print(f"FAIL: Error checking /leaderboard endpoint: {e}")
         return False
@@ -513,10 +538,11 @@ def check_api_electricity_endpoints():
     """
     endpoints = [
         ('/electricity/health', 'latest_observation'),
-        ('/electricity/forecast?model=lightgbm', 'forecast_demand_mw'),
-        ('/electricity/forecast?model=seasonal_naive', 'forecast_demand_mw'),
+        ('/electricity/forecast?model=lightgbm&source=latest', 'forecast_demand_mw'),
+        ('/electricity/forecast?model=naive_baseline&source=latest', 'forecast_demand_mw'),
+        ('/electricity/forecast?model=seasonal_naive&source=latest', 'forecast_demand_mw'),
+        ('/electricity/diagnostics', 'model_bundle'),
         ('/electricity/history?days=7', 'days_returned'),
-        ('/electricity/leaderboard', 'leaderboard'),
         ('/electricity/evaluation', 'evaluation'),
         ('/electricity/predictions?model=lightgbm&limit=5&source=daily', 'count'),
     ]
@@ -529,11 +555,18 @@ def check_api_electricity_endpoints():
             if response.status_code != 200:
                 print(f"FAIL: {path} returns status {response.status_code}")
                 return False
-            value = response.json().get(key, 'N/A')
+            data = response.json()
+            if '/forecast?' in path and not live_forecast_valid(data):
+                print(f"FAIL: {path} has invalid issuance metadata")
+                return False
+            if key == 'model_bundle' and data.get(key, {}).get('status') != 'ok':
+                print(f"FAIL: {path} reports an invalid model artifact")
+                return False
+            value = data.get(key, 'N/A')
             if isinstance(value, list):
                 value = f"{len(value)} models"
             print(f"PASS: {path} returns 200 ({key}: {value})")
-        return True
+        return live_leaderboards_valid('/electricity')
     except Exception as e:
         print(f"FAIL: Error checking /electricity endpoints: {e}")
         return False

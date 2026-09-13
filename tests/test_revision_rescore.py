@@ -181,7 +181,7 @@ def test_the_reopen_query_can_only_clear_a_row_score_sql_will_refill(
                              actual=actual, predicted=predicted, observed=observed)
 
     assert f"SET {actual} = NULL" in reopen
-    assert "p.source = 'daily'" in reopen, "a backtest actual could be erased"
+    assert "p.source IN ('daily', 'nowcast')" in reopen, "only operational actuals may be reopened"
     assert f"p.{predicted} IS NOT NULL" in reopen, "SCORE_SQL would not refill it"
     assert f"o.{observed} IS NOT NULL" in reopen, "nothing to re-score against"
 
@@ -227,7 +227,7 @@ def scored_day():
                 "INSERT INTO predictions "
                 "  (city, forecast_date, model, predicted_pm2_5, actual_pm2_5, source) "
                 "VALUES (%s, %s, %s, %s, %s, 'daily') "
-                "ON CONFLICT (city, forecast_date, model) DO UPDATE SET "
+                "ON CONFLICT (city, forecast_date, model, source) DO UPDATE SET "
                 "  predicted_pm2_5 = EXCLUDED.predicted_pm2_5, "
                 "  actual_pm2_5 = EXCLUDED.actual_pm2_5, source = 'daily'",
                 (CITY, DAY, MODEL, PREDICTED, SCORED_AGAINST))
@@ -236,7 +236,7 @@ def scored_day():
                 "INSERT INTO model_performance "
                 "  (score_date, model, mae, rmse, sample_size, source) "
                 "VALUES (%s, %s, %s, %s, 1, 'daily') "
-                "ON CONFLICT (score_date, model) DO UPDATE SET "
+                "ON CONFLICT (city, score_date, model, source) DO UPDATE SET "
                 "  mae = EXCLUDED.mae, rmse = EXCLUDED.rmse, source = 'daily'",
                 (DAY, MODEL, stale, stale))
             conn.commit()

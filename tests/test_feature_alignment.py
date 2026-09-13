@@ -131,7 +131,7 @@ SELECT %s, MAX(as_of) + 1, 47.5, m
 FROM observations, unnest(ARRAY['lightgbm', 'naive_baseline']) AS t(m)
 WHERE city = %s
 GROUP BY m
-ON CONFLICT (city, forecast_date, model) DO NOTHING;
+ON CONFLICT (city, forecast_date, model, source) DO NOTHING;
 """
 
 SEED_ELEC_PREDICTIONS = """
@@ -141,7 +141,7 @@ FROM electricity_observations,
      unnest(ARRAY['lightgbm', 'naive_baseline', 'seasonal_naive']) AS t(m)
 WHERE state = %s
 GROUP BY m
-ON CONFLICT (state, forecast_date, model) DO NOTHING;
+ON CONFLICT (state, forecast_date, model, source) DO NOTHING;
 """
 
 

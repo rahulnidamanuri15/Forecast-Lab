@@ -32,27 +32,26 @@ FROM electricity_observations o
 WHERE o.state = p.state
   AND o.as_of = p.forecast_date
   AND p.state = %s
-  AND p.source = 'daily'
+  AND p.source IN ('daily', 'nowcast')
   AND p.actual_demand_mw IS NULL
   AND p.predicted_demand_mw IS NOT NULL
   AND o.peak_demand_mw IS NOT NULL
   AND o.peak_demand_mw != 'NaN'::float
   AND o.peak_demand_mw != 'Infinity'::float
   AND o.peak_demand_mw != '-Infinity'::float
-RETURNING p.forecast_date, p.model, p.predicted_demand_mw, o.peak_demand_mw;
+RETURNING p.forecast_date, p.model, p.predicted_demand_mw, o.peak_demand_mw, p.source;
 """
 
-# Upsert daily model performance metrics, ensuring source='daily' on conflict.
+# Each provenance owns its own score; rescoring never relabels another record.
 UPSERT_PERF_SQL = """
 INSERT INTO electricity_model_performance
-    (state, score_date, model, mae, rmse, mape, sample_size)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (state, score_date, model) DO UPDATE SET
+    (state, score_date, model, mae, rmse, mape, sample_size, source)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (state, score_date, model, source) DO UPDATE SET
     mae = EXCLUDED.mae,
     rmse = EXCLUDED.rmse,
     mape = EXCLUDED.mape,
     sample_size = EXCLUDED.sample_size,
-    source = 'daily',
     created_at = CURRENT_TIMESTAMP;
 """
 
@@ -96,7 +95,7 @@ def score_pending_predictions():
                 return isinstance(v, float) and (math.isnan(v) or math.isinf(v))
 
             groups = {}
-            for forecast_date, model, predicted, actual in scored:
+            for forecast_date, model, predicted, actual, source in scored:
                 if (predicted is None or actual is None
                         or not math.isfinite(float(predicted))
                         or not math.isfinite(float(actual))):
@@ -104,12 +103,11 @@ def score_pending_predictions():
                         f"Invalid scoring values for {forecast_date} {model}; "
                         "rolling back actual attachment"
                     )
-                groups.setdefault((forecast_date, model), []).append((predicted, actual))
+                groups.setdefault((forecast_date, model, source), []).append((predicted, actual))
 
-            # Per-group SAVEPOINTs: one corrupt day skips itself instead of rolling
-            # back every valid day scored in this run.
+            # Any failure rolls back actuals and metrics for the entire batch.
             skipped = 0
-            for (score_date, model), pairs in sorted(groups.items()):
+            for (score_date, model, source), pairs in sorted(groups.items()):
                 cur.execute("SAVEPOINT score_day")
                 try:
                     predicted = np.array([p for p, _ in pairs], dtype=float)
@@ -130,7 +128,7 @@ def score_pending_predictions():
                             f"non-finite metric (mae={mae}, rmse={rmse}, mape={mape})")
 
                     cur.execute(UPSERT_PERF_SQL,
-                                (STATE, score_date, model, mae, rmse, mape, len(pairs)))
+                                (STATE, score_date, model, mae, rmse, mape, len(pairs), source))
                     cur.execute("RELEASE SAVEPOINT score_day")
                     mape_str = f"{mape:.2f}%" if mape is not None else "n/a"
                     print(f"Scored {model} for {score_date}: MAE={mae:.2f} MW, "

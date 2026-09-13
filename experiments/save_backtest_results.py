@@ -192,7 +192,7 @@ def save_results(
             source
         )
         VALUES (%s, %s, %s, %s, %s, 'backtest')
-        ON CONFLICT (city, forecast_date, model)
+        ON CONFLICT (city, forecast_date, model, source)
         DO UPDATE SET
             predicted_pm2_5 = EXCLUDED.predicted_pm2_5,
             created_at = CURRENT_TIMESTAMP
@@ -281,7 +281,7 @@ def save_model_performance(
             source
         )
         VALUES (%s, %s, %s, %s, %s, 'backtest')
-        ON CONFLICT (score_date, model)
+        ON CONFLICT (city, score_date, model, source)
         DO UPDATE SET
             mae = EXCLUDED.mae,
             rmse = EXCLUDED.rmse,
