@@ -28,9 +28,16 @@ def publish_predictions(cur, sql, records, forecast_date, target_timezone):
     backdating it. A retry will publish as nowcast. Existing rows are immutable.
     """
     timing = publication_timing(forecast_date, target_timezone)
+    if not records:
+        print(f"[WARN] No predictions to publish for {forecast_date} "
+              f"(all models skipped); nothing written as {timing['source']}.")
+        return timing
     for record in records:
         cur.execute(sql, (*record, timing["source"], timing["issued_at"]))
     if timing["source"] == "daily":
+        # Second clock read (fresh now()): a batch that started before midnight
+        # but finished after must not commit as daily. The caller rolls back on
+        # the RuntimeError below.
         require_advance_forecast(forecast_date, target_timezone)
     print(f"[OK] Publication type: {timing['timing_status']} ({timing['source']})")
     return timing

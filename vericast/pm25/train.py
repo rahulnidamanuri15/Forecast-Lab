@@ -4,7 +4,7 @@ import numpy as np
 import lightgbm as lgb
 from dotenv import load_dotenv
 
-from vericast import MODEL_PM25 as MODEL_PATH, require_city_of_record, require_database_url
+from vericast import MODEL_PM25 as MODEL_PATH, require_city_of_record, require_database_url, send_alert
 from vericast.gate import challenger_ships, read_training_window, save_atomic_artifact
 from vericast.artifacts import load_model
 
@@ -117,10 +117,15 @@ def train_and_save():
         print(f"[ALERT] Quality gate REJECTED challenger model! Retrain refused.")
         window = read_training_window(MODEL_PATH)
         if window:
-            print(f"[ALERT] Stale incumbent remains active at {MODEL_PATH} "
-                  f"(trained through {window['last']}, {window['rows']} rows).")
+            msg = (f"Stale incumbent remains active at {MODEL_PATH} "
+                   f"(trained through {window['last']}, {window['rows']} rows).")
+            print(f"[ALERT] {msg}")
         else:
-            print(f"[ALERT] No incumbent training window found for {MODEL_PATH}!")
+            msg = f"No incumbent training window found for {MODEL_PATH}!"
+            print(f"[ALERT] {msg}")
+        send_alert("VeriCast PM2.5 retrain REJECTED",
+                   f"Challenger failed quality gate. {msg} "
+                   f"Investigate weekly-retrain logs; incumbent still serving.")
         return None
 
     train_data = lgb.Dataset(X, label=y, feature_name=FEATURE_COLUMNS)

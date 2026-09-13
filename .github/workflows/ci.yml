@@ -61,7 +61,7 @@ jobs:
 
       # Repeat migrations to catch non-idempotent changes before production rollout.
       - run: python -m vericast.schema
-      - run: python -m pytest tests -q -ra
+      - run: python -m pytest tests -q -ra --cov=vericast --cov=app --cov-report=term-missing
       - run: node --test tests/dashboard_nowcasts.test.cjs
 
       - run: python -m vericast.gate         # retrain-gate self-check, no database

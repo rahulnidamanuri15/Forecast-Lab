@@ -51,6 +51,14 @@ def model_metadata(model_path, expected_features=None):
     A corrupt bundle must not fall back to a stale legacy text model.
     """
     payload = read_bundle(model_path)
+    if payload is None and os.path.isfile(str(model_path)):
+        # Legacy fallback: loud so a deleted bundle reverting to an ancient
+        # model is visible in diagnostics rather than silent.
+        print(f"[WARN] No bundle at {bundle_path(model_path)}; "
+              f"using legacy {model_path}. Retrain to produce a bundle.")
+    elif payload is not None and os.path.isfile(str(model_path)):
+        print(f"[WARN] Stale legacy {model_path} sits beside authoritative "
+              f"{bundle_path(model_path)}; bundle wins, remove the legacy file.")
     model = (lgb.Booster(model_str=payload["model"]) if payload is not None
              else lgb.Booster(model_file=str(model_path)))
     if expected_features is not None and model.num_feature() != expected_features:
@@ -69,7 +77,12 @@ def model_metadata(model_path, expected_features=None):
 def load_model(model_path):
     payload = read_bundle(model_path)
     if payload is not None:
+        if os.path.isfile(str(model_path)):
+            print(f"[WARN] Stale legacy {model_path} ignored; "
+                  f"authoritative bundle {bundle_path(model_path)} wins.")
         return lgb.Booster(model_str=payload["model"])
+    print(f"[WARN] Loading legacy model {model_path} (no bundle); "
+          f"retrain to produce an authoritative bundle.")
     return lgb.Booster(model_file=str(model_path))
 
 
@@ -104,4 +117,13 @@ def save_bundle(model, model_path, dates, rows):
     finally:
         if temporary is not None:
             os.unlink(temporary)
+    # Remove stale legacy text model so a later bundle deletion can't silently
+    # revert to it; the bundle is now authoritative.
+    try:
+        legacy = Path(str(model_path))
+        if legacy.is_file() and legacy.resolve() != destination.resolve():
+            legacy.unlink()
+            print(f"[gate] Removed stale legacy {legacy}; bundle is authoritative.")
+    except Exception as exc:
+        print(f"[WARN] Could not remove stale legacy {model_path}: {exc}")
     return window

@@ -3,7 +3,8 @@
 Idempotent INSERT ... SELECT using window frames with strict point-in-time guarantees:
   - RANGE BETWEEN INTERVAL '1 day' PRECEDING: date-addressed to null across gaps.
   - COUNT(col) OVER wN = N: ensures full calendar window coverage before taking averages.
-  - No lookahead: all rolling/lag frames strictly precede the target date.
+  - No lookahead past as_of: rolling windows include CURRENT ROW (= as_of = t)
+    but the label is t+1, so every feature strictly precedes its target.
 """
 import os
 import psycopg
@@ -91,6 +92,9 @@ WHERE electricity_features.demand_lag_1        IS DISTINCT FROM EXCLUDED.demand_
    OR electricity_features.temp_lag_1          IS DISTINCT FROM EXCLUDED.temp_lag_1
    OR electricity_features.temp_roll_7         IS DISTINCT FROM EXCLUDED.temp_roll_7
    OR electricity_features.cooling_degree_days IS DISTINCT FROM EXCLUDED.cooling_degree_days
+   OR electricity_features.day_of_week         IS DISTINCT FROM EXCLUDED.day_of_week
+   OR electricity_features.month               IS DISTINCT FROM EXCLUDED.month
+   OR electricity_features.is_weekend          IS DISTINCT FROM EXCLUDED.is_weekend
    OR electricity_features.temperature_2m_mean IS DISTINCT FROM EXCLUDED.temperature_2m_mean
    OR electricity_features.temperature_2m_max  IS DISTINCT FROM EXCLUDED.temperature_2m_max;
 """

@@ -24,7 +24,7 @@ load_dotenv()
 API_BASE = os.getenv("API_BASE", "http://localhost:8000").rstrip("/")
 
 # Same env read as app.py, and read here for the same reason CITY is: every other
-# check in this file is a server-side SELECT or a header-less GET, so all 22 of them
+# check in this file is a server-side SELECT or a header-less GET, so all 23 of them
 # passed on a deploy that answers the API perfectly and hands the browser nothing.
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
 
@@ -199,6 +199,8 @@ def check_features_no_nulls(target="PM2.5"):
 
     t = TARGETS[target]
     columns = t["feature_columns"]
+    # Identifiers come from the internal TARGETS allowlist above, never from
+    # user input; values stay parameterized below.
 
     try:
         with psycopg.connect(database_url) as conn:
@@ -233,6 +235,10 @@ def check_leakage_test(module='vericast.pm25.leakage_test'):
     Parameterised rather than duplicated: the two targets' tests run identically,
     differing only in the module name. The default keeps the PM2.5 call site short.
     """
+    allowed = {'vericast.pm25.leakage_test', 'vericast.elec.leakage_test'}
+    if module not in allowed:
+        print(f"FAIL: Unknown leakage module {module!r}")
+        return False
     print(f"Running leakage test ({module}):")
     try:
         result = subprocess.run([
@@ -267,7 +273,8 @@ def check_model_artifact(target="PM2.5"):
         print(f"PASS: {target} authoritative artifact: {metadata}")
         return True
     except Exception as exc:
-        print(f"FAIL: {target} model artifact cannot be loaded: {type(exc).__name__}")
+        print(f"FAIL: {target} model artifact cannot be loaded: "
+              f"{type(exc).__name__}: {exc}")
         return False
 
 def check_prediction_exists(model="lightgbm", target="PM2.5"):

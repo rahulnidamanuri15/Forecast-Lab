@@ -75,6 +75,8 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
         raise ValueError(f"Production holdout must contain at least {HOLDOUT_DAYS} rows")
     if len(X) != len(y) or not np.isfinite(X).all() or not np.isfinite(y).all():
         raise ValueError("Training features and labels must be aligned and finite")
+    if not isinstance(baseline_col, int) or not (0 <= baseline_col < X.shape[1]):
+        raise ValueError(f"baseline_col {baseline_col!r} out of range for {X.shape[1]} features")
     if len(X) < MIN_TRAIN_ROWS + holdout_days:
         print(f"[gate] REJECT: {len(X)} rows; need at least "
               f"{MIN_TRAIN_ROWS + holdout_days} for production validation.")
@@ -135,8 +137,16 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
             # Sidecar window comparison: only comparable if incumbent finished before holdout opens
             window = read_training_window(incumbent_path)
             holdout_start = str(dates[split]) if dates is not None else None
-            comparable = bool(window and holdout_start
-                              and window["last"] < holdout_start)
+            def _iso(s):
+                try:
+                    from datetime import date as _d
+                    return _d.fromisoformat(str(s))
+                except Exception:
+                    return None
+            w_last = _iso(window["last"]) if window else None
+            h_start = _iso(holdout_start) if holdout_start else None
+            comparable = bool(w_last is not None and h_start is not None
+                              and w_last < h_start)
             if comparable:
                 note = (f"trained through {window['last']}, before the holdout "
                         f"opens at {holdout_start} - comparable")

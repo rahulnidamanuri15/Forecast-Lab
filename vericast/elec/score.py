@@ -95,21 +95,26 @@ def score_pending_predictions():
                 return isinstance(v, float) and (math.isnan(v) or math.isinf(v))
 
             groups = {}
+            invalid_groups = set()
             for forecast_date, model, predicted, actual, source in scored:
                 if (predicted is None or actual is None
                         or not math.isfinite(float(predicted))
                         or not math.isfinite(float(actual))):
-                    raise RuntimeError(
-                        f"Invalid scoring values for {forecast_date} {model}; "
-                        "rolling back actual attachment"
-                    )
-                groups.setdefault((forecast_date, model, source), []).append((predicted, actual))
+                    # Don't abort the batch: mark this day for per-day skip below.
+                    invalid_groups.add((forecast_date, model, source))
+                    groups.setdefault((forecast_date, model, source), []).append((predicted, actual))
+                else:
+                    groups.setdefault((forecast_date, model, source), []).append((predicted, actual))
 
-            # Any failure rolls back actuals and metrics for the entire batch.
+            # Per-day savepoints: a non-finite day is skipped, valid days commit.
+            # Unexpected DB failures still abort the whole transaction (retryable).
             skipped = 0
             for (score_date, model, source), pairs in sorted(groups.items()):
                 cur.execute("SAVEPOINT score_day")
                 try:
+                    if (score_date, model, source) in invalid_groups:
+                        raise ValueError(
+                            f"non-finite scoring values for {score_date} {model}")
                     predicted = np.array([p for p, _ in pairs], dtype=float)
                     actual = np.array([a for _, a in pairs], dtype=float)
                     mae = float(np.mean(np.abs(predicted - actual)))
@@ -133,6 +138,14 @@ def score_pending_predictions():
                     mape_str = f"{mape:.2f}%" if mape is not None else "n/a"
                     print(f"Scored {model} for {score_date}: MAE={mae:.2f} MW, "
                           f"RMSE={rmse:.2f} MW, MAPE={mape_str} (n={len(pairs)})")
+                except ValueError as exc:
+                    # Bad data on one day: roll back just this day, keep the rest.
+                    cur.execute("ROLLBACK TO SAVEPOINT score_day")
+                    cur.execute("RELEASE SAVEPOINT score_day")
+                    skipped += 1
+                    print(f"  [skip] {score_date} {model}: {exc}; "
+                          f"perf skipped for this day, "
+                          f"valid days commit normally.")
                 except Exception as exc:
                     # Roll back actual attachment as well as performance writes.
                     raise RuntimeError(
@@ -145,10 +158,12 @@ def score_pending_predictions():
 
             conn.commit()
 
-    print(f"Scored {len(scored)} electricity prediction(s)"
+    committed = len(scored) - skipped
+    print(f"Scored {committed} electricity prediction(s)"
           + (f", {reopened} of them a rescore after an upstream revision."
-             if reopened else "."))
-    return len(scored)
+             if reopened else ".")
+          + (f" Skipped {skipped} non-finite day(s)." if skipped else ""))
+    return committed
 
 
 if __name__ == "__main__":

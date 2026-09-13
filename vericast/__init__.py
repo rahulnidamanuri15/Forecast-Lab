@@ -44,13 +44,13 @@ def refuse_stale(as_of, today, limit_days, target):
 
 # model_performance predates the second target, whose counterpart always had
 # `state`. A city column migration now exists (see vericast/schema.py: additive
-# ADD COLUMN + UNIQUE(city, score_date, model) index, backfilled to 'Nagpur'):
+# ADD COLUMN + UNIQUE(city, score_date, model, source) index, backfilled to 'Nagpur'):
 # score.py writes city and /leaderboard filters on it. The legacy
-# UNIQUE(score_date, model) is kept for zero-downtime compatibility, so the
-# single-city guard stays ON until every deployment has migrated - relaxing it
-# early would let another city's rows land on Nagpur's legacy keys and overwrite
-# the published record in place. Everything else - observations, features,
-# predictions - was always keyed on city.
+# UNIQUE(score_date, model) was replaced by the source-aware provenance index
+# (see migrate_nowcasts); the single-city guard stays ON until every deployment
+# has migrated - relaxing it early would let another city's rows land on Nagpur's
+# legacy keys and overwrite the published record in place. Everything else -
+# observations, features, predictions - was always keyed on city.
 # The PM2.5 pipeline is scoped strictly to Nagpur until the guard below is lifted.
 PM25_CITY_OF_RECORD = "Nagpur"
 
@@ -99,9 +99,11 @@ RESCAN_DAYS = 30
 # both upserting the same forecast_date with last-writer-wins. Keys are arbitrary
 # 64-bit ints; they only need to be distinct within this database.
 PIPELINE_LOCKS = {
+    "pm25_ingest": 810100,
     "pm25_features": 810101,
     "pm25_score": 810102,
     "pm25_predict": 810103,
+    "elec_ingest": 820100,
     "elec_features": 820101,
     "elec_score": 820102,
     "elec_predict": 820103,
@@ -116,9 +118,16 @@ def acquire_pipeline_lock(cur, name):
     if the function is unavailable (e.g. a mocked cursor in unit tests), skip
     silently rather than failing the run the lock exists to protect.
     """
+    if name not in PIPELINE_LOCKS:
+        raise KeyError(f"Unknown pipeline lock: {name!r}. "
+                       f"Expected one of {sorted(PIPELINE_LOCKS)}")
     try:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (PIPELINE_LOCKS[name],))
     except Exception:
+        # Mocked cursors in unit tests raise here (no real Postgres); real
+        # connection failures surface on the next statement, so swallowing
+        # only the lock call is safe. KeyError above is deliberately NOT
+        # swallowed so a typo can't silently disable serialization.
         pass
 
 

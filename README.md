@@ -77,6 +77,7 @@ The historical backtest benchmarks below are not advance-forecast results. Previ
 | `seasonal_naive` | `backtest` | 1,238 | 1154.08 | 1590.27 | 4.48% | Same weekday last week ($y_{t-6}$) |
 
 > Call `GET /evaluation` and `GET /electricity/evaluation` for live, real-time metrics.
+> Scored days above are walk-forward evaluated days; committed `.window.json` row counts (730 / 1268) include warm-up/training rows that were never scored — hence the delta.
 
 ---
 
@@ -103,13 +104,16 @@ The historical backtest benchmarks below are not advance-forecast results. Previ
 ├── app.py                            # FastAPI application serving both targets
 ├── index.html                        # Chart.js frontend dashboard
 ├── verify_deployment_readiness.py    # Pre-flight deployment readiness gate (23 checks)
-├── models/                           # Serialized LightGBM models and window metadata
-│   ├── lightgbm_model.txt            # Nagpur PM2.5 model
-│   └── lightgbm_elec_model.txt       # Maharashtra electricity model
+├── models/                           # Serialized LightGBM models, bundles + window metadata
+│   ├── lightgbm_model.txt[.bundle.json][.window.json]       # Nagpur PM2.5 model
+│   └── lightgbm_elec_model.txt[.bundle.json][.window.json]  # Maharashtra electricity model
 ├── vericast/                         # Shared core package
+│   ├── __init__.py                   # Locks, plausibility bounds, revision/alignment SQL
 │   ├── local_time.py                 # Timezone authority (Asia/Kolkata)
 │   ├── gate.py                       # Retrain evaluation and artifact release gate
 │   ├── schema.py                     # Idempotent database DDL & migrations
+│   ├── publication.py                # Advance/nowcast issuance policy
+│   ├── artifacts.py                  # Atomic model bundles + metadata
 │   ├── pm25/                         # PM2.5 pipeline modules
 │   │   ├── ingest.py                 # Fetches CAMS reanalysis & weather
 │   │   ├── features.py               # SQL window feature engineering
@@ -120,7 +124,10 @@ The historical backtest benchmarks below are not advance-forecast results. Previ
 │   │   └── diagnose.py               # Health & freshness validation
 │   └── elec/                         # Electricity pipeline modules (identical symmetry)
 │       └── [ingest, features, leakage_test, train, predict, score, diagnose].py
-└── tests/                            # Comprehensive unit & integration test suite (170 tests)
+├── experiments/                      # Walk-forward backtest seeders (not run in CI)
+│   ├── save_backtest_results.py      # PM2.5 backtest
+│   └── save_elec_backtest_results.py # Electricity backtest
+└── tests/                            # Unit & integration suite (205 tests) + dashboard_nowcasts.test.cjs
 ```
 
 ---
@@ -131,18 +138,21 @@ All routes are read-only (`GET`) and served under `/`:
 
 | Endpoint | Parameters | Description |
 |---|---|---|
+| `/` | — | Service index + route map |
 | `/health` | — | PM2.5 data freshness, staleness days, and source status |
-| `/forecast` | `model=lightgbm`, `source=daily` | Latest prediction in the selected provenance, with issuance and scoring status |
+| `/forecast` | `model=lightgbm`, `source=daily\|nowcast\|backtest\|latest` | Latest prediction in the selected provenance, with issuance and scoring status |
 | `/history` | `days=30` | Recent raw observations (oldest-first for charting) |
 | `/leaderboard` | `source=daily` | Most recent scored day per model, isolated by provenance |
 | `/evaluation` | `days=30` | Separate `verified`, `nowcast`, and `backtest` metrics |
 | `/predictions` | `model`, `limit`, `source`, `scored_only` | Queryable historical prediction log with absolute and percentage errors |
+| `/diagnostics` | — | Current PM2.5 bundle status, training window, horizon |
 | `/electricity/health` | — | Electricity data freshness and mirror status |
-| `/electricity/forecast` | `model=lightgbm`, `source=daily` | Latest demand prediction in the selected provenance, with timing |
+| `/electricity/forecast` | `model=lightgbm`, `source=daily\|nowcast\|backtest\|latest` | Latest demand prediction in the selected provenance, with timing |
 | `/electricity/history` | `days=30` | Historical peak demand, energy met, and temperature observations |
 | `/electricity/leaderboard` | `source=daily` | Latest scored performance for demand models, isolated by provenance |
 | `/electricity/evaluation` | `days=30` | Complete metrics including **MAPE**, MAE, and RMSE by provenance |
 | `/electricity/predictions` | `model`, `limit`, `source`, `scored_only` | Historical demand predictions log with error metrics |
+| `/electricity/diagnostics` | — | Current electricity bundle status, training window, horizon |
 | `/dashboard` | — | Serves the HTML/JS dashboard directly with CSP headers |
 
 *Interactive Swagger documentation is available at `/docs`.*
@@ -187,12 +197,12 @@ FRONTEND_ORIGIN=http://localhost:8000
 ```
 
 ### 4. Running Tests & Validation
-Point `DATABASE_URL` at the disposable local `vericast-test-db` (PostgreSQL 17, `127.0.0.1:5433`, database `vericast_test`), not Neon. Use `PYTHON_DOTENV_DISABLED=1` to avoid loading local dotenv configuration during verification.
+Point `DATABASE_URL` at a disposable local Postgres (PostgreSQL 17), not Neon. CI uses `127.0.0.1:5432/vericast`; the historical local default was `127.0.0.1:5433/vericast_test` — either works as long as it is throwaway. Use `PYTHON_DOTENV_DISABLED=1` to avoid loading local dotenv configuration during verification.
 
 ```bash
 python -m vericast.schema
 python -m vericast.schema  # verify idempotency
-python -m pytest tests -q -ra
+python -m pytest tests -q -ra --cov=vericast --cov=app
 node --test tests/dashboard_nowcasts.test.cjs
 python -m vericast.gate
 python -m vericast.local_time

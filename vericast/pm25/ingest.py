@@ -11,6 +11,7 @@ from vericast import (
     PM25_MAX,
     PM25_MIN,
     RESCAN_DAYS,
+    acquire_pipeline_lock,
     local_time,
     require_city_of_record,
     require_database_url,
@@ -54,9 +55,13 @@ def get_last_observed_date(cur):
 
 
 def get_earliest_hole(cur, since, end=None):
-    """Earliest date in [since, end] this city has no usable pm2_5 for, or None.
+    """Earliest date in [since, end] this city has no observation row for, or None.
 
-    Covers both a missing row and a row with a NULL pm2_5 (a thin-hours day).
+    Only absent rows, matching the electricity twin: a thin-hours day is stored
+    as a row with NULL pm2_5 (see fetch_and_aggregate_data), and the upstream
+    never backfills it, so treating NULLs as holes pinned resume_start() forever
+    and refetched up to RESCAN_DAYS every run. A stored NULL row means "already
+    fetched"; only a missing row is worth re-reading.
     generate_series is why this is one query: a LEFT JOIN against the dates that
     *should* exist finds an absent row, which no scan of stored rows can.
 
@@ -69,7 +74,7 @@ def get_earliest_hole(cur, since, end=None):
         """
         SELECT MIN(d.day)::date FROM generate_series(%s::date, %s::date, '1 day') d(day)
         LEFT JOIN observations o ON o.as_of = d.day AND o.city = %s
-        WHERE o.as_of IS NULL OR o.pm2_5 IS NULL
+        WHERE o.as_of IS NULL
         """,
         (since, end, CITY),
     )
@@ -325,6 +330,10 @@ def insert_observations(records):
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
+                # Serialize concurrent ingest vs features: features reads
+                # observations, so an ingest committing mid-engineer would give
+                # a stale snapshot. Xact-scoped, released on COMMIT.
+                acquire_pipeline_lock(cur, "pm25_ingest")
                 dates = [as_of for _, as_of, *_ in records]
                 cur.execute(before_sql, (CITY, min(dates), max(dates)))
                 before = {as_of.isoformat(): pm for as_of, pm in cur.fetchall()}

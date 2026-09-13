@@ -52,6 +52,13 @@ async def lifespan(_app: FastAPI):
     global _pool, _under_lifespan
     _under_lifespan = True
     try:
+        # Preserve DSN options (notably search_path) so pooled API reads use
+        # the same schema as workers. Enforce the timeout last.
+        try:
+            base_options = (conninfo_to_dict(DATABASE_URL).get("options", "") or "").strip()
+        except Exception:
+            base_options = ""
+        pool_options = f"{base_options} -c statement_timeout=10000".strip() if base_options else "-c statement_timeout=10000"
         _pool = ConnectionPool(
             DATABASE_URL,
             min_size=1,
@@ -59,10 +66,7 @@ async def lifespan(_app: FastAPI):
             timeout=10,                              # wait for a free slot, then fail
             check=ConnectionPool.check_connection,   # verify connection health on checkout
             open=False,
-            # Preserve DSN options (notably search_path) so pooled API reads use
-            # the same schema as workers. Enforce the timeout last.
-            kwargs={"options": conninfo_to_dict(DATABASE_URL).get("options", "")
-                    + " -c statement_timeout=10000"},
+            kwargs={"options": pool_options},
         )
         _pool.open()
         # Fail-fast boot check: a bad DSN previously surfaced only on the first
@@ -144,8 +148,11 @@ def over_rate_limit(key, now):
     # Tolerance of 1 microsecond avoids IEEE-754 precision loss where (now + 60) - now < 60
     if now - _rate_window_start >= RATE_LIMIT_WINDOW_SECONDS - 1e-6:
         _rate_window_start, _rate_hits = now, {}
+    # Bound memory without collapsing strangers into one shared bucket (which
+    # let a rotating-IP attacker throttle innocents). Evict the oldest key to
+    # make room; dicts preserve insertion order.
     if key not in _rate_hits and len(_rate_hits) >= RATE_LIMIT_MAX_CLIENTS:
-        key = ""  # shared overflow bucket; "" is not a reachable client key
+        _rate_hits.pop(next(iter(_rate_hits)))
     _rate_hits[key] = hits = _rate_hits.get(key, 0) + 1
     return hits > RATE_LIMIT_MAX_REQUESTS
 
@@ -154,10 +161,12 @@ def client_key(request):
     """Best available caller identity. Render terminates TLS at its proxy, so
     request.client.host is the proxy and would throttle every caller as one; the
     leftmost X-Forwarded-For entry is the originating client as that proxy saw it,
-    and is spoofable - see the note above."""
+    and is spoofable - see the note above. Truncated to 45 chars (max IPv6) so a
+    crafted header can't bloat the rate-limit dict."""
     forwarded = request.headers.get("x-forwarded-for", "")
-    return forwarded.split(",")[0].strip() or (
+    key = forwarded.split(",")[0].strip() or (
         request.client.host if request.client else "unknown")
+    return key[:45] or "unknown"
 
 
 @app.middleware("http")
@@ -214,15 +223,29 @@ async def root():
 
 
 DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+# Cache dashboard HTML at process start; re-read only when mtime changes so
+# every /dashboard hit doesn't pay a file open + 2MB read.
+_dashboard_cache: dict = {}
+
+
+def _dashboard_html() -> str:
+    try:
+        mtime = os.path.getmtime(DASHBOARD_FILE)
+    except OSError:
+        raise HTTPException(status_code=404, detail="Dashboard file not found")
+    cached = _dashboard_cache.get("entry")
+    if cached and cached[0] == mtime:
+        return cached[1]
+    with open(DASHBOARD_FILE, "r", encoding="utf-8") as fh:
+        content = fh.read()
+    _dashboard_cache["entry"] = (mtime, content)
+    return content
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def serve_dashboard():
     """Serve the VeriCast dashboard with backend-enforced security headers."""
-    if not os.path.exists(DASHBOARD_FILE):
-        raise HTTPException(status_code=404, detail="Dashboard file not found")
-    with open(DASHBOARD_FILE, "r", encoding="utf-8") as fh:
-        content = fh.read()
+    content = _dashboard_html()
     response = HTMLResponse(content=content)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -297,6 +320,14 @@ def get_forecast(model: str = "lightgbm", source: str = "daily"):
             )
 
         forecast_date, predicted, actual, model_name, created_at, source = row
+
+        # predicted_pm2_5 is nullable in the schema; a NULL row is unscoreable
+        # and must not 500 on float(None). Treat as absent record.
+        if predicted is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No {model} forecast found",
+            )
 
         return {
             "city": CITY,
@@ -866,6 +897,10 @@ def get_electricity_forecast(model: str = "lightgbm", source: str = "daily"):
             raise HTTPException(status_code=404, detail=f"No {model} forecast found")
 
         forecast_date, predicted, actual, model_name, created_at, source = row
+
+        # Defensive: schema says NOT NULL but a corrupt write must 404, not 500.
+        if predicted is None:
+            raise HTTPException(status_code=404, detail=f"No {model} forecast found")
 
         return {
             "state": STATE,

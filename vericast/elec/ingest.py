@@ -16,7 +16,10 @@ function that needs to change.
 import os
 import time
 import csv
+import hashlib
 import io
+import math
+import random
 import httpx
 import psycopg
 from datetime import datetime, timedelta
@@ -27,6 +30,7 @@ from vericast import (
     ELEC_MAX_MW,
     ELEC_MIN_MW,
     RESCAN_DAYS,
+    acquire_pipeline_lock,
     local_time,
     require_database_url,
     resume_start,
@@ -157,30 +161,64 @@ def fetch_demand(start_date, end_date):
     for Maharashtra rows inside the range. The only function that touches the
     demand source."""
     print(f"Fetching demand mirror ({DEMAND_CSV_URL.rsplit('/', 1)[-1]})...")
-    # Fetch full CSV mirror (~6MB) with exponential backoff retries.
+    # Fetch full CSV mirror (~6MB) with exponential backoff + jitter retries.
+    # 25MB cap: a compromised mirror serving a giant body must fail fast
+    # instead of buffering unboundedly into memory.
+    MAX_MIRROR_BYTES = 25 * 1024 * 1024
     last_exc = None
     response = None
     for attempt in range(1, 4):
         try:
             response = httpx.get(DEMAND_CSV_URL, timeout=180, follow_redirects=True)
             response.raise_for_status()
+            # Size cap on raw bytes when available; MagicMock in unit tests has
+            # no real content, so skip the cap there.
+            raw_content = getattr(response, "content", None)
+            if isinstance(raw_content, (bytes, bytearray)) and len(raw_content) > MAX_MIRROR_BYTES:
+                raise RuntimeError(
+                    f"Demand mirror body {len(raw_content)} bytes exceeds "
+                    f"{MAX_MIRROR_BYTES} cap; refusing to parse")
             break
         except Exception as exc:  # noqa: BLE001 - retry then raise
             last_exc = exc
             if attempt < 3:
-                backoff = 2 ** (attempt - 1)
-                print(f"  [retry] demand mirror attempt {attempt}/3 failed: {exc}; sleeping {backoff}s...")
+                backoff = 2 ** (attempt - 1) + random.uniform(0, 1)
+                print(f"  [retry] demand mirror attempt {attempt}/3 failed: {exc}; sleeping {backoff:.1f}s...")
                 time.sleep(backoff)
             else:
                 print(f"  [retry] demand mirror attempt {attempt}/3 failed: {exc}")
     if response is None:
         raise RuntimeError(f"Demand mirror fetch failed after 3 attempts: {last_exc}")
 
+    # Prefer .text when the transport already decoded it (and in unit tests
+    # where only .text is mocked); else decode raw bytes as UTF-8.
+    # Audit pin: log content hash so a plausible-but-wrong mirror edit is
+    # attributable after the fact. A full pin would freeze backfills (see note
+    # above), so this detects rather than prevents.
+    if isinstance(getattr(response, "text", None), str):
+        text = response.text
+        try:
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+            print(f"  mirror sha256:{digest} bytes:{len(text.encode('utf-8'))}")
+        except Exception:
+            pass
+    else:
+        raw = response.content
+        try:
+            digest = hashlib.sha256(bytes(raw)).hexdigest()[:16]
+            print(f"  mirror sha256:{digest} bytes:{len(bytes(raw))}")
+        except Exception:
+            pass
+        try:
+            text = bytes(raw).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError(f"Demand mirror is not valid UTF-8: {exc}")
+
     start_str, end_str = start_date.isoformat(), end_date.isoformat()
     demand = {}
     skipped = 0
 
-    reader = csv.DictReader(io.StringIO(response.text))
+    reader = csv.DictReader(io.StringIO(text))
     # Fail naming the URL, not with a KeyError mid-loop after some rows have
     # already been accepted.
     missing = REQUIRED_CSV_COLUMNS - set(reader.fieldnames or ())
@@ -351,6 +389,8 @@ def insert_observations(records):
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
+                # Serialize concurrent ingest vs features; see PM2.5 twin.
+                acquire_pipeline_lock(cur, "elec_ingest")
                 dates = [as_of for _, as_of, *_ in records]
                 cur.execute(before_sql, (STATE, min(dates), max(dates)))
                 before = {as_of.isoformat(): mw for as_of, mw in cur.fetchall()}
@@ -374,9 +414,22 @@ def insert_observations(records):
 
 def report_revisions(before, records):
     """Log days where peak demand ground truth was revised from prior stored observations."""
+    def _moved(old, new):
+        if old is None or new is None:
+            return True
+        try:
+            diff = abs(float(new) - float(old))
+        except (TypeError, ValueError):
+            return True
+        # NaN never compares: abs(nan - x) > eps is False, so a NaN revision
+        # would previously pass silently. Treat non-finite as a revision.
+        if not math.isfinite(diff):
+            return True
+        return diff > ACTUAL_TOLERANCE
+
     revised = [(as_of, before[as_of], new)
                for _, as_of, new, *_ in records
-               if before.get(as_of) is not None and abs(new - before[as_of]) > ACTUAL_TOLERANCE]
+               if before.get(as_of) is not None and _moved(before[as_of], new)]
     if not revised:
         return
 

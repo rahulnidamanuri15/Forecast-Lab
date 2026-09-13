@@ -707,11 +707,11 @@
       <!-- Dataset Selector -->
       <div class="dataset-row">
         <div class="dataset-tabs" role="tablist" aria-label="Choose forecasting dataset">
-          <button class="dataset-tab active" id="tab-pm25" role="tab" aria-selected="true" onclick="switchTab('pm25')">
+          <button class="dataset-tab active" id="tab-pm25" role="tab" aria-selected="true" aria-controls="panel-pm25" onclick="switchTab('pm25')" onkeydown="tabKey(event)">
             <svg class="icon"><use href="#i-wind"/></svg>
             Nagpur PM2.5
           </button>
-          <button class="dataset-tab" id="tab-electricity" role="tab" aria-selected="false" onclick="switchTab('electricity')">
+          <button class="dataset-tab" id="tab-electricity" role="tab" aria-selected="false" aria-controls="panel-electricity" onclick="switchTab('electricity')" onkeydown="tabKey(event)">
             <svg class="icon"><use href="#i-bolt"/></svg>
             Maharashtra Electricity Demand
           </button>
@@ -725,7 +725,7 @@
     <!-- ==================== PM2.5 PANEL ==================== -->
     <div id="panel-pm25">
       <div class="error-banner" id="pm25-error" role="alert" hidden></div>
-      <section class="panel" style="display:none" aria-labelledby="pm25-nowcast-title">
+      <section class="panel" id="pm25-nowcast-section" style="display:none" aria-labelledby="pm25-nowcast-title">
         <h2 id="pm25-nowcast-title">Nowcasts / delayed estimates</h2>
         <p class="panel-subtitle">Issued at or after target-day midnight. Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
         <p id="pm25-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
@@ -987,7 +987,7 @@
       <!-- ==================== ELECTRICITY PANEL ==================== -->
       <div id="panel-electricity" hidden>
         <div class="error-banner" id="el-error" role="alert" hidden></div>
-        <section class="panel" style="display:none" aria-labelledby="el-nowcast-title">
+        <section class="panel" id="el-nowcast-section" style="display:none" aria-labelledby="el-nowcast-title">
           <h2 id="el-nowcast-title">Nowcasts / delayed estimates</h2>
           <p class="panel-subtitle">Issued at or after target-day midnight (Asia/Kolkata). Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
           <p id="el-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
@@ -1250,7 +1250,12 @@
   <!-- Client Application Logic -->
   <script>
     // Configuration & Backend origin
-    const API_BASE = window.API_BASE || 'https://forecast-lab-2l0q.onrender.com';
+    // Same-origin by default (dashboard is served by the API at /dashboard),
+    // window.API_BASE override for GitHub Pages / self-hosters, hardcoded prod
+    // only as a last resort for file:// previews.
+    const API_BASE = window.API_BASE
+      || ((window.location && window.location.origin && window.location.origin.startsWith('http'))
+        ? window.location.origin : 'https://forecast-lab-2l0q.onrender.com');
     document.getElementById('api-docs-link').href = `${API_BASE}/docs`;
 
     let activeDataset = 'pm25';
@@ -1403,6 +1408,16 @@
 
     function chartMissing(elementId) {
       showPanelError(elementId, new Error('Chart.js failed to load from the CDN; charts unavailable while tables still work'));
+      // Replace empty canvases with a text fallback so the panel isn't blank.
+      document.querySelectorAll('canvas').forEach(cv => {
+        if (!cv.dataset.fallback) {
+          cv.dataset.fallback = '1';
+          const p = document.createElement('p');
+          p.className = 'panel-subtitle';
+          p.textContent = 'Charts unavailable offline; tables below carry the same data.';
+          cv.replaceWith(p);
+        }
+      });
     }
 
     // Leaderboard table renderer
@@ -1427,6 +1442,7 @@
     }
 
     // Nowcasts are rendered separately; never feed them into advance metrics/charts.
+    // Sections are visible by default (transparency); this only fills them.
     async function initNowcasts(prefix, evaluation) {
       const base = prefix === 'el' ? '/electricity' : '';
       const latest = document.getElementById(`${prefix}-nowcast-latest`);
@@ -1674,6 +1690,9 @@
         const labels = historySlice.map(d => d.date.slice(5));
         const obsValues = historySlice.map(d => d.pm2_5);
 
+        // Aligned by TARGET date: a prediction for T is plotted alongside the
+        // observation at T (verification view), not at issuance T-1. spanGaps
+        // stays false so date gaps render as gaps, not interpolated lines.
         const predByDate = new Map(publishedRows.map(r => [r.forecast_date, r.predicted_pm2_5]));
         const predValues = historySlice.map(d => predByDate.has(d.date) ? predByDate.get(d.date) : null);
 
@@ -2069,6 +2088,13 @@
     // ==========================================
     // DATASET TAB SWITCHING
     // ==========================================
+    function tabKey(e) {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      e.preventDefault();
+      switchTab(activeDataset === 'pm25' ? 'electricity' : 'pm25');
+      const next = activeDataset === 'pm25' ? 'tab-pm25' : 'tab-electricity';
+      document.getElementById(next).focus();
+    }
     function switchTab(name) {
       activeDataset = name;
       const isElec = name === 'electricity';

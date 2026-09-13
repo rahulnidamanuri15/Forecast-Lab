@@ -215,9 +215,10 @@ MIGRATIONS = (
     # Multi-city unlock: model_performance predates the second target and has no
     # city column, so require_city_of_record() pins the PM2.5 pipeline to Nagpur.
     # This migration is additive and idempotent: existing deploys gain a backfilled
-    # city, new deploys get it from the CREATE TABLE above. The legacy
-    # UNIQUE(score_date, model) is kept (dropping constraints needs downtime); the
-    # new UNIQUE(city, score_date, model) is what future multi-city writers use.
+    # city, new deploys get it from the CREATE TABLE above. The source-aware
+    # UNIQUE(city, score_date, model, source) index is what writers use;
+    # migrate_nowcasts() below replaces legacy source-blind keys with
+    # provenance-aware ones (stop old workers before first rollout).
     "ALTER TABLE model_performance "
     "ADD COLUMN IF NOT EXISTS city VARCHAR(100) NOT NULL DEFAULT 'Nagpur';",
     "UPDATE model_performance SET city = 'Nagpur' WHERE city IS NULL;",
