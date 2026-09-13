@@ -22,6 +22,8 @@ from vericast import (
     send_alert,
 )
 from vericast.pm25.train import FEATURE_COLUMNS
+from vericast.artifacts import model_metadata
+from vericast.publication import publication_timing
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -69,13 +71,11 @@ def main():
 
     all_ok = True
 
-    # 1. Model file present at the path the script actually uses
-    exists = os.path.exists(MODEL_PATH)
-    all_ok &= check(
-        f"Model file found at ./{MODEL_PATH}",
-        exists,
-        f"cwd={os.getcwd()}" if not exists else "",
-    )
+    try:
+        metadata = model_metadata(MODEL_PATH, len(FEATURE_COLUMNS))
+        all_ok &= check("Authoritative model artifact is valid", True, str(metadata))
+    except Exception as exc:
+        all_ok &= check("Authoritative model artifact is valid", False, type(exc).__name__)
 
     require_database_url(DATABASE_URL)
     with psycopg.connect(DATABASE_URL) as conn:
@@ -193,12 +193,18 @@ def main():
             expected_date = latest_obs + timedelta(days=1)
             cur.execute(
                 """
-                SELECT model, predicted_pm2_5 FROM predictions
-                WHERE city = %s AND forecast_date = %s AND source = 'daily'
+                SELECT model, predicted_pm2_5, source, created_at FROM predictions
+                WHERE city = %s AND forecast_date = %s AND source IN ('daily', 'nowcast')
+                ORDER BY created_at
                 """,
                 (CITY, expected_date),
             )
-            published = dict(cur.fetchall())
+            rows = cur.fetchall()
+            published = {model: value for model, value, source, issued_at in rows}
+            for model, value, source, issued_at in rows:
+                valid = (issued_at is not None and
+                         publication_timing(expected_date, "UTC", issued_at)["source"] == source)
+                all_ok &= check(f"{model} issuance provenance", valid, source)
             print(f"  Expected forecast_date:  {expected_date}")
 
             # Expect only what predict.py would actually have published; the rule

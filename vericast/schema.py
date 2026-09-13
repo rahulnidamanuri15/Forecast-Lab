@@ -1,7 +1,9 @@
 """Database schema DDL and idempotent migrations for VeriCast tables.
 
-Idempotent: uses CREATE TABLE IF NOT EXISTS and ADD COLUMN IF NOT EXISTS so
-running it against production will not modify existing published records.
+Idempotent DDL plus a versioned provenance correction. The nowcast migration
+relabels legacy late daily rows and their single-day scores without changing
+prediction values or issuance timestamps. Stop old workers before first rollout:
+source-aware conflict keys are incompatible with their old INSERT statements.
 
 Usage:
     python -m vericast.schema
@@ -81,7 +83,7 @@ TABLES = {
             model VARCHAR(50) DEFAULT 'naive_baseline',
             source TEXT NOT NULL DEFAULT 'daily',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(city, forecast_date, model)
+            UNIQUE(city, forecast_date, model, source)
         );
     """,
     # No city column, unlike its electricity counterpart: this table predates the
@@ -104,7 +106,7 @@ TABLES = {
             sample_size INTEGER,
             source TEXT NOT NULL DEFAULT 'daily',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(score_date, model)
+            UNIQUE(city, score_date, model, source)
         );
     """,
     "electricity_observations": """
@@ -161,7 +163,7 @@ TABLES = {
             model VARCHAR(50) NOT NULL,
             source TEXT NOT NULL DEFAULT 'daily',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(state, forecast_date, model)
+            UNIQUE(state, forecast_date, model, source)
         );
     """,
     # mape lives here and not on model_performance: adding a column to a live table
@@ -179,7 +181,7 @@ TABLES = {
             sample_size INT NOT NULL,
             source TEXT NOT NULL DEFAULT 'daily',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(state, score_date, model)
+            UNIQUE(state, score_date, model, source)
         );
     """,
 }
@@ -219,8 +221,8 @@ MIGRATIONS = (
     "ALTER TABLE model_performance "
     "ADD COLUMN IF NOT EXISTS city VARCHAR(100) NOT NULL DEFAULT 'Nagpur';",
     "UPDATE model_performance SET city = 'Nagpur' WHERE city IS NULL;",
-    "CREATE UNIQUE INDEX IF NOT EXISTS model_performance_city_score_model_uidx "
-    "ON model_performance (city, score_date, model);",
+    "CREATE UNIQUE INDEX IF NOT EXISTS model_performance_city_score_model_source_uidx "
+    "ON model_performance (city, score_date, model, source);",
     # Aggregate tables. A daily row scores one date against a UNIQUE(city,
     # forecast_date, model) predictions table, so its sample_size is 1 by
     # construction - anything larger came from a backtest.
@@ -251,6 +253,58 @@ MIGRATIONS = (
 )
 
 
+def migrate_nowcasts(cur):
+    """One-time provenance correction and source-aware keys, in the DDL transaction.
+
+    Stop old workers before the first rollout: their conflict targets no longer
+    match the schema. Prediction values and issuance timestamps are never changed.
+    """
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    version = "2026-09-nowcast-provenance"
+    cur.execute("SELECT 1 FROM schema_migrations WHERE version = %s", (version,))
+    if cur.fetchone():
+        return
+    for prefix, key, zone in (("", "city", "UTC"),
+                              ("electricity_", "state", "Asia/Kolkata")):
+        predictions = prefix + "predictions"
+        performance = prefix + "model_performance"
+        for table, old_keys, new_keys in (
+            (predictions, f"{key}_forecast_date_model", f"{key}, forecast_date, model, source"),
+            (performance, "score_date_model" if not prefix else "state_score_date_model",
+             f"{key}, score_date, model, source"),
+        ):
+            cur.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_{old_keys}_key")
+            cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_provenance_uidx "
+                        f"ON {table} ({new_keys})")
+        if not prefix:
+            cur.execute("DROP INDEX IF EXISTS model_performance_city_score_model_uidx")
+
+        # Old daily records issued during/after the target period were estimates,
+        # not advance forecasts. Unknown issuance cannot prove advance status.
+        # Move only scores belonging to rows corrected by this migration, not
+        # an advance score sharing a date/model with an already-labelled nowcast.
+        # Conflicting provenance rows fail the transaction rather than discard data.
+        cur.execute(f"""
+            WITH corrected AS (
+                UPDATE {predictions} SET source = 'nowcast'
+                WHERE source = 'daily' AND (created_at IS NULL OR
+                    created_at >= (forecast_date::timestamp AT TIME ZONE %s))
+                RETURNING {key}, forecast_date, model
+            )
+            UPDATE {performance} m SET source = 'nowcast'
+            FROM corrected p
+            WHERE m.{key} = p.{key} AND m.score_date = p.forecast_date
+              AND m.model = p.model AND m.source = 'daily'
+              AND m.sample_size = 1
+        """, (zone,))
+    cur.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
+
+
 def create_tables():
     # Runs unattended in ci.yml; without this a missing DSN reaches psycopg as None
     # and surfaces as a connection-string parse error rather than the real problem.
@@ -259,14 +313,17 @@ def create_tables():
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+            # Serialize schema jobs before any DDL, including concurrent CI/manual runs.
+            cur.execute("SET LOCAL lock_timeout = '30s'")
+            cur.execute("SELECT pg_advisory_xact_lock(830100)")
             for name, ddl in TABLES.items():
                 cur.execute(ddl)
                 print(f"[OK] {name}")
-            conn.commit()
 
             for sql in MIGRATIONS:
                 cur.execute(sql)
                 print(f"[OK] {sql[:58]}... ({cur.rowcount} rows)")
+            migrate_nowcasts(cur)
             conn.commit()
 
             for name in TABLES:

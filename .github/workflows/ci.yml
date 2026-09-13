@@ -2,9 +2,9 @@ name: CI
 
 # Unit tests on every push and PR. The whole suite runs - no file is excluded by
 # name - against a throwaway Postgres service, so tests/test_feature_alignment.py
-# runs here instead of skipping itself. Those are the only tests that execute real
-# SQL, and they verify the leakage guarantee (a date-addressed RANGE frame nulls
-# across a gap), the features(t) -> target(t+1) contract, and same-date scoring.
+# runs here instead of skipping itself. Integration tests also exercise schema
+# upgrades, isolated nowcast scoring, real predictors, and a local uvicorn server's
+# readiness gate. No production DSN or upstream ingestion is used.
 #
 # The two `- run:` self-checks after pytest are assert-based __main__ blocks that
 # already exist in those modules; running them is cheaper than a second copy.
@@ -59,7 +59,10 @@ jobs:
       # Idempotent CREATE TABLE IF NOT EXISTS for all eight tables.
       - run: python -m vericast.schema
 
+      # Repeat migrations to catch non-idempotent changes before production rollout.
+      - run: python -m vericast.schema
       - run: python -m pytest tests -q -ra
+      - run: node --test tests/dashboard_nowcasts.test.cjs
 
       - run: python -m vericast.gate         # retrain-gate self-check, no database
       - run: python -m vericast.local_time   # asserts Asia/Kolkata resolves (+5:30)

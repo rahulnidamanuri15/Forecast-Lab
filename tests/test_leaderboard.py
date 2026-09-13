@@ -92,20 +92,15 @@ def test_leaderboard_endpoint_database_error():
     ("vericast.pm25.score", "UPSERT_PERF_SQL"),
     ("vericast.elec.score", "UPSERT_PERF_SQL"),
 ])
-def test_upsert_relabels_source_on_conflict(module_path, attr):
+def test_upsert_preserves_provenance_on_conflict(module_path, attr):
     import importlib
 
     sql = getattr(importlib.import_module(module_path), attr)
-    _assert_forces_daily(sql, f"{module_path}.{attr}")
-
-
-def _assert_forces_daily(sql, label):
-    on_conflict = sql.split("DO UPDATE SET", 1)
-    assert len(on_conflict) == 2, f"{label} has no DO UPDATE branch"
-    assert "source = 'daily'" in on_conflict[1], (
-        f"{label} does not reset source on conflict; a daily write overwriting a "
-        f"backtest row would stay labelled 'backtest'"
-    )
+    key = "city" if ".pm25." in module_path else "state"
+    assert f"ON CONFLICT ({key}, score_date, model, source)" in sql
+    before, after = sql.split("DO UPDATE SET", 1)
+    assert "sample_size, source)" in before
+    assert "source =" not in after, "a rescore must not relabel another provenance"
 
 
 # The mirror of the above: the backtest seeders must NOT be able to overwrite a

@@ -29,29 +29,24 @@ FROM observations o
 WHERE o.city = p.city
   AND o.as_of = p.forecast_date
   AND p.city = %s
-  AND p.source = 'daily'
+  AND p.source IN ('daily', 'nowcast')
   AND p.actual_pm2_5 IS NULL
   AND p.predicted_pm2_5 IS NOT NULL
   AND o.pm2_5 IS NOT NULL
   AND o.pm2_5 != 'NaN'::float
   AND o.pm2_5 != 'Infinity'::float
   AND o.pm2_5 != '-Infinity'::float
-RETURNING p.forecast_date, p.model, p.predicted_pm2_5, o.pm2_5;
+RETURNING p.forecast_date, p.model, p.predicted_pm2_5, o.pm2_5, p.source;
 """
 
-# Upsert daily model performance metrics, ensuring source='daily' on conflict.
-# Writes city so the multi-city UNIQUE(city, score_date, model) index stays
-# correct; ON CONFLICT stays on the legacy (score_date, model) key so this works
-# both before and after the schema.py city migration has run.
+# Each provenance owns its own score; rescoring never relabels another record.
 UPSERT_PERF_SQL = """
-INSERT INTO model_performance (city, score_date, model, mae, rmse, sample_size)
-VALUES (%s, %s, %s, %s, %s, %s)
-ON CONFLICT (score_date, model) DO UPDATE SET
-    city = EXCLUDED.city,
+INSERT INTO model_performance (city, score_date, model, mae, rmse, sample_size, source)
+VALUES (%s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (city, score_date, model, source) DO UPDATE SET
     mae = EXCLUDED.mae,
     rmse = EXCLUDED.rmse,
     sample_size = EXCLUDED.sample_size,
-    source = 'daily',
     created_at = CURRENT_TIMESTAMP;
 """
 
@@ -101,7 +96,7 @@ def score_pending_predictions():
                 return isinstance(v, float) and (math.isnan(v) or math.isinf(v))
 
             groups = {}
-            for forecast_date, model, predicted, actual in scored:
+            for forecast_date, model, predicted, actual, source in scored:
                 if (predicted is None or actual is None
                         or not math.isfinite(float(predicted))
                         or not math.isfinite(float(actual))):
@@ -109,12 +104,11 @@ def score_pending_predictions():
                         f"Invalid scoring values for {forecast_date} {model}; "
                         "rolling back actual attachment"
                     )
-                groups.setdefault((forecast_date, model), []).append((predicted, actual))
+                groups.setdefault((forecast_date, model, source), []).append((predicted, actual))
 
-            # Per-group SAVEPOINTs: one corrupt day skips itself instead of rolling
-            # back every valid day scored in this run.
+            # Any failure rolls back actuals and metrics for the entire batch.
             skipped = 0
-            for (score_date, model), pairs in sorted(groups.items()):
+            for (score_date, model, source), pairs in sorted(groups.items()):
                 cur.execute("SAVEPOINT score_day")
                 try:
                     predicted = np.array([p for p, _ in pairs], dtype=float)
@@ -125,7 +119,7 @@ def score_pending_predictions():
                     if not (math.isfinite(mae) and math.isfinite(rmse)):
                         raise ValueError(f"non-finite metric (mae={mae}, rmse={rmse})")
 
-                    cur.execute(UPSERT_PERF_SQL, (CITY, score_date, model, mae, rmse, len(pairs)))
+                    cur.execute(UPSERT_PERF_SQL, (CITY, score_date, model, mae, rmse, len(pairs), source))
                     cur.execute("RELEASE SAVEPOINT score_day")
                     print(f"Scored {model} for {score_date}: MAE={mae:.4f}, RMSE={rmse:.4f} (n={len(pairs)})")
                 except Exception as exc:

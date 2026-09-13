@@ -25,7 +25,7 @@ from vericast import (
 )
 from vericast.elec.train import FEATURE_COLUMNS
 from vericast.artifacts import load_model, model_exists
-from vericast.publication import require_advance_forecast
+from vericast.publication import publish_predictions
 
 load_dotenv()
 
@@ -34,11 +34,11 @@ STATE = os.getenv("STATE", "Maharashtra")
 
 UNIT = "MW"
 
-# Upsert electricity predictions with source='daily'.
+# Store provenance and issuance time explicitly, never overwrite a published row.
 UPSERT_SQL = """
-INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model)
-VALUES (%s, %s, %s, %s)
-ON CONFLICT (state, forecast_date, model) DO NOTHING;
+INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model, source, created_at)
+VALUES (%s, %s, %s, %s, %s, %s)
+ON CONFLICT (state, forecast_date, model, source) DO NOTHING;
 """
 
 
@@ -101,7 +101,6 @@ def make_daily_prediction():
         # normal lag for this mirror, so only past ELEC_STALE_LIMIT_DAYS has it
         # actually stalled.
         stale_days = refuse_stale(as_of, today, ELEC_STALE_LIMIT_DAYS, "electricity")
-        require_advance_forecast(forecast_date, "Asia/Kolkata")
         if as_of != yesterday:
             print(f"[WARN] Most recent observation is from {as_of}, {stale_days} "
                   f"day(s) old (expected data through {yesterday}; normal lag for "
@@ -113,6 +112,7 @@ def make_daily_prediction():
 
         print(f"Making prediction for {forecast_date} based on {as_of}'s observation")
 
+        records = []
         skipped = []
         # 1/3 naive persistence: tomorrow == the latest actual. A NULL peak cannot
         # happen (NOT NULL schema) but a corrupt read must degrade like the PM2.5
@@ -124,9 +124,9 @@ def make_daily_prediction():
         else:
             peak_demand_mw = refuse_implausible(peak_demand_mw, ELEC_MIN_MW, ELEC_MAX_MW,
                                                 "naive_baseline", UNIT)
-            cur.execute(UPSERT_SQL, (STATE, forecast_date, peak_demand_mw, "naive_baseline"))
+            records.append((STATE, forecast_date, peak_demand_mw, "naive_baseline"))
 
-            print(f"[OK] Stored naive_baseline prediction for {forecast_date}: "
+            print(f"[OK] Prepared naive_baseline prediction for {forecast_date}: "
                   f"{peak_demand_mw:.0f} MW")
 
         # The features row backs both seasonal_naive and lightgbm, so fetch once
@@ -158,9 +158,9 @@ def make_daily_prediction():
             else:
                 seasonal = refuse_implausible(seasonal, ELEC_MIN_MW, ELEC_MAX_MW,
                                               "seasonal_naive", UNIT)
-                cur.execute(UPSERT_SQL, (STATE, forecast_date, seasonal, "seasonal_naive"))
+                records.append((STATE, forecast_date, seasonal, "seasonal_naive"))
 
-                print(f"[OK] Stored seasonal_naive prediction for {forecast_date}: "
+                print(f"[OK] Prepared seasonal_naive prediction for {forecast_date}: "
                       f"{seasonal:.0f} MW")
 
             # 3/3 LightGBM: needs every feature present. Guarded rather than an
@@ -181,12 +181,11 @@ def make_daily_prediction():
 
                     lgbm_pred = refuse_implausible(lgbm_pred, ELEC_MIN_MW, ELEC_MAX_MW,
                                                    "lightgbm", UNIT)
-                    cur.execute(UPSERT_SQL, (STATE, forecast_date, lgbm_pred, "lightgbm"))
-                    print(f"[OK] Stored lightgbm prediction for {forecast_date}: "
+                    records.append((STATE, forecast_date, lgbm_pred, "lightgbm"))
+                    print(f"[OK] Prepared lightgbm prediction for {forecast_date}: "
                           f"{lgbm_pred:.0f} MW")
 
-        # Recheck after inference: crossing the cutoff rolls back all inserts.
-        require_advance_forecast(forecast_date, "Asia/Kolkata")
+        publish_predictions(cur, UPSERT_SQL, records, forecast_date, "Asia/Kolkata")
         # Atomic commit for the forecast date across all models.
         conn.commit()
 

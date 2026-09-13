@@ -136,7 +136,7 @@ def save_results(evaluation_dates, predictions, actuals, conn=None):
         INSERT INTO electricity_predictions
             (state, forecast_date, predicted_demand_mw, actual_demand_mw, model, source)
         VALUES (%s, %s, %s, %s, %s, 'backtest')
-        ON CONFLICT (state, forecast_date, model) DO UPDATE SET
+        ON CONFLICT (state, forecast_date, model, source) DO UPDATE SET
             predicted_demand_mw = EXCLUDED.predicted_demand_mw,
             created_at = CURRENT_TIMESTAMP
         WHERE electricity_predictions.source = 'backtest';
@@ -179,7 +179,7 @@ def save_model_performance(evaluation_dates, predictions, actuals, conn=None):
         INSERT INTO electricity_model_performance
             (state, score_date, model, mae, rmse, mape, sample_size, source)
         VALUES (%s, %s, %s, %s, %s, %s, %s, 'backtest')
-        ON CONFLICT (state, score_date, model) DO UPDATE SET
+        ON CONFLICT (state, score_date, model, source) DO UPDATE SET
             mae = EXCLUDED.mae,
             rmse = EXCLUDED.rmse,
             mape = EXCLUDED.mape,
