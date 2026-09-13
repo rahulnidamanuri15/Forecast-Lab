@@ -262,7 +262,7 @@ def serve_dashboard():
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; "
         "img-src 'self' data:; "
-        "connect-src 'self' https://*.onrender.com http://localhost:8000 http://127.0.0.1:8000; "
+        "connect-src 'self' https://*.onrender.com https://cdn.jsdelivr.net http://localhost:8000 http://127.0.0.1:8000; "
         "object-src 'none'; "
         "frame-ancestors 'none'; "
         "base-uri 'none'; "
