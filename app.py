@@ -206,7 +206,7 @@ DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-async def serve_dashboard():
+def serve_dashboard():
     """Serve the VeriCast dashboard with backend-enforced security headers."""
     if not os.path.exists(DASHBOARD_FILE):
         raise HTTPException(status_code=404, detail="Dashboard file not found")
@@ -242,7 +242,7 @@ async def serve_dashboard():
 PM25_MODELS = {"lightgbm", "naive_baseline"}
 
 @app.get("/forecast")
-async def get_forecast(model: str = "lightgbm"):
+def get_forecast(model: str = "lightgbm"):
     """Return the latest forecast that was published before its actual existed.
 
     Filtered to source = 'daily', not merely labelled like /predictions. This is the
@@ -386,7 +386,7 @@ def _leaderboard(rows, metric_names, descriptions):
 
 
 @app.get("/leaderboard")
-async def get_leaderboard():
+def get_leaderboard():
     """
     Get the leaderboard of model performance, read live from model_performance.
     For each model, returns its most recent scored MAE/RMSE (i.e. the latest
@@ -447,7 +447,7 @@ async def get_leaderboard():
 
 
 @app.get("/predictions")
-async def get_predictions(
+def get_predictions(
     model: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -584,7 +584,7 @@ async def get_predictions(
 
 
 @app.get("/evaluation")
-async def get_evaluation(days: Optional[int] = Query(None, ge=0)):
+def get_evaluation(days: Optional[int] = Query(None, ge=0)):
     """
     Accuracy over published predictions, grouped by model and split by provenance.
 
@@ -677,7 +677,7 @@ async def get_evaluation(days: Optional[int] = Query(None, ge=0)):
 
 
 @app.get("/history")
-async def get_history(days: int = Query(30, ge=1, le=365)):
+def get_history(days: int = Query(30, ge=1, le=365)):
     """
     Get the `days` most recently stored PM2.5 observations, oldest first.
 
@@ -730,7 +730,7 @@ async def get_history(days: int = Query(30, ge=1, le=365)):
 
 
 @app.get("/health")
-async def health():
+def health():
     """Freshness of PM2.5 observations.
 
     `source_lag_expected` is the flag the dashboard's LIVE pill reads. Past
@@ -778,7 +778,7 @@ ELEC_MODEL_DESCRIPTIONS = {
 
 
 @app.get("/electricity/health")
-async def electricity_health():
+def electricity_health():
     """Freshness of electricity observations.
 
     `stale_days` of 2-4 is expected: unlike the air-quality archive, the upstream
@@ -811,7 +811,7 @@ async def electricity_health():
 
 
 @app.get("/electricity/forecast")
-async def get_electricity_forecast(model: str = "lightgbm"):
+def get_electricity_forecast(model: str = "lightgbm"):
     """Latest peak-demand forecast (MW) published before its actual existed.
 
     Filtered to source = 'daily' for the same reason as /forecast: this feeds the
@@ -859,7 +859,7 @@ async def get_electricity_forecast(model: str = "lightgbm"):
 
 
 @app.get("/electricity/predictions")
-async def get_electricity_predictions(
+def get_electricity_predictions(
     model: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -980,7 +980,7 @@ async def get_electricity_predictions(
 
 
 @app.get("/electricity/evaluation")
-async def get_electricity_evaluation(days: Optional[int] = Query(None, ge=0)):
+def get_electricity_evaluation(days: Optional[int] = Query(None, ge=0)):
     """Accuracy over published electricity predictions, by model and provenance.
 
     Same split as /evaluation: `verified` rows were published before the actual
@@ -1057,7 +1057,7 @@ async def get_electricity_evaluation(days: Optional[int] = Query(None, ge=0)):
 
 
 @app.get("/electricity/leaderboard")
-async def get_electricity_leaderboard():
+def get_electricity_leaderboard():
     """Most recent scored MAE/RMSE/MAPE per electricity model.
 
     The counterpart of /leaderboard, over electricity_model_performance. Same
@@ -1097,7 +1097,7 @@ async def get_electricity_leaderboard():
         raise db_error(e)
 
 @app.get("/electricity/history")
-async def get_electricity_history(days: int = Query(30, ge=1, le=365)):
+def get_electricity_history(days: int = Query(30, ge=1, le=365)):
     """The `days` most recently stored observations, oldest first.
 
     Peak demand (MW), energy met (MU) and temperature. `days` bounds rows, not

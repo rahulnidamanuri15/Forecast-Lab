@@ -24,6 +24,8 @@ from vericast import (
     send_alert,
 )
 from vericast.pm25.train import FEATURE_COLUMNS
+from vericast.artifacts import load_model, model_exists
+from vericast.publication import require_advance_forecast
 
 load_dotenv()
 
@@ -37,11 +39,11 @@ UNIT = "ug/m3"
 def load_lightgbm_model():
     """Load the production model artifact. Returns None if it hasn't been
     trained yet, so the pipeline degrades to naive-only instead of crashing."""
-    if not os.path.exists(MODEL_PATH):
+    if not model_exists(MODEL_PATH):
         print(f"[WARN] No LightGBM model artifact found at {MODEL_PATH}; "
               f"skipping LightGBM forecast. Run vericast/pm25/train.py first.")
         return None
-    return lgb.Booster(model_file=MODEL_PATH)
+    return load_model(MODEL_PATH)
 
 
 def get_latest_feature_row(cur):
@@ -95,6 +97,7 @@ def make_daily_prediction():
 
         # Validate that the observation is fresh enough to anchor a forecast.
         stale_days = refuse_stale(as_of, today, PM25_STALE_LIMIT_DAYS, "PM2.5")
+        require_advance_forecast(forecast_date, "UTC")
         if as_of != yesterday:
             print(f"[WARN] Most recent observation is from {as_of}, {stale_days} "
                   f"day(s) old (expected data through {yesterday}). Forecasting "
