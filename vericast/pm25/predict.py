@@ -109,10 +109,7 @@ def make_daily_prediction():
         upsert_sql = """
         INSERT INTO predictions (city, forecast_date, predicted_pm2_5, model)
         VALUES (%s, %s, %s, %s)
-        ON CONFLICT (city, forecast_date, model) DO UPDATE SET
-            predicted_pm2_5 = EXCLUDED.predicted_pm2_5,
-            source = 'daily',
-            created_at = CURRENT_TIMESTAMP;
+        ON CONFLICT (city, forecast_date, model) DO NOTHING;
         """
 
         skipped = []
@@ -159,6 +156,8 @@ def make_daily_prediction():
                     cur.execute(upsert_sql, (CITY, forecast_date, lgbm_pred, "lightgbm"))
                     print(f"[OK] Stored lightgbm prediction for {forecast_date}: {lgbm_pred:.2f} PM2.5")
 
+        # Recheck after inference: crossing the cutoff rolls back all inserts.
+        require_advance_forecast(forecast_date, "UTC")
         # Atomic commit for the forecast date across all models.
         conn.commit()
 

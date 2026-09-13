@@ -15,6 +15,7 @@ from vericast import (
 )
 from vericast.elec.train import FEATURE_COLUMNS as ELEC_FEATURE_COLUMNS
 from vericast.pm25.train import FEATURE_COLUMNS
+from vericast.artifacts import load_model
 
 load_dotenv()
 
@@ -255,17 +256,18 @@ def check_leakage_test(module='vericast.pm25.leakage_test'):
         return False
 
 def check_model_artifact(target="PM2.5"):
-    """Check that `target`'s LightGBM artifact exists and is not empty."""
+    """Validate the authoritative bundle (or a legacy model), not a stale text file."""
     model_path = TARGETS[target]["artifact"]
-    if os.path.exists(model_path):
-        if os.path.getsize(model_path) > 0:
-            print(f"PASS: {target} LightGBM model artifact exists and is not empty")
-            return True
-        else:
-            print(f"FAIL: {target} LightGBM model artifact exists but is empty")
+    try:
+        model = load_model(model_path)
+        expected = len(TARGETS[target]["feature_columns"])
+        if model.num_feature() != expected:
+            print(f"FAIL: {target} artifact feature count does not match {expected}")
             return False
-    else:
-        print(f"FAIL: {target} LightGBM model artifact not found at {model_path}")
+        print(f"PASS: {target} model artifact loads with {expected} features")
+        return True
+    except Exception as exc:
+        print(f"FAIL: {target} model artifact cannot be loaded: {type(exc).__name__}")
         return False
 
 def check_prediction_exists(model="lightgbm", target="PM2.5"):

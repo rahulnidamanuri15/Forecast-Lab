@@ -87,4 +87,6 @@ def test_bundle_replacement_failure_keeps_old_generation(tmp_path, monkeypatch):
 def test_corrupt_bundle_does_not_fall_back(tmp_path):
     path = tmp_path / "model.txt"
     path.write_text("legacy-model")
-    Path(artifacts.bundle_path(path)).write_text('{"version":
+    Path(artifacts.bundle_path(path)).write_text('{"version":')
+    with pytest.raises(ValueError):
+        artifacts.load_model(path)

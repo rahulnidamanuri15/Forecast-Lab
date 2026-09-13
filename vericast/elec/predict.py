@@ -38,10 +38,7 @@ UNIT = "MW"
 UPSERT_SQL = """
 INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model)
 VALUES (%s, %s, %s, %s)
-ON CONFLICT (state, forecast_date, model) DO UPDATE SET
-    predicted_demand_mw = EXCLUDED.predicted_demand_mw,
-    source = 'daily',
-    created_at = CURRENT_TIMESTAMP;
+ON CONFLICT (state, forecast_date, model) DO NOTHING;
 """
 
 
@@ -188,6 +185,8 @@ def make_daily_prediction():
                     print(f"[OK] Stored lightgbm prediction for {forecast_date}: "
                           f"{lgbm_pred:.0f} MW")
 
+        # Recheck after inference: crossing the cutoff rolls back all inserts.
+        require_advance_forecast(forecast_date, "Asia/Kolkata")
         # Atomic commit for the forecast date across all models.
         conn.commit()
 
