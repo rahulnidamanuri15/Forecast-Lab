@@ -14,14 +14,16 @@ import lightgbm as lgb
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vericast import MODEL_ELEC, MODEL_PM25
+from vericast.artifacts import bundle_path, load_model, model_exists
 from vericast.elec import predict as elec_predict, train as elec_train
 from vericast.pm25 import predict as pm25_predict, train as pm25_train
 
 
 def test_model_artifacts_resolve():
     for path in (MODEL_PM25, MODEL_ELEC):
-        assert os.path.isfile(path), f"model artifact missing: {path}"
-        assert os.path.getsize(path) > 0, f"model artifact empty: {path}"
+        assert model_exists(path), f"model artifact missing: {path}"
+        active = bundle_path(path) if os.path.isfile(bundle_path(path)) else path
+        assert os.path.getsize(active) > 0, f"model artifact empty: {active}"
 
 
 def test_model_artifacts_load_and_agree_on_feature_order():
@@ -36,11 +38,12 @@ def test_model_artifacts_load_and_agree_on_feature_order():
     """
     for path, columns in ((MODEL_PM25, pm25_train.FEATURE_COLUMNS),
                           (MODEL_ELEC, elec_train.FEATURE_COLUMNS)):
-        with open(path, "rb") as fh:
-            assert b"\r" not in fh.read(), (
-                f"{path} has CR bytes; LightGBM cannot parse it. "
-                "Check .gitattributes and core.autocrlf.")
-        booster = lgb.Booster(model_file=path)
+        if os.path.isfile(path):
+            with open(path, "rb") as fh:
+                assert b"\r" not in fh.read(), (
+                    f"{path} has CR bytes; LightGBM cannot parse it. "
+                    "Check .gitattributes and core.autocrlf.")
+        booster = load_model(path)
         assert booster.feature_name() == columns, (
             f"{path} feature order differs from FEATURE_COLUMNS")
 
