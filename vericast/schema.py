@@ -284,9 +284,25 @@ def migrate_nowcasts(cur):
         if not prefix:
             cur.execute("DROP INDEX IF EXISTS model_performance_city_score_model_uidx")
 
-        # Ensure unique index exists without altering daily records
-        pass
-    cur.execute("INSERT INTO schema_migrations (version) VALUES (%s) ON CONFLICT (version) DO NOTHING", (version,))
+        # Old daily records issued during/after the target period were estimates,
+        # not advance forecasts. Unknown issuance cannot prove advance status.
+        # Move only scores belonging to rows corrected by this migration, not
+        # an advance score sharing a date/model with an already-labelled nowcast.
+        # Conflicting provenance rows fail the transaction rather than discard data.
+        cur.execute(f"""
+            WITH corrected AS (
+                UPDATE {predictions} SET source = 'nowcast'
+                WHERE source = 'daily' AND (created_at IS NULL OR
+                    created_at >= (forecast_date::timestamp AT TIME ZONE %s))
+                RETURNING {key}, forecast_date, model
+            )
+            UPDATE {performance} m SET source = 'nowcast'
+            FROM corrected p
+            WHERE m.{key} = p.{key} AND m.score_date = p.forecast_date
+              AND m.model = p.model AND m.source = 'daily'
+              AND m.sample_size = 1
+        """, (zone,))
+    cur.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
 
 
 def create_tables():
