@@ -102,14 +102,13 @@ def score_pending_predictions():
 
             groups = {}
             for forecast_date, model, predicted, actual in scored:
-                if predicted is None or actual is None:
-                    continue
-                if _non_finite(predicted):
-                    print(f"  [skip] {forecast_date} {model}: predicted is non-finite; not scoring")
-                    continue
-                if _non_finite(actual):
-                    print(f"  [skip] {forecast_date} {model}: actual is non-finite; not scoring")
-                    continue
+                if (predicted is None or actual is None
+                        or not math.isfinite(float(predicted))
+                        or not math.isfinite(float(actual))):
+                    raise RuntimeError(
+                        f"Invalid scoring values for {forecast_date} {model}; "
+                        "rolling back actual attachment"
+                    )
                 groups.setdefault((forecast_date, model), []).append((predicted, actual))
 
             # Per-group SAVEPOINTs: one corrupt day skips itself instead of rolling
@@ -130,10 +129,12 @@ def score_pending_predictions():
                     cur.execute("RELEASE SAVEPOINT score_day")
                     print(f"Scored {model} for {score_date}: MAE={mae:.4f}, RMSE={rmse:.4f} (n={len(pairs)})")
                 except Exception as exc:
-                    cur.execute("ROLLBACK TO SAVEPOINT score_day")
-                    cur.execute("RELEASE SAVEPOINT score_day")
-                    skipped += 1
-                    print(f"  [skip] {score_date} {model}: {exc}; day skipped, rest committed")
+                    # Propagate through the connection context: the entire scoring
+                    # transaction, including actual attachment, must roll back.
+                    raise RuntimeError(
+                        f"Scoring failed for {score_date} {model}; rolling back "
+                        "actuals and metrics so the next run can retry"
+                    ) from exc
             if skipped:
                 print(f"  [warn] {skipped} day(s) skipped for non-finite metrics; "
                       f"valid days committed normally.")

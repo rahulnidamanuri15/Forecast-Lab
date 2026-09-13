@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from vericast import MODEL_PM25 as MODEL_PATH, require_city_of_record, require_database_url
 from vericast.gate import challenger_ships, read_training_window, save_atomic_artifact
+from vericast.artifacts import load_model
 
 load_dotenv()
 
@@ -112,7 +113,7 @@ def train_and_save():
                             FEATURE_COLUMNS.index("pm2_5_lag_1"),
                             incumbent_path=MODEL_PATH,
                             feature_names=FEATURE_COLUMNS, unit=UNIT,
-                            dates=feature_dates):
+                            dates=target_dates):
         print(f"[ALERT] Quality gate REJECTED challenger model! Retrain refused.")
         window = read_training_window(MODEL_PATH)
         if window:
@@ -126,10 +127,10 @@ def train_and_save():
     model = lgb.train(PARAMS, train_data, num_boost_round=NUM_BOOST_ROUND)
 
     # Save model artifact and window sidecar atomically
-    save_atomic_artifact(model, MODEL_PATH, feature_dates, len(X))
+    save_atomic_artifact(model, MODEL_PATH, target_dates, len(X))
 
-    # Sanity check: reload and confirm predictions are reproducible
-    reloaded = lgb.Booster(model_file=MODEL_PATH)
+    # Labels, not feature dates, determine the last information used in training.
+    reloaded = load_model(MODEL_PATH)
     check_pred = reloaded.predict(X[-1:])
     print(f"Sanity check - reloaded model prediction on last row: {check_pred[0]:.4f} "
           f"(actual was {y[-1]:.4f})")

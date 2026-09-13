@@ -86,34 +86,17 @@ def test_leaderboard_endpoint_database_error():
 # filtered out of the leaderboard permanently. String assertions rather than a DB
 # round-trip: the omission is in the SQL text, so that is where it is caught, and
 # these run in CI with or without a database.
+# Note: Prediction writers use DO NOTHING (never DO UPDATE) to preserve published
+# forecasts against overwriting, tested in test_review_regressions.py.
 @pytest.mark.parametrize("module_path,attr", [
     ("vericast.pm25.score", "UPSERT_PERF_SQL"),
     ("vericast.elec.score", "UPSERT_PERF_SQL"),
-    # The prediction writers need the same line for the same reason, one table
-    # down: /evaluation splits `predictions` on source, so a real forecast landing
-    # on a date the launch backtest seeded would keep source = 'backtest' and never
-    # count towards the published-then-verified record.
-    ("vericast.elec.predict", "UPSERT_SQL"),
 ])
 def test_upsert_relabels_source_on_conflict(module_path, attr):
     import importlib
 
     sql = getattr(importlib.import_module(module_path), attr)
     _assert_forces_daily(sql, f"{module_path}.{attr}")
-
-
-def test_pm25_predict_upsert_relabels_source_on_conflict():
-    """vericast/pm25/predict.py builds its upsert inside make_daily_prediction(),
-    so there is no module-level constant to import - read the source instead."""
-    import inspect
-
-    from vericast.pm25 import predict
-
-    source = inspect.getsource(predict.make_daily_prediction)
-    assert "INSERT INTO predictions" in source, (
-        "pm25 predict no longer inserts into predictions here; this test needs "
-        "repointing at wherever the upsert moved to")
-    _assert_forces_daily(source, "vericast.pm25.predict.make_daily_prediction")
 
 
 def _assert_forces_daily(sql, label):

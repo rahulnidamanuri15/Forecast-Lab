@@ -24,6 +24,8 @@ from vericast import (
     send_alert,
 )
 from vericast.elec.train import FEATURE_COLUMNS
+from vericast.artifacts import load_model, model_exists
+from vericast.publication import require_advance_forecast
 
 load_dotenv()
 
@@ -36,21 +38,18 @@ UNIT = "MW"
 UPSERT_SQL = """
 INSERT INTO electricity_predictions (state, forecast_date, predicted_demand_mw, model)
 VALUES (%s, %s, %s, %s)
-ON CONFLICT (state, forecast_date, model) DO UPDATE SET
-    predicted_demand_mw = EXCLUDED.predicted_demand_mw,
-    source = 'daily',
-    created_at = CURRENT_TIMESTAMP;
+ON CONFLICT (state, forecast_date, model) DO NOTHING;
 """
 
 
 def load_lightgbm_model():
     """Load the production artifact. Returns None if it hasn't been trained yet,
     so the pipeline degrades to baselines-only instead of crashing."""
-    if not os.path.exists(MODEL_PATH):
+    if not model_exists(MODEL_PATH):
         print(f"[WARN] No LightGBM model artifact found at {MODEL_PATH}; "
               f"skipping LightGBM forecast. Run vericast/elec/train.py first.")
         return None
-    return lgb.Booster(model_file=MODEL_PATH)
+    return load_model(MODEL_PATH)
 
 
 def get_latest_feature_row(cur):
@@ -102,6 +101,7 @@ def make_daily_prediction():
         # normal lag for this mirror, so only past ELEC_STALE_LIMIT_DAYS has it
         # actually stalled.
         stale_days = refuse_stale(as_of, today, ELEC_STALE_LIMIT_DAYS, "electricity")
+        require_advance_forecast(forecast_date, "Asia/Kolkata")
         if as_of != yesterday:
             print(f"[WARN] Most recent observation is from {as_of}, {stale_days} "
                   f"day(s) old (expected data through {yesterday}; normal lag for "
@@ -185,6 +185,8 @@ def make_daily_prediction():
                     print(f"[OK] Stored lightgbm prediction for {forecast_date}: "
                           f"{lgbm_pred:.0f} MW")
 
+        # Recheck after inference: crossing the cutoff rolls back all inserts.
+        require_advance_forecast(forecast_date, "Asia/Kolkata")
         # Atomic commit for the forecast date across all models.
         conn.commit()
 

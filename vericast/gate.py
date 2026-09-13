@@ -2,7 +2,7 @@
 
 Evaluates a challenger model trained on the training head against a 30-day holdout block.
 Rejects degraded or broken models using three calibrated criteria:
-  1. MAE vs persistence baseline <= 2.0x (prevents massive error regressions).
+  1. MAE vs persistence baseline <= 0.99x (at least 1% improvement).
   2. Prediction spread >= 0.2x of actuals spread (rejects constant/collapsed predictions).
   3. Pearson correlation r > 0.0 with actuals (rejects sign-inverted predictions).
 
@@ -14,11 +14,13 @@ import os
 import numpy as np
 import lightgbm as lgb
 
+from vericast.artifacts import load_model, model_exists, read_bundle, save_bundle
+
 HOLDOUT_DAYS = 30
 MIN_TRAIN_ROWS = 60      # below this a 30-day holdout leaves too little to fit
 
-# Calibrated acceptance bars:
-MAX_BASELINE_RATIO = 2.0     # Challenger MAE must not exceed 2x persistence baseline
+# Production promotion requires at least 1% improvement over persistence.
+MAX_BASELINE_RATIO = 0.99
 MIN_SPREAD_FRACTION = 0.2    # Standard deviation of predictions must be >= 20% of actuals std dev
 MIN_CORRELATION = 0.0        # Pearson correlation between predictions and actuals must be positive
 
@@ -32,35 +34,10 @@ def window_path(model_path):
 
 
 def save_atomic_artifact(model, model_path, dates, rows):
-    """Atomically save the model artifact and its training window sidecar.
-
-    Writes both to temporary files first, then replaces into place so a crash
-    never leaves a mismatched artifact or half-written sidecar.
-    """
-    if not dates:
-        raise ValueError(f"Cannot save model artifact {model_path} without training dates")
-    tmp_model = f"{model_path}.tmp"
-    tmp_window = f"{window_path(model_path)}.tmp"
-
-    try:
-        model.save_model(tmp_model)
-        payload = {"first": str(dates[0]), "last": str(dates[-1]), "rows": int(rows)}
-        with open(tmp_window, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2)
-
-        os.replace(tmp_model, model_path)
-        os.replace(tmp_window, window_path(model_path))
-    except Exception:
-        for p in (tmp_model, tmp_window):
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-        raise
-
-    print(f"[gate] Atomically saved model and training window {payload['first']} -> "
-          f"{payload['last']} ({payload['rows']} rows) to {model_path}.")
+    """Publish model and training metadata through one atomic bundle replacement."""
+    payload = save_bundle(model, model_path, dates, rows)
+    print(f"[gate] Saved bundled model and training window {payload['first']} -> "
+          f"{payload['last']} ({payload['rows']} rows) to {model_path}.bundle.json.")
     return payload
 
 
@@ -77,7 +54,10 @@ def record_training_window(model_path, dates, rows):
 
 
 def read_training_window(model_path):
-    """Read the recorded training window sidecar, or None if unavailable."""
+    """Read authoritative bundle metadata, with legacy sidecar compatibility."""
+    bundle = read_bundle(model_path)
+    if bundle is not None:
+        return dict(bundle["window"])
     try:
         with open(window_path(model_path), encoding="utf-8") as fh:
             payload = json.load(fh)
@@ -91,17 +71,16 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
                      incumbent_path=None, feature_names=None,
                      holdout_days=HOLDOUT_DAYS, unit="", dates=None):
     """Validate challenger model on holdout set against quality bars before shipping."""
-    MIN_ABSOLUTE_ROWS = 25
-    if len(X) < MIN_ABSOLUTE_ROWS:
-        print(f"[gate] [WARN] Only {len(X)} rows (< {MIN_ABSOLUTE_ROWS}); "
-              "too few samples to reliably hold out. Accepting with warning.")
-        return True
+    if holdout_days < HOLDOUT_DAYS:
+        raise ValueError(f"Production holdout must contain at least {HOLDOUT_DAYS} rows")
+    if len(X) != len(y) or not np.isfinite(X).all() or not np.isfinite(y).all():
+        raise ValueError("Training features and labels must be aligned and finite")
+    if len(X) < MIN_TRAIN_ROWS + holdout_days:
+        print(f"[gate] REJECT: {len(X)} rows; need at least "
+              f"{MIN_TRAIN_ROWS + holdout_days} for production validation.")
+        return False
 
     effective_holdout = holdout_days
-    if len(X) < (MIN_TRAIN_ROWS + holdout_days):
-        effective_holdout = max(5, int(len(X) * 0.2))
-        print(f"[gate] Small dataset ({len(X)} rows): adapting holdout to "
-              f"{effective_holdout} rows (fit on {len(X) - effective_holdout}) to vet early-life model.")
     split = len(X) - effective_holdout
     X_head, y_head = X[:split], y[:split]
     X_hold, y_hold = X[split:], y[split:]
@@ -149,8 +128,8 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
         print(f"[gate]   [{'OK' if ok else 'FAIL'}] {detail}")
 
     # Drift only, no vote - see the module docstring for why it cannot vote.
-    if incumbent_path and os.path.exists(incumbent_path):
-        incumbent = lgb.Booster(model_file=incumbent_path)
+    if incumbent_path and model_exists(incumbent_path):
+        incumbent = load_model(incumbent_path)
         if incumbent.num_feature() == X.shape[1]:
             incumbent_mae = _mae(incumbent.predict(X_hold), y_hold)
             # Sidecar window comparison: only comparable if incumbent finished before holdout opens
@@ -214,8 +193,8 @@ def demo():
         "a constant label must be refused"
     assert not ships(lambda a: a * 3), "a 3x scale bug must be refused"
     assert not ships(rounds=1), "a 1-round stump must be refused"
-    assert challenger_ships(X[:50], y[:50], params, 100, 0), \
-        "too few rows to hold out must accept"
+    assert not challenger_ships(X[:50], y[:50], params, 100, 0), \
+        "insufficient production validation data must be refused"
 
     # The sidecar round-trips, and a missing or corrupt one reads as None rather
     # than raising - the printed comparability line must never fail a retrain.
