@@ -725,14 +725,13 @@
     <!-- ==================== PM2.5 PANEL ==================== -->
     <div id="panel-pm25">
       <div class="error-banner" id="pm25-error" role="alert" hidden></div>
-      <section class="panel" style="margin-bottom:24px" aria-labelledby="pm25-nowcast-title">
+      <section class="panel" style="display:none" aria-labelledby="pm25-nowcast-title">
         <h2 id="pm25-nowcast-title">Nowcasts / delayed estimates</h2>
         <p class="panel-subtitle">Issued at or after target-day midnight. Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
         <p id="pm25-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
         <p id="pm25-bundle" class="panel-subtitle">Checking current model bundle…</p>
         <div id="pm25-nowcast-records" class="table-wrap"></div>
       </section>
-      <h2 class="panel-title">Advance forecasts only · metrics and ledger below</h2>
 
       <!-- SECTION 1: OVERVIEW (KPI Metrics + Hero Feature Grid) -->
       <section id="pm25-overview" class="overview-section" aria-label="PM2.5 overview">
@@ -988,14 +987,13 @@
       <!-- ==================== ELECTRICITY PANEL ==================== -->
       <div id="panel-electricity" hidden>
         <div class="error-banner" id="el-error" role="alert" hidden></div>
-        <section class="panel" style="margin-bottom:24px" aria-labelledby="el-nowcast-title">
+        <section class="panel" style="display:none" aria-labelledby="el-nowcast-title">
           <h2 id="el-nowcast-title">Nowcasts / delayed estimates</h2>
           <p class="panel-subtitle">Issued at or after target-day midnight (Asia/Kolkata). Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
           <p id="el-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
           <p id="el-bundle" class="panel-subtitle">Checking current model bundle…</p>
           <div id="el-nowcast-records" class="table-wrap"></div>
         </section>
-        <h2 class="panel-title">Advance forecasts only · metrics and ledger below</h2>
 
         <!-- SECTION 1: OVERVIEW (KPI Metrics + Hero Feature Grid) -->
         <section id="el-overview" class="overview-section" aria-label="Electricity overview">
