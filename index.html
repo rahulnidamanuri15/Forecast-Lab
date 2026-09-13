@@ -725,14 +725,6 @@
     <!-- ==================== PM2.5 PANEL ==================== -->
     <div id="panel-pm25">
       <div class="error-banner" id="pm25-error" role="alert" hidden></div>
-      <section class="panel" style="margin-bottom:24px" aria-labelledby="pm25-nowcast-title">
-        <h2 id="pm25-nowcast-title">Nowcasts / delayed estimates</h2>
-        <p class="panel-subtitle">Issued at or after target-day midnight. Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
-        <p id="pm25-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
-        <p id="pm25-bundle" class="panel-subtitle">Checking current model bundle…</p>
-        <div id="pm25-nowcast-records" class="table-wrap"></div>
-      </section>
-      <h2 class="panel-title">Advance forecasts only · metrics and ledger below</h2>
 
       <!-- SECTION 1: OVERVIEW (KPI Metrics + Hero Feature Grid) -->
       <section id="pm25-overview" class="overview-section" aria-label="PM2.5 overview">
@@ -988,14 +980,6 @@
       <!-- ==================== ELECTRICITY PANEL ==================== -->
       <div id="panel-electricity" hidden>
         <div class="error-banner" id="el-error" role="alert" hidden></div>
-        <section class="panel" style="margin-bottom:24px" aria-labelledby="el-nowcast-title">
-          <h2 id="el-nowcast-title">Nowcasts / delayed estimates</h2>
-          <p class="panel-subtitle">Issued at or after target-day midnight (Asia/Kolkata). Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
-          <p id="el-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
-          <p id="el-bundle" class="panel-subtitle">Checking current model bundle…</p>
-          <div id="el-nowcast-records" class="table-wrap"></div>
-        </section>
-        <h2 class="panel-title">Advance forecasts only · metrics and ledger below</h2>
 
         <!-- SECTION 1: OVERVIEW (KPI Metrics + Hero Feature Grid) -->
         <section id="el-overview" class="overview-section" aria-label="Electricity overview">
@@ -1301,11 +1285,6 @@
       throw lastErr;
     }
 
-    // Empty advance-only routes are normal when this deployment has only nowcasts.
-    function emptyOrUnavailable(err) {
-      return err.status === 404 ? { no_data: true } : null;
-    }
-
     // Number & String formatting utilities
     function fmt(n, d = 2) {
       return (n === null || n === undefined) ? '—' : Number(n).toFixed(d);
@@ -1428,58 +1407,6 @@
       `).join('');
     }
 
-    // Nowcasts are rendered separately; never feed them into advance metrics/charts.
-    async function initNowcasts(prefix, evaluation) {
-      const base = prefix === 'el' ? '/electricity' : '';
-      const latest = document.getElementById(`${prefix}-nowcast-latest`);
-      const bundle = document.getElementById(`${prefix}-bundle`);
-      const records = document.getElementById(`${prefix}-nowcast-records`);
-      const optional = path => fetchJSON(path).catch(err => {
-        if (err.status === 404) return null;
-        throw err;
-      });
-      try {
-        const [forecast, predictions, board, diagnostic] = await Promise.all([
-          optional(`${base}/forecast?model=lightgbm&source=nowcast`),
-          fetchJSON(`${base}/predictions?model=lightgbm&limit=15&source=nowcast`),
-          optional(`${base}/leaderboard?source=nowcast`),
-          fetchJSON(`${base}/diagnostics`),
-        ]);
-        const unit = prefix === 'el' ? 'MW' : 'μg/m³';
-        const valueKey = prefix === 'el' ? 'predicted_demand_mw' : 'predicted_pm2_5';
-        const actualKey = prefix === 'el' ? 'actual_demand_mw' : 'actual_pm2_5';
-        const forecastKey = prefix === 'el' ? 'forecast_demand_mw' : 'forecast_pm2_5';
-        latest.textContent = forecast && forecast.source === 'nowcast'
-          ? `DELAYED ESTIMATE · target ${forecast.forecast_date} · ${fmt(forecast[forecastKey])} ${unit} · issued ${forecast.created_at} · ${forecast.status === 'verified' ? 'scored' : 'pending actual'} · cutoff ${forecast.cutoff}`
-          : 'No delayed estimate on record.';
-        const metadata = diagnostic.model_bundle;
-        const window = metadata && metadata.training_window;
-        bundle.textContent = metadata && metadata.status === 'ok'
-          ? `Current deployment: ${metadata.artifact_format} · ${metadata.feature_count} features · model horizon t+1`
-            + (window ? ` · training ${window.first} to ${window.last} (${window.rows} rows)` : ' · training window unavailable (legacy artifact)')
-            + ' · Not historical per-prediction model metadata.'
-          : 'MODEL ARTIFACT ERROR: current bundle is missing or invalid.';
-        const metrics = ((evaluation && evaluation.evaluation) || [])
-          .filter(m => m.nowcast).map(m => ({ model: m.model, ...m.nowcast }));
-        const scores = board && board.source === 'nowcast' ? board.leaderboard : [];
-        const rows = ((predictions && predictions.predictions) || []).filter(r => r.source === 'nowcast');
-        records.innerHTML = `<h3>Nowcast evaluation · full record</h3>
-          <table><thead><tr><th>Model</th><th>Scored</th><th>Pending</th><th>MAE (${unit})</th><th>RMSE</th><th>MAPE (%)</th></tr></thead><tbody>`
-          + metrics.map(m => `<tr><td>${esc(m.model)}</td><td>${esc(m.scored_count)}</td><td>${esc(m.pending_count)}</td><td>${fmt(m.mae)}</td><td>${fmt(m.rmse)}</td><td>${fmt(m.mape)}</td></tr>`).join('')
-          + `</tbody></table><h3>Nowcast leaderboard · latest scored day</h3>
-          <table><thead><tr><th>Model</th><th>Day</th><th>MAE (${unit})</th><th>RMSE</th></tr></thead><tbody>`
-          + scores.map(m => `<tr><td>${esc(m.model)}</td><td>${esc(m.as_of)}</td><td>${fmt(m.mae)}</td><td>${fmt(m.rmse)}</td></tr>`).join('')
-          + `</tbody></table><h3>Nowcast ledger · latest 15 LightGBM rows</h3>
-          <table><thead><tr><th>Target</th><th>Issued</th><th>Estimate (${unit})</th><th>Actual</th><th>Error</th><th>Status</th></tr></thead><tbody>`
-          + rows.map(r => `<tr><td>${esc(r.forecast_date)}</td><td>${esc(r.created_at)}</td><td>${fmt(r[valueKey])}</td><td>${fmt(r[actualKey])}</td><td>${fmt(r.error)}</td><td>Delayed estimate · ${r[actualKey] == null ? 'pending' : 'scored'}</td></tr>`).join('')
-          + '</tbody></table>';
-      } catch (err) {
-        latest.textContent = `Delayed-estimate diagnostics unavailable: ${err.message}`;
-        bundle.textContent = 'Model bundle status unavailable.';
-        records.textContent = '';
-      }
-    }
-
     // ==========================================
     // NAGPUR PM2.5 DASHBOARD INIT
     // ==========================================
@@ -1487,14 +1414,12 @@
       try {
         const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
           fetchJSON('/health').catch(() => null),
-          fetchJSON('/forecast?model=lightgbm').catch(emptyOrUnavailable),
+          fetchJSON('/forecast?model=lightgbm').catch(() => null),
           fetchJSON('/history?days=30').catch(() => null),
           fetchJSON('/evaluation').catch(() => null),
           fetchJSON('/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
-          fetchJSON('/leaderboard').catch(emptyOrUnavailable),
+          fetchJSON('/leaderboard').catch(() => null),
         ]);
-
-        await initNowcasts('pm25', evaluation);
 
         // Loud partials: name what failed instead of rendering bare em-dashes.
         notePartialFailures('pm25-error', [
@@ -1523,11 +1448,8 @@
           document.getElementById('header-date-text').textContent = `Observed ${last.date}`;
         }
 
-        // 3. Forecast Hero & KPI (never substitute a nowcast for an advance row)
-        if (forecast && forecast.no_data) {
-          document.getElementById('hero-forecast-date').textContent = 'No advance forecast on record. Delayed estimates are shown above.';
-        }
-        if (forecast && forecast.source === 'verified') {
+        // 3. Forecast Hero & KPI
+        if (forecast) {
           const fVal = forecast.forecast_pm2_5;
           document.getElementById('kpi-forecast-val').textContent = fmt(fVal, 2);
           document.getElementById('hero-main-number').textContent = fmt(fVal, 2);
@@ -1549,7 +1471,7 @@
 
         // 4. Full-record accuracy & model comparison
         if (evaluation && evaluation.evaluation) {
-          const models = evaluation.evaluation.filter(m => m.verified).map(m => ({ ...m, ...(m.verified || {}) }));
+          const models = evaluation.evaluation.map(m => ({ ...m, ...(m.verified || {}) }));
           const lgb = models.find(m => m.model === 'lightgbm');
           const naive = models.find(m => m.model === 'naive_baseline');
 
@@ -1801,14 +1723,12 @@
 
         const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
           fetchJSON('/electricity/health').catch(() => null),
-          fetchJSON('/electricity/forecast?model=lightgbm').catch(emptyOrUnavailable),
+          fetchJSON('/electricity/forecast?model=lightgbm').catch(() => null),
           fetchJSON('/electricity/history?days=30').catch(() => null),
           fetchJSON('/electricity/evaluation').catch(() => null),
           fetchJSON('/electricity/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
-          fetchJSON('/electricity/leaderboard').catch(emptyOrUnavailable),
+          fetchJSON('/electricity/leaderboard').catch(() => null),
         ]);
-
-        await initNowcasts('el', evaluation);
 
         // Loud partials: same contract as the PM2.5 panel above.
         notePartialFailures('el-error', [
@@ -1836,11 +1756,8 @@
           document.getElementById('el-kpi-today-sub').textContent = `Observed ${latestObs.date}${staleNote}`;
         }
 
-        // 3. Forecast Hero (advance-only)
-        if (forecast && forecast.no_data) {
-          document.getElementById('el-hero-date').textContent = 'No advance forecast on record. Delayed estimates are shown above.';
-        }
-        if (forecast && forecast.source === 'verified') {
+        // 3. Forecast Hero
+        if (forecast) {
           const fVal = forecast.forecast_demand_mw;
           document.getElementById('el-kpi-forecast-val').textContent = fmt(fVal, 0);
           document.getElementById('el-hero-number').textContent = fmt(fVal, 0);
@@ -1857,7 +1774,7 @@
 
         // 4. Full-record accuracy across all models
         if (evaluation && evaluation.evaluation) {
-          const models = evaluation.evaluation.filter(m => m.verified).map(m => ({ ...m, ...(m.verified || {}) }));
+          const models = evaluation.evaluation.map(m => ({ ...m, ...(m.verified || {}) }));
           const lgb = models.find(m => m.model === 'lightgbm');
           const naive = models.find(m => m.model === 'naive_baseline');
           const seasonal = models.find(m => m.model === 'seasonal_naive');
