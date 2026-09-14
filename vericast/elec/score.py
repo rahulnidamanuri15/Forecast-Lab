@@ -14,13 +14,14 @@ from vericast import (
     acquire_pipeline_lock,
     reopen_revised_actuals,
     require_database_url,
+    require_state_of_record,
     revision_sql,
 )
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-STATE = os.getenv("STATE", "Maharashtra")
+STATE = require_state_of_record(os.getenv("STATE", "Maharashtra"))
 
 # Attach arriving ground-truth observations to pending predictions.
 # Scoped to source='daily' and non-null predictions to preserve backtest provenance.

@@ -8,6 +8,8 @@
 
 Production machine learning predictions retain the trained **features(t) → target(t+1)** horizon. Runs issued before target-day midnight are advance forecasts (`daily`); runs at or after that cutoff are **nowcasts / delayed estimates** (`nowcast`), even if the target day has already ended. PM2.5 uses UTC target days; electricity uses Asia/Kolkata. Prediction values and issuance timestamps are immutable on retry. Actuals and errors can be updated when upstream observations are revised.
 
+Structural note: whole-day features for day `t` are only complete after `t` ends, so a whole-day `features(t) → target(t+1)` model cannot issue before the target midnight in production — live output is structurally a delayed estimate. `/forecast` therefore defaults to `source=latest` (newest daily/nowcast row, never backtest); pass `source=daily` explicitly for advance-only reads and treat a 404 as "no advance forecast on record."
+
 The electricity source normally lags by 2–4 days, so its t+1 output is generally a delayed estimate, not tomorrow's forecast. Extending the horizon requires separate training and backtesting; this release does not do that.
 
 ---
@@ -93,7 +95,7 @@ The historical backtest benchmarks below are not advance-forecast results. Previ
 - **Automated Quality Gates**: Weekly retrain challenger models (`vericast.gate`) must beat persistence baselines, maintain variance ($\ge 20\%$ of actuals), and correlate positively ($r > 0$) on a 30-day holdout before deployment.
 - **Operational Resiliency**:
   - `psycopg_pool.ConnectionPool` (Neon serverless PostgreSQL) with 10s statement timeouts.
-  - In-memory rate limiter (120 req/min per IP) and 5-minute HTTP response caching.
+  - In-memory rate limiter (120 req/min per IP, rightmost-XFF identity, CORS-aware 429s) and 5-minute `Cache-Control` response headers (CDN; no server-side cache — every uncached load hits Postgres).
   - Security headers enforced (CSP, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`).
 
 ---
@@ -140,14 +142,14 @@ All routes are read-only (`GET`) and served under `/`:
 |---|---|---|
 | `/` | — | Service index + route map |
 | `/health` | — | PM2.5 data freshness, staleness days, and source status |
-| `/forecast` | `model=lightgbm`, `source=daily\|nowcast\|backtest\|latest` | Latest prediction in the selected provenance, with issuance and scoring status |
+| `/forecast` | `model=lightgbm`, `source=latest\|daily\|nowcast\|backtest` (default `latest`) | Newest live prediction (daily preferred on tied dates, never backtest), with issuance and scoring status |
 | `/history` | `days=30` | Recent raw observations (oldest-first for charting) |
 | `/leaderboard` | `source=daily` | Most recent scored day per model, isolated by provenance |
-| `/evaluation` | `days=30` | Separate `verified`, `nowcast`, and `backtest` metrics |
+| `/evaluation` | `days=30` | Separate `verified`, `nowcast`, and `backtest` metrics (sorted on verified MAE only) |
 | `/predictions` | `model`, `limit`, `source`, `scored_only` | Queryable historical prediction log with absolute and percentage errors |
 | `/diagnostics` | — | Current PM2.5 bundle status, training window, horizon |
 | `/electricity/health` | — | Electricity data freshness and mirror status |
-| `/electricity/forecast` | `model=lightgbm`, `source=daily\|nowcast\|backtest\|latest` | Latest demand prediction in the selected provenance, with timing |
+| `/electricity/forecast` | `model=lightgbm`, `source=latest\|daily\|nowcast\|backtest` (default `latest`) | Newest live demand prediction (daily preferred on tied dates, never backtest), with timing |
 | `/electricity/history` | `days=30` | Historical peak demand, energy met, and temperature observations |
 | `/electricity/leaderboard` | `source=daily` | Latest scored performance for demand models, isolated by provenance |
 | `/electricity/evaluation` | `days=30` | Complete metrics including **MAPE**, MAE, and RMSE by provenance |
@@ -159,7 +161,7 @@ All routes are read-only (`GET`) and served under `/`:
 
 ### Timing and model metadata
 
-- `/forecast` and `/electricity/forecast` default to advance-only (`source=daily`). Use `source=nowcast` for delayed estimates, or `source=latest` for the newest live prediction across those two sources (never backtests). An advance-only 404 is normal when only nowcasts exist.
+- `/forecast` and `/electricity/forecast` default to `source=latest` (newest daily/nowcast row, daily preferred on tied dates; never backtests). Use `source=daily` for advance-only reads — an advance-only 404 is normal when only nowcasts exist, which is the structural steady state for whole-day features(t).
 - Both `/leaderboard` routes accept `source=daily|nowcast|backtest`, defaulting to `daily`. Both `/evaluation` routes return separate `verified`, `nowcast`, and `backtest` blocks; no combined score exists.
 - Prediction payloads expose `publication_source`, `timing_status`, `issued_at`, `cutoff`, `target_timezone`, `feature_as_of`, `horizon_days`, and `provenance_consistent`. `status=pending|verified` describes actual availability, not advance issuance. Missing historical issuance remains `unknown`.
 - `/diagnostics` and `/electricity/diagnostics` validate the authoritative `.txt.bundle.json` when present and expose its version, training window, feature count, and horizon. A corrupt bundle cannot fall back to a legacy `.txt`. Existing legacy artifacts remain readable but are explicitly labelled `legacy` with unavailable bundle metadata. Metadata describes the **current deployment**, not the model used for historical predictions.
@@ -202,7 +204,7 @@ Point `DATABASE_URL` at a disposable local Postgres (PostgreSQL 17), not Neon. C
 ```bash
 python -m vericast.schema
 python -m vericast.schema  # verify idempotency
-python -m pytest tests -q -ra --cov=vericast --cov=app
+python -m pytest tests -q -ra --cov=vericast --cov=app --cov-fail-under=60
 node --test tests/dashboard_nowcasts.test.cjs
 python -m vericast.gate
 python -m vericast.local_time

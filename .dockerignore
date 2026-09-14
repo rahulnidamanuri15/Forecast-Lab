@@ -1,4 +1,5 @@
 myenv/
+.venv/
 .git/
 .github/
 .pytest_cache/

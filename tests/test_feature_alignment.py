@@ -305,8 +305,11 @@ def test_elec_lag_is_null_across_the_date_gap(cur):
         WHERE state = %s AND as_of = DATE '2025-05-24'
     """, (STATE,))
     row = cur.fetchone()
-    if row is None:
-        pytest.skip("2025-05-24 not in the ingested range")
+    # The seeded range must cover 2025-05-24 (see _seed): skipping here would
+    # leave the date-gap leakage invariant unverified while reporting "skipped".
+    assert row is not None, (
+        "2025-05-24 not in the ingested range; the seed must cover the "
+        "2025-05-21 -> 2025-05-24 gap or this leakage invariant goes unchecked")
     lag_1, lag_2, lag_6 = row
     assert lag_1 is None, f"demand_lag_1 should be NULL across the gap, got {lag_1}"
     assert lag_2 is None, f"demand_lag_2 should be NULL across the gap, got {lag_2}"

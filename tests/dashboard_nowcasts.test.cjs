@@ -76,7 +76,8 @@ for (const [prefix, base, valueKey, actualKey] of [
     assert.match(records, /Delayed estimate · scored/);
     assert.doesNotMatch(records, /9999|8888|must-not-render|<unsafe>|undefined/);
     const filtered = context.publishedOnly({ predictions: [
-      { source: 'verified' }, { source: 'nowcast' }, { source: 'backtest' },
+      { source: 'verified', provenance_consistent: true }, { source: 'nowcast' }, { source: 'backtest' },
+      { source: 'verified', provenance_consistent: false },
     ] });
     assert.equal(filtered.length, 1);
     assert.equal(filtered[0].source, 'verified');
@@ -102,7 +103,7 @@ for (const [prefix, base, valueKey, actualKey] of [
     const api = responses();
     Object.assign(api, {
       [`${base}/health`]: { status: 'ok', stale_days: 2, source_lag_expected: true },
-      [`${base}/forecast?model=lightgbm`]: 404,
+      [`${base}/forecast?model=lightgbm&source=daily`]: 404,
       [`${base}/history?days=30`]: { historical_data: [] },
       [`${base}/evaluation`]: { evaluation: [
         { model: 'lightgbm', nowcast: { scored_count: 10, mae: 777, rmse: 888 } },

@@ -34,6 +34,7 @@ jobs:
     timeout-minutes: 10
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
@@ -42,6 +43,10 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: python -m vericast.schema
+      - name: Notify on migration failure
+        if: failure()
+        run: |
+          python -c "from vericast import send_alert; send_alert('VeriCast schema migration FAILED', 'migrate job failed; dependent pipeline jobs were skipped. Check Actions logs.')"
 
   pipeline:
     needs: migrate
@@ -89,6 +94,11 @@ jobs:
         timeout-minutes: 10
         run: python -m vericast.pm25.diagnose
 
+      - name: Notify on PM2.5 pipeline failure
+        if: failure()
+        run: |
+          python -c "from vericast import send_alert; send_alert('VeriCast PM2.5 pipeline FAILED', 'One of ingest/features/leakage/score/predict/diagnose failed. Forecasts stopped; nothing bad was published. Check Actions logs.')"
+
   # Both targets wait for migration, but neither waits for the other pipeline.
   electricity:
     needs: migrate
@@ -135,3 +145,8 @@ jobs:
       - name: 6/6 Verify forecast is publishable
         timeout-minutes: 10
         run: python -m vericast.elec.diagnose
+
+      - name: Notify on electricity pipeline failure
+        if: failure()
+        run: |
+          python -c "from vericast import send_alert; send_alert('VeriCast electricity pipeline FAILED', 'One of ingest/features/leakage/score/predict/diagnose failed. Forecasts stopped; nothing bad was published. Check Actions logs.')"

@@ -33,6 +33,7 @@ from vericast import (
     acquire_pipeline_lock,
     local_time,
     require_database_url,
+    require_state_of_record,
     resume_start,
 )
 
@@ -40,7 +41,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-STATE = os.getenv("STATE", "Maharashtra")
+STATE = require_state_of_record(os.getenv("STATE", "Maharashtra"))
 
 DEMAND_CSV_URL = (
     "https://raw.githubusercontent.com/HalcyonVector/Grid-Sentinel/main/"
@@ -435,7 +436,9 @@ def report_revisions(before, records):
 
     print(f"  {len(revised)} day(s) had their peak_demand_mw REVISED upstream:")
     for as_of, old, new in sorted(revised):
-        print(f"    [revised] {as_of}: {old:,.0f} -> {new:,.0f} MW")
+        old_str = f"{old:,.0f}" if old is not None else "NULL"
+        new_str = f"{new:,.0f}" if new is not None else "NULL"
+        print(f"    [revised] {as_of}: {old_str} -> {new_str} MW")
     print("  Any of these already scored against are re-opened and re-scored by "
           "vericast.elec.score, so the published error follows the observation.")
 

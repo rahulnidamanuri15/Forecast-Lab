@@ -11,13 +11,24 @@ from zoneinfo import ZoneInfo
 TZ = ZoneInfo("Asia/Kolkata")
 
 
-def today():
-    """Today's date in the operating timezone (Asia/Kolkata)."""
-    return datetime.now(TZ).date()
+def today(tz=None):
+    """Today's date in `tz` (a ZoneInfo/str), defaulting to Asia/Kolkata.
+
+    Pass each target's own zone: UTC for PM2.5 (UTC target days), Asia/Kolkata
+    for electricity. Comparing an IST `today` against a UTC-day `as_of`
+    inflates staleness by one day between 00:00–05:30 IST.
+    """
+    zone = ZoneInfo(tz) if isinstance(tz, str) else (tz or TZ)
+    return datetime.now(zone).date()
 
 
-def yesterday():
-    return today() - timedelta(days=1)
+def today_in(tz_name):
+    """Today's date in the named timezone (e.g. 'UTC', 'Asia/Kolkata')."""
+    return today(tz_name)
+
+
+def yesterday(tz=None):
+    return today(tz) - timedelta(days=1)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from vericast import (
     PM25_STALE_LIMIT_DAYS,
     local_time,
     require_city_of_record,
+    require_state_of_record,
 )
 from vericast.elec.train import FEATURE_COLUMNS as ELEC_FEATURE_COLUMNS
 from vericast.pm25.train import FEATURE_COLUMNS
@@ -34,7 +35,7 @@ FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
 # the same refusal as app.py: a go-live gate that passes under a CITY the API will
 # refuse to boot under is worse than no gate.
 CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
-STATE = os.getenv("STATE", "Maharashtra")
+STATE = require_state_of_record(os.getenv("STATE", "Maharashtra"))
 
 # The two targets differ only in artifact path, table names, key column and value
 # column, so the three DB checks below take a descriptor instead of being written
@@ -104,7 +105,7 @@ def check_postgres_connectivity():
                     print("FAIL: PostgreSQL connectivity test failed")
                     return False
     except Exception as e:
-        print(f"FAIL: Error connecting to PostgreSQL: {e}")
+        print(f"FAIL: Error connecting to PostgreSQL: {type(e).__name__}")
         return False
 
 def check_observations_freshness():
@@ -128,9 +129,10 @@ def check_observations_freshness():
                     print("FAIL: No observations found in database")
                     return False
 
-                # Same "today" the pipeline uses (Asia/Kolkata), not UTC, or this
-                # gate disagrees with the scripts it is gating.
-                today = local_time.today()
+                # Same "today" the pipeline uses for this target (UTC for PM2.5),
+                # not IST, or this gate disagrees with the scripts it is gating
+                # between 00:00–05:30 IST.
+                today = local_time.today("UTC")
                 latest_obs_date = latest_obs.date() if hasattr(latest_obs, 'date') else latest_obs
 
                 days_stale = (today - latest_obs_date).days
@@ -143,7 +145,7 @@ def check_observations_freshness():
                           f"stale days: {days_stale}, limit: {PM25_STALE_LIMIT_DAYS})")
                     return False
     except Exception as e:
-        print(f"FAIL: Error checking observations freshness: {e}")
+        print(f"FAIL: Error checking observations freshness: {type(e).__name__}")
         return False
 
 def check_features_match_observations():
@@ -176,7 +178,7 @@ def check_features_match_observations():
                     print(f"FAIL: Features and observations dates mismatch (obs: {obs_date}, feat: {feat_date})")
                     return False
     except Exception as e:
-        print(f"FAIL: Error checking features/observations match: {e}")
+        print(f"FAIL: Error checking features/observations match: {type(e).__name__}")
         return False
 
 def check_features_no_nulls(target="PM2.5"):
@@ -226,7 +228,7 @@ def check_features_no_nulls(target="PM2.5"):
                     print(f"FAIL: Latest {target} features have NULL values in columns: {null_cols}")
                     return False
     except Exception as e:
-        print(f"FAIL: Error checking {target} features for NULLs: {e}")
+        print(f"FAIL: Error checking {target} features for NULLs: {type(e).__name__}")
         return False
 
 def check_leakage_test(module='vericast.pm25.leakage_test'):
@@ -261,7 +263,7 @@ def check_leakage_test(module='vericast.pm25.leakage_test'):
         print("FAIL: Leakage test timed out (>180 seconds)")
         return False
     except Exception as e:
-        print(f"FAIL: Error running leakage test: {e}")
+        print(f"FAIL: Error running leakage test: {type(e).__name__}")
         return False
 
 def check_model_artifact(target="PM2.5"):
@@ -340,7 +342,7 @@ def check_prediction_exists(model="lightgbm", target="PM2.5"):
                       f"({predicted_value:{t['fmt']}} {t['unit']})")
                 return True
     except Exception as e:
-        print(f"FAIL: Error checking {target} {model} prediction: {e}")
+        print(f"FAIL: Error checking {target} {model} prediction: {type(e).__name__}")
         return False
 
 def check_forecast_date_logic(target="PM2.5"):
@@ -399,7 +401,7 @@ def check_forecast_date_logic(target="PM2.5"):
 
                 return all_good
     except Exception as e:
-        print(f"FAIL: Error checking {target} forecast date logic: {e}")
+        print(f"FAIL: Error checking {target} forecast date logic: {type(e).__name__}")
         return False
 
 def check_api_health_endpoint():
@@ -414,7 +416,7 @@ def check_api_health_endpoint():
             print(f"FAIL: /health endpoint returns status {response.status_code}")
             return False
     except Exception as e:
-        print(f"FAIL: Error checking /health endpoint: {e}")
+        print(f"FAIL: Error checking /health endpoint: {type(e).__name__}")
         return False
 
 def live_forecast_valid(data):
@@ -464,7 +466,7 @@ def check_api_forecast_endpoint():
         return (response.status_code == 200
                 and response.json().get("model_bundle", {}).get("status") == "ok")
     except Exception as e:
-        print(f"FAIL: Error checking /forecast endpoint: {e}")
+        print(f"FAIL: Error checking /forecast endpoint: {type(e).__name__}")
         return False
 
 
@@ -473,7 +475,7 @@ def check_api_leaderboard_endpoint():
     try:
         return live_leaderboards_valid()
     except Exception as e:
-        print(f"FAIL: Error checking /leaderboard endpoint: {e}")
+        print(f"FAIL: Error checking /leaderboard endpoint: {type(e).__name__}")
         return False
 
 def check_api_evaluation_endpoint():
@@ -498,7 +500,7 @@ def check_api_evaluation_endpoint():
               "metrics split by provenance)")
         return True
     except Exception as e:
-        print(f"FAIL: Error checking /evaluation endpoint: {e}")
+        print(f"FAIL: Error checking /evaluation endpoint: {type(e).__name__}")
         return False
 
 def check_api_predictions_endpoint():
@@ -527,7 +529,7 @@ def check_api_predictions_endpoint():
             print(f"FAIL: /predictions endpoint returns status {response.status_code}")
             return False
     except Exception as e:
-        print(f"FAIL: Error checking /predictions endpoint: {e}")
+        print(f"FAIL: Error checking /predictions endpoint: {type(e).__name__}")
         return False
 
 def check_api_electricity_endpoints():
@@ -575,7 +577,7 @@ def check_api_electricity_endpoints():
             print(f"PASS: {path} returns 200 ({key}: {value})")
         return live_leaderboards_valid('/electricity')
     except Exception as e:
-        print(f"FAIL: Error checking /electricity endpoints: {e}")
+        print(f"FAIL: Error checking /electricity endpoints: {type(e).__name__}")
         return False
 
 def check_cors_allows_frontend_origin():
@@ -617,7 +619,7 @@ def check_cors_allows_frontend_origin():
         print(f"PASS: CORS allows {origin} (access-control-allow-origin: {allowed})")
         return True
     except Exception as e:
-        print(f"FAIL: Error checking CORS for {origin}: {e}")
+        print(f"FAIL: Error checking CORS for {origin}: {type(e).__name__}")
         return False
 
 # Module level, not a local in main(), so tests/test_readiness_gate.py can assert
@@ -689,7 +691,7 @@ def main():
             result = check_func()
             results.append((name, result))
         except Exception as e:
-            print(f"FAIL: Unexpected error in check: {e}")
+            print(f"FAIL: Unexpected error in check: {type(e).__name__}")
             results.append((name, False))
 
     print("\n" + "=" * 60)

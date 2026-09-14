@@ -61,8 +61,11 @@ jobs:
 
       # Repeat migrations to catch non-idempotent changes before production rollout.
       - run: python -m vericast.schema
-      - run: python -m pytest tests -q -ra --cov=vericast --cov=app --cov-report=term-missing
+      - run: python -m pytest tests -q -ra --cov=vericast --cov=app --cov-report=term-missing --cov-fail-under=60
       - run: node --test tests/dashboard_nowcasts.test.cjs
+
+      - name: Build Docker image (so CI proves what ships)
+        run: docker build -t vericast-api:ci .
 
       - run: python -m vericast.gate         # retrain-gate self-check, no database
       - run: python -m vericast.local_time   # asserts Asia/Kolkata resolves (+5:30)

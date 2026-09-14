@@ -11,8 +11,8 @@ name: Weekly Model Retrain
 # working model.
 on:
   schedule:
-    - cron: '0 4 * * 0'  # 04:00 UTC every Sunday, ahead of the daily pipeline's 05:17
-    - cron: '0 4 * * 3'  # Wednesday catch-up: a dropped Sunday run no longer skips a week
+    - cron: '0 2 * * 0'  # 02:00 UTC every Sunday, ~3h ahead of the daily pipeline's 05:17 (drift is 20-32 min)
+    - cron: '0 2 * * 3'  # Wednesday catch-up: a dropped Sunday run no longer skips a week
   workflow_dispatch: {}   # allow manual runs from the Actions tab
 
 permissions:
@@ -93,7 +93,14 @@ jobs:
             echo "No change in model artifacts; nothing to commit."
             exit 0
           fi
-          git commit -m "Weekly retrain: update model artifacts [skip ci]"
+          git commit -m "Weekly retrain: update model artifacts"
+
+          # Tag the accepted artifact so a rollback is one `git checkout`
+          # rather than a retrain. Tag push is best-effort (branch rules may
+          # restrict tags); the commit above is the source of truth.
+          TAG="models-$(date -u +%Y%m%d-%H%M%S)"
+          git tag "$TAG" || true
+          git push origin "$TAG" || echo "Tag push blocked; commit is pushed, tag is local."
 
           # Attempt direct push (succeeds if branch protection allows bypass for actions)
           for attempt in 1 2 3; do
@@ -110,7 +117,14 @@ jobs:
           BRANCH="cron/weekly-retrain"
           git push -f origin HEAD:"${BRANCH}"
           gh pr create --base "${GITHUB_REF_NAME}" --head "${BRANCH}" \
-            --title "Weekly retrain: update model artifacts [skip ci]" \
+            --title "Weekly retrain: update model artifacts" \
             --body "Automated retrain pipeline produced updated model artifacts in \`models/\`." || \
             echo "Pull request already exists or updated."
           exit 0
+
+      - name: Notify on retrain failure
+        if: failure()
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          python -c "import os; from vericast import send_alert; send_alert('VeriCast weekly retrain FAILED', 'Run ${{ github.run_id }} on ${{ github.ref_name }} failed; no artifact was promoted. Check Actions logs.')"

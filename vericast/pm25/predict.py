@@ -76,7 +76,8 @@ def make_daily_prediction():
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
         acquire_pipeline_lock(cur, "pm25_predict")
 
-        today = local_time.today()
+        # PM2.5 target days are UTC: staleness is measured against UTC today.
+        today = local_time.today("UTC")
         yesterday = today - timedelta(days=1)
 
         # Get the most recent observation

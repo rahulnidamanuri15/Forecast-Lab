@@ -10,7 +10,7 @@ import numpy as np
 import lightgbm as lgb
 from dotenv import load_dotenv
 
-from vericast import MODEL_ELEC as MODEL_PATH, require_database_url, send_alert
+from vericast import MODEL_ELEC as MODEL_PATH, require_database_url, require_state_of_record, send_alert
 from vericast.gate import challenger_ships, read_training_window, save_atomic_artifact
 from vericast.artifacts import load_model
 
@@ -18,7 +18,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-STATE = os.getenv("STATE", "Maharashtra")
+STATE = require_state_of_record(os.getenv("STATE", "Maharashtra"))
 
 # 14 features, fixed order. Single definition for this target: predict.py and
 # experiments/save_elec_backtest_results.py import it from here.

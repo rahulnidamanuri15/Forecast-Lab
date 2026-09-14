@@ -43,8 +43,9 @@ def test_forecast_endpoint_lightgbm_success():
 
         # The headline card reads this endpoint, so the filter is the point: without
         # it the newest row can be a walk-forward backtest fitted after the fact.
+        # Default is source=latest (daily + nowcast, never backtest).
         sql, _ = mock_cursor.execute.call_args[0]
-        assert "source = 'daily'" in sql
+        assert "source IN ('daily', 'nowcast')" in sql
 
 def test_forecast_endpoint_naive_baseline_success():
     """Test that the forecast endpoint returns 200 for naive_baseline model."""
@@ -132,9 +133,9 @@ def test_electricity_forecast_success():
         assert data["source"] == "verified"
 
         # Same reason as the PM2.5 headline: the backtest record must not surface
-        # here as a live forecast.
+        # here as a live forecast. Default is latest (daily + nowcast).
         sql, _ = cur.execute.call_args[0]
-        assert "source = 'daily'" in sql
+        assert "source IN ('daily', 'nowcast')" in sql
 
 
 def test_electricity_forecast_seasonal_naive_allowed():

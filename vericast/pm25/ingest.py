@@ -55,26 +55,27 @@ def get_last_observed_date(cur):
 
 
 def get_earliest_hole(cur, since, end=None):
-    """Earliest date in [since, end] this city has no observation row for, or None.
+    """Earliest date in [since, end] this city has no usable observation for, or None.
 
-    Only absent rows, matching the electricity twin: a thin-hours day is stored
-    as a row with NULL pm2_5 (see fetch_and_aggregate_data), and the upstream
-    never backfills it, so treating NULLs as holes pinned resume_start() forever
-    and refetched up to RESCAN_DAYS every run. A stored NULL row means "already
-    fetched"; only a missing row is worth re-reading.
+    Absent rows AND NULL-pm2_5 rows both count, matching the elec behaviour where
+    a skipped day stays a hole for RESCAN_DAYS. A thin-hours day is stored as a
+    row with NULL pm2_5; treating it as "already fetched" foreclosed the day
+    forever (NULL lag the next day, NULL rolls for 7/30 days, LightGBM skipped,
+    prediction never scoreable). Re-reading a thin day lets a late upstream
+    revision fill it; the insert upserts so a still-thin re-read is a no-op.
     generate_series is why this is one query: a LEFT JOIN against the dates that
     *should* exist finds an absent row, which no scan of stored rows can.
 
-    `end` defaults to yesterday for backwards compatibility, but callers should
+    `end` defaults to UTC yesterday for backwards compatibility, but callers should
     pass the single yesterday value they already computed: calling
     local_time.yesterday() twice across midnight gives an inconsistent range.
     """
-    end = end if end is not None else local_time.yesterday()
+    end = end if end is not None else local_time.yesterday("UTC")
     cur.execute(
         """
         SELECT MIN(d.day)::date FROM generate_series(%s::date, %s::date, '1 day') d(day)
         LEFT JOIN observations o ON o.as_of = d.day AND o.city = %s
-        WHERE o.as_of IS NULL
+        WHERE o.as_of IS NULL OR o.pm2_5 IS NULL
         """,
         (since, end, CITY),
     )
@@ -96,9 +97,11 @@ def resolve_date_range():
     One connection for both queries: they are sequential and read the same table.
     """
     require_database_url(DATABASE_URL)
-    # Single clock read: calling yesterday() twice across an IST midnight rollover
-    # previously gave an inconsistent [since, end] window.
-    yesterday = local_time.yesterday()
+    # Single clock read in UTC: bucketing is on UTC days, so the end must be the
+    # last *complete* UTC day. Capping at IST-yesterday admits a 19–23h partial
+    # UTC day between 18:30–24:00 UTC that passes MIN_HOURS_PER_DAY=18 and is
+    # stored as the scored actual.
+    yesterday = local_time.yesterday("UTC")
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             last_date = get_last_observed_date(cur)
@@ -144,6 +147,7 @@ def fetch_and_aggregate_data(start_date, end_date):
     starts a new city key rather than rewriting this one.
     """
     START, END = start_date.isoformat(), end_date.isoformat()
+    MAX_RESPONSE_BYTES = 25 * 1024 * 1024
 
     def _get_with_retry(url, params, timeout, attempts=3):
         last_exc = None
@@ -151,6 +155,11 @@ def fetch_and_aggregate_data(start_date, end_date):
             try:
                 resp = httpx.get(url, params=params, timeout=timeout)
                 resp.raise_for_status()
+                raw = getattr(resp, "content", None)
+                if isinstance(raw, (bytes, bytearray)) and len(raw) > MAX_RESPONSE_BYTES:
+                    raise RuntimeError(
+                        f"Upstream body {len(raw)} bytes exceeds "
+                        f"{MAX_RESPONSE_BYTES} cap; refusing to parse")
                 return resp
             except Exception as exc:  # noqa: BLE001 - retry then raise
                 last_exc = exc
@@ -172,7 +181,7 @@ def fetch_and_aggregate_data(start_date, end_date):
         times = aq_data["hourly"]["time"]
         pm2_5_values = aq_data["hourly"]["pm2_5"]
         pm10_values = aq_data["hourly"]["pm10"]
-    except (KeyError, TypeError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError(f"Open-Meteo AQ payload missing hourly fields: {exc}")
     if not (len(times) == len(pm2_5_values) == len(pm10_values)):
         raise RuntimeError(

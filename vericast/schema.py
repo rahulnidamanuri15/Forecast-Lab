@@ -80,7 +80,7 @@ TABLES = {
             forecast_date DATE NOT NULL,
             predicted_pm2_5 FLOAT,
             actual_pm2_5 FLOAT,
-            model VARCHAR(50) DEFAULT 'naive_baseline',
+            model VARCHAR(50) NOT NULL DEFAULT 'naive_baseline',
             source TEXT NOT NULL DEFAULT 'daily',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(city, forecast_date, model, source)
@@ -222,36 +222,75 @@ MIGRATIONS = (
     "ALTER TABLE model_performance "
     "ADD COLUMN IF NOT EXISTS city VARCHAR(100) NOT NULL DEFAULT 'Nagpur';",
     "UPDATE model_performance SET city = 'Nagpur' WHERE city IS NULL;",
-    "CREATE UNIQUE INDEX IF NOT EXISTS model_performance_city_score_model_source_uidx "
-    "ON model_performance (city, score_date, model, source);",
-    # Aggregate tables. A daily row scores one date against a UNIQUE(city,
-    # forecast_date, model) predictions table, so its sample_size is 1 by
-    # construction - anything larger came from a backtest.
-    "UPDATE model_performance SET source = 'backtest' "
-    f"WHERE sample_size > 1 AND source = 'daily' AND created_at < '{MIGRATION_CUTOFF}';",
-    "UPDATE electricity_model_performance SET source = 'backtest' "
-    f"WHERE sample_size > 1 AND source = 'daily' AND created_at < '{MIGRATION_CUTOFF}';",
-
-    # Row-level tables. /evaluation aggregates these directly and is the headline
-    # accuracy claim, so it needs the same column.
+    # Row-level source columns first: every index below references `source`,
+    # and legacy tables predate it — creating the index first fails there.
     "ALTER TABLE predictions "
     "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
     "ALTER TABLE electricity_predictions "
     "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'daily';",
-    # The bound is derived from the data rather than guessed: the backtest's own
-    # aggregate row records score_date = its last evaluated date, so every
-    # prediction row it wrote has forecast_date <= that date. A NULL subquery (no
-    # backtest seeded) makes the comparison NULL and updates nothing.
-    "UPDATE predictions SET source = 'backtest' "
-    "WHERE source = 'daily' AND forecast_date <= "
-    "(SELECT MAX(score_date) FROM model_performance WHERE source = 'backtest') "
-    f"AND created_at < '{MIGRATION_CUTOFF}';",
-    "UPDATE electricity_predictions p SET source = 'backtest' "
-    "WHERE p.source = 'daily' AND p.forecast_date <= "
-    "(SELECT MAX(score_date) FROM electricity_model_performance "
-    " WHERE source = 'backtest' AND state = p.state) "
-    f"AND p.created_at < '{MIGRATION_CUTOFF}';",
+    # Backfill NULL models (pre-NOT NULL rows): NULLs are distinct in a UNIQUE
+    # constraint, so a NULL model permits unlimited duplicates for one date.
+    "UPDATE predictions SET model = 'naive_baseline' WHERE model IS NULL;",
+    "ALTER TABLE predictions ALTER COLUMN model SET NOT NULL;",
+    # NOTE (audit 3.4): a daily and a nowcast row may coexist for one
+    # (city, forecast_date, model) by design — the provenance split requires
+    # overlapping records (see test_schema_upgrade...: "former source-blind keys
+    # must no longer prevent overlapping records"). A same-day re-run crossing
+    # the cutoff therefore inserts a second row rather than conflicting. The
+    # fix is at read time, not with a forbidding index: /evaluation never
+    # merges provenances (separate verified/nowcast/backtest blocks, sorted on
+    # verified MAE only) and /forecast?source=latest prefers daily for a tied
+    # date (see app.py). No partial unique index is created here on purpose.
 )
+
+
+def migrate_backtest_labels(cur):
+    """One-time backtest relabelling, version-gated so re-runs never move rows.
+
+    Previously these UPDATEs lived in the unconditional MIGRATIONS tuple run on
+    every create_tables(): the row-level bound is a LIVE subquery
+    (MAX(score_date) WHERE source='backtest') that the seeders advance, so
+    "re-seed, then run schema" relabelled additional genuine daily rows as
+    backtest and dropped them off /evaluation. Version-gating evaluates the
+    bound exactly once; the created_at < MIGRATION_CUTOFF bound additionally
+    confines it to legacy rows.
+    """
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    version = "2026-08-backtest-source-labels"
+    cur.execute("SELECT 1 FROM schema_migrations WHERE version = %s", (version,))
+    if cur.fetchone():
+        return
+    # Aggregate tables: a daily row scores one date (sample_size 1 by
+    # construction) — anything larger came from a backtest.
+    cur.execute(
+        "UPDATE model_performance SET source = 'backtest' "
+        "WHERE sample_size > 1 AND source = 'daily' "
+        f"AND created_at < '{MIGRATION_CUTOFF}';")
+    cur.execute(
+        "UPDATE electricity_model_performance SET source = 'backtest' "
+        "WHERE sample_size > 1 AND source = 'daily' "
+        f"AND created_at < '{MIGRATION_CUTOFF}';")
+    # Row-level tables: the backtest's own aggregate row records score_date =
+    # its last evaluated date, so every prediction row it wrote has
+    # forecast_date <= that date. A NULL subquery (no backtest seeded) updates
+    # nothing. Evaluated once under this version gate — never again.
+    cur.execute(
+        "UPDATE predictions SET source = 'backtest' "
+        "WHERE source = 'daily' AND forecast_date <= "
+        "(SELECT MAX(score_date) FROM model_performance WHERE source = 'backtest') "
+        f"AND created_at < '{MIGRATION_CUTOFF}';")
+    cur.execute(
+        "UPDATE electricity_predictions p SET source = 'backtest' "
+        "WHERE p.source = 'daily' AND p.forecast_date <= "
+        "(SELECT MAX(score_date) FROM electricity_model_performance "
+        " WHERE source = 'backtest' AND state = p.state) "
+        f"AND p.created_at < '{MIGRATION_CUTOFF}';")
+    cur.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
 
 
 def migrate_nowcasts(cur):
@@ -270,6 +309,33 @@ def migrate_nowcasts(cur):
     cur.execute("SELECT 1 FROM schema_migrations WHERE version = %s", (version,))
     if cur.fetchone():
         return
+    # Pre-flight BEFORE any DDL: relabelling a daily row to nowcast collides
+    # with an already-labelled nowcast for the same (key, date, model), which
+    # would raise on the new unique index, roll back the whole transaction
+    # (version insert included), and wedge every subsequent run identically.
+    # Fail here with the offending rows instead of wedging the migration.
+    for prefix, key, zone in (("", "city", "UTC"),
+                              ("electricity_", "state", "Asia/Kolkata")):
+        predictions = prefix + "predictions"
+        cur.execute(f"""
+            SELECT d.{key}, d.forecast_date, d.model
+            FROM {predictions} d
+            JOIN {predictions} n ON n.{key} = d.{key}
+              AND n.forecast_date = d.forecast_date AND n.model = d.model
+              AND n.source = 'nowcast'
+            WHERE d.source = 'daily' AND (d.created_at IS NULL OR
+                d.created_at >= (d.forecast_date::timestamp AT TIME ZONE %s))
+            LIMIT 10
+        """, (zone,))
+        conflicts = cur.fetchall()
+        if conflicts:
+            detail = "; ".join(
+                f"{k} {fd} {m}" for k, fd, m in conflicts)
+            raise RuntimeError(
+                f"Provenance migration blocked: {len(conflicts)}+ daily row(s) in "
+                f"{predictions} would collide with an existing nowcast row "
+                f"({detail}). Resolve by deleting or re-sourcing the duplicate "
+                f"row(s) before re-running python -m vericast.schema.")
     for prefix, key, zone in (("", "city", "UTC"),
                               ("electricity_", "state", "Asia/Kolkata")):
         predictions = prefix + "predictions"
@@ -324,6 +390,7 @@ def create_tables():
             for sql in MIGRATIONS:
                 cur.execute(sql)
                 print(f"[OK] {sql[:58]}... ({cur.rowcount} rows)")
+            migrate_backtest_labels(cur)
             migrate_nowcasts(cur)
             conn.commit()
 
