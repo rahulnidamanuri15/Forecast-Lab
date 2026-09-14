@@ -329,11 +329,6 @@ def get_forecast(model: str = "lightgbm", source: str = "latest"):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # source=latest spans daily+nowcast: prefer the advance row on a
-                # tied date (audit 3.4 — a cutoff-crossing re-run leaves both, and
-                # the headline record is the advance one), newest issuance after.
-                order_extra = (", CASE WHEN source = 'daily' THEN 0 ELSE 1 END"
-                               if source == "latest" else "")
                 cur.execute(
                     f"""
                     SELECT
@@ -347,7 +342,7 @@ def get_forecast(model: str = "lightgbm", source: str = "latest"):
                     WHERE city = %s
                       AND model = %s
                       AND {provenance_clause}
-                    ORDER BY forecast_date DESC{order_extra}, created_at DESC
+                    ORDER BY forecast_date DESC, created_at DESC
                     LIMIT 1
                     """,
                     (CITY, model),
@@ -923,15 +918,13 @@ def get_electricity_forecast(model: str = "lightgbm", source: str = "latest"):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                order_extra = (", CASE WHEN source = 'daily' THEN 0 ELSE 1 END"
-                               if source == "latest" else "")
                 cur.execute(
                     f"""
                     SELECT forecast_date, predicted_demand_mw, actual_demand_mw,
                            model, created_at, source
                     FROM electricity_predictions
                     WHERE state = %s AND model = %s AND {provenance_clause}
-                    ORDER BY forecast_date DESC{order_extra}, created_at DESC
+                    ORDER BY forecast_date DESC, created_at DESC
                     LIMIT 1
                     """,
                     (STATE, model),

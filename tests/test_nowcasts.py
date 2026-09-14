@@ -108,7 +108,7 @@ def test_diagnostics_use_bundle_and_fail_on_corruption(monkeypatch, real_bundle,
     monkeypatch.setattr(module, "FEATURE_COLUMNS", ["a", "b"])
     cur = MagicMock()
     today = date(2030, 1, 1)
-    monkeypatch.setattr(module.local_time, "today", lambda: today)
+    monkeypatch.setattr(module.local_time, "today", lambda *a, **kw: today)
     if domain == "pm25":
         cur.fetchone.side_effect = [(today, 50), (today,), (50, 50),
                                     (today + timedelta(days=1), 50, None), (50, None)]
