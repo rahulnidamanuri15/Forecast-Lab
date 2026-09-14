@@ -1494,13 +1494,13 @@
         if (section) {
           section.style.display = hasNowcast ? '' : 'none';
         }
-        return { hasNowcast, rows };
+        return { hasNowcast, rows, forecast };
       } catch (err) {
         latest.textContent = `Delayed-estimate diagnostics unavailable: ${err.message}`;
         bundle.textContent = 'Model bundle status unavailable.';
         if (records) records.textContent = '';
         if (section) section.style.display = 'none';
-        return { hasNowcast: false, rows: [] };
+        return { hasNowcast: false, rows: [], forecast: null };
       }
     }
 
@@ -1598,7 +1598,28 @@
 
         // 3. Forecast Hero & KPI (never substitute a nowcast for an advance row)
         if (forecast && forecast.no_data) {
-          document.getElementById('hero-forecast-date').textContent = 'No advance forecast on record. Delayed estimates are shown above.';
+          if (nowcast && nowcast.forecast && nowcast.forecast.source === 'nowcast') {
+            const nf = nowcast.forecast;
+            const fVal = nf.forecast_pm2_5;
+            document.getElementById('kpi-forecast-val').textContent = fmt(fVal, 2);
+            document.getElementById('hero-main-number').textContent = fmt(fVal, 2);
+            document.getElementById('hero-forecast-date').textContent =
+              `No advance forecast on record. Delayed estimate for ${nf.forecast_date}`;
+            const band = getPm25Band(fVal);
+            const catPill = document.getElementById('hero-cat-pill');
+            catPill.textContent = band.label;
+            catPill.className = `category-pill ${band.cls}`;
+
+            if (latestObsVal !== null && latestObsVal !== undefined && latestObsVal !== 0) {
+              const diff = fVal - latestObsVal;
+              const pctDiff = ((diff / latestObsVal) * 100).toFixed(1);
+              const sign = diff >= 0 ? '+' : '';
+              document.getElementById('hero-change-desc').innerHTML =
+                `<strong>${sign}${pctDiff}% vs. latest observation</strong> · Delayed estimate`;
+            }
+          } else {
+            document.getElementById('hero-forecast-date').textContent = 'No advance forecast on record. Delayed estimates are shown above.';
+          }
         }
         if (forecast && forecast.source === 'verified') {
           const fVal = forecast.forecast_pm2_5;
@@ -1625,9 +1646,10 @@
           const models = evaluation.evaluation.filter(m => m.verified).map(m => ({ ...m, ...(m.verified || {}) }));
           // Fallback when advance is empty but nowcasts are live: headline the
           // delayed-estimate record instead of em-dashes (never averaged in).
+          const lgbVerified = models.find(m => m.model === 'lightgbm');
           let metricsModels = models;
           let metricsIsNowcast = false;
-          if (!models.some(m => m.mae != null)) {
+          if (!lgbVerified || lgbVerified.mae == null) {
             const ncModels = evaluation.evaluation.filter(m => m.nowcast).map(m => ({ ...m, ...(m.nowcast || {}) }));
             if (ncModels.some(m => m.mae != null || m.scored_count != null)) {
               metricsModels = ncModels;
@@ -1963,7 +1985,23 @@
 
         // 3. Forecast Hero (advance-only)
         if (forecast && forecast.no_data) {
-          document.getElementById('el-hero-date').textContent = 'No advance forecast on record. Delayed estimates are shown above.';
+          if (nowcastEl && nowcastEl.forecast && nowcastEl.forecast.source === 'nowcast') {
+            const nf = nowcastEl.forecast;
+            const fVal = nf.forecast_demand_mw;
+            document.getElementById('el-kpi-forecast-val').textContent = fmt(fVal, 0);
+            document.getElementById('el-hero-number').textContent = fmt(fVal, 0);
+            document.getElementById('el-hero-date').textContent =
+              `No advance forecast on record. Delayed estimate for ${nf.forecast_date}`;
+            if (latestObs && latestObs.peak_demand_mw !== null && latestObs.peak_demand_mw !== undefined && latestObs.peak_demand_mw !== 0) {
+              const diff = fVal - latestObs.peak_demand_mw;
+              const pct = (diff / latestObs.peak_demand_mw * 100).toFixed(1);
+              const sign = diff >= 0 ? '+' : '';
+              document.getElementById('el-hero-change-desc').innerHTML =
+                `<strong>${sign}${pct}% vs. ${latestObs.date}</strong> · Delayed estimate`;
+            }
+          } else {
+            document.getElementById('el-hero-date').textContent = 'No advance forecast on record. Delayed estimates are shown above.';
+          }
         }
         if (forecast && forecast.source === 'verified') {
           const fVal = forecast.forecast_demand_mw;
@@ -1984,9 +2022,10 @@
         if (evaluation && evaluation.evaluation) {
           const models = evaluation.evaluation.filter(m => m.verified).map(m => ({ ...m, ...(m.verified || {}) }));
           // Same fallback as PM2.5: headline delayed estimates when advance is empty.
+          const lgbVerifiedEl = models.find(m => m.model === 'lightgbm');
           let metricsModelsEl = models;
           let metricsIsNowcastEl = false;
-          if (!models.some(m => m.mae != null || m.mape != null)) {
+          if (!lgbVerifiedEl || (lgbVerifiedEl.mae == null && lgbVerifiedEl.mape == null)) {
             const ncModels = evaluation.evaluation.filter(m => m.nowcast).map(m => ({ ...m, ...(m.nowcast || {}) }));
             if (ncModels.some(m => m.mae != null || m.mape != null || m.scored_count != null)) {
               metricsModelsEl = ncModels;
