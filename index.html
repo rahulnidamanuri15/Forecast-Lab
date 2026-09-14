@@ -724,7 +724,7 @@
     <!-- ==================== PM2.5 PANEL ==================== -->
     <div id="panel-pm25">
       <div class="error-banner" id="pm25-error" role="alert" hidden></div>
-      <section class="panel" id="pm25-nowcast-section" aria-labelledby="pm25-nowcast-title">
+      <section class="panel" id="pm25-nowcast-section" style="display:none" aria-labelledby="pm25-nowcast-title">
         <h2 id="pm25-nowcast-title">Nowcasts / delayed estimates</h2>
         <p class="panel-subtitle">Issued at or after target-day midnight. Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
         <p id="pm25-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
@@ -986,7 +986,7 @@
       <!-- ==================== ELECTRICITY PANEL ==================== -->
       <div id="panel-electricity" hidden>
         <div class="error-banner" id="el-error" role="alert" hidden></div>
-        <section class="panel" id="el-nowcast-section" aria-labelledby="el-nowcast-title">
+        <section class="panel" id="el-nowcast-section" style="display:none" aria-labelledby="el-nowcast-title">
           <h2 id="el-nowcast-title">Nowcasts / delayed estimates</h2>
           <p class="panel-subtitle">Issued at or after target-day midnight (Asia/Kolkata). Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
           <p id="el-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
@@ -1445,9 +1445,15 @@
     }
 
     // Nowcasts are rendered separately; never feed them into advance metrics/charts.
-    // Sections are visible by default (transparency); this only fills them.
+    // One block only: evaluation (aggregate) + ledger (row-level). The per-model
+    // "latest scored day" table was removed — it duplicated the canonical
+    // "Latest Scored Day across Models" table below, and the ledger's last scored
+    // row already carries the same day-level error when n=1. Removing it also
+    // removes one /leaderboard?source=nowcast round-trip per panel; no backend
+    // route changes.
     async function initNowcasts(prefix, evaluation) {
       const base = prefix === 'el' ? '/electricity' : '';
+      const section = document.getElementById(`${prefix}-nowcast-section`);
       const latest = document.getElementById(`${prefix}-nowcast-latest`);
       const bundle = document.getElementById(`${prefix}-bundle`);
       const records = document.getElementById(`${prefix}-nowcast-records`);
@@ -1456,10 +1462,9 @@
         throw err;
       });
       try {
-        const [forecast, predictions, board, diagnostic] = await Promise.all([
+        const [forecast, predictions, diagnostic] = await Promise.all([
           optional(`${base}/forecast?model=lightgbm&source=nowcast`),
           fetchJSON(`${base}/predictions?model=lightgbm&limit=15&source=nowcast`),
-          optional(`${base}/leaderboard?source=nowcast`),
           fetchJSON(`${base}/diagnostics`),
         ]);
         const unit = prefix === 'el' ? 'MW' : 'μg/m³';
@@ -1478,22 +1483,28 @@
           : 'MODEL ARTIFACT ERROR: current bundle is missing or invalid.';
         const metrics = ((evaluation && evaluation.evaluation) || [])
           .filter(m => m.nowcast).map(m => ({ model: m.model, ...m.nowcast }));
-        const scores = board && board.source === 'nowcast' ? board.leaderboard : [];
         const rows = ((predictions && predictions.predictions) || []).filter(r => r.source === 'nowcast');
         records.innerHTML = `<h3>Nowcast evaluation · full record</h3>
           <table><thead><tr><th>Model</th><th>Scored</th><th>Pending</th><th>MAE (${unit})</th><th>RMSE</th><th>MAPE (%)</th></tr></thead><tbody>`
           + metrics.map(m => `<tr><td>${esc(m.model)}</td><td>${esc(m.scored_count)}</td><td>${esc(m.pending_count)}</td><td>${fmt(m.mae)}</td><td>${fmt(m.rmse)}</td><td>${fmt(m.mape)}</td></tr>`).join('')
-          + `</tbody></table><h3>Nowcast leaderboard · latest scored day</h3>
-          <table><thead><tr><th>Model</th><th>Day</th><th>MAE (${unit})</th><th>RMSE</th></tr></thead><tbody>`
-          + scores.map(m => `<tr><td>${esc(m.model)}</td><td>${esc(m.as_of)}</td><td>${fmt(m.mae)}</td><td>${fmt(m.rmse)}</td></tr>`).join('')
           + `</tbody></table><h3>Nowcast ledger · latest 15 LightGBM rows</h3>
           <table><thead><tr><th>Target</th><th>Issued</th><th>Estimate (${unit})</th><th>Actual</th><th>Error</th><th>Status</th></tr></thead><tbody>`
           + rows.map(r => `<tr><td>${esc(r.forecast_date)}</td><td>${esc(r.created_at)}</td><td>${fmt(r[valueKey])}</td><td>${fmt(r[actualKey])}</td><td>${fmt(r.error)}</td><td>Delayed estimate · ${r[actualKey] == null ? 'pending' : 'scored'}</td></tr>`).join('')
           + '</tbody></table>';
+        // Data-driven visibility: show this block only when nowcast rows exist.
+        // Otherwise it renders as an empty second set of tables next to the
+        // advance ones (the "why both?" duplication). No extra request: this
+        // reuses the three payloads above.
+        if (section) {
+          const hasNowcast = Boolean(
+            (forecast && forecast.source === 'nowcast') || metrics.length || rows.length);
+          section.style.display = hasNowcast ? '' : 'none';
+        }
       } catch (err) {
         latest.textContent = `Delayed-estimate diagnostics unavailable: ${err.message}`;
         bundle.textContent = 'Model bundle status unavailable.';
         records.textContent = '';
+        if (section) section.style.display = 'none';
       }
     }
 

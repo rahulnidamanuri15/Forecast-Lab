@@ -40,7 +40,6 @@ for (const [prefix, base, valueKey, actualKey] of [
     return {
       [`${base}/forecast?model=lightgbm&source=nowcast`]: forecast,
       [`${base}/predictions?model=lightgbm&limit=15&source=nowcast`]: { predictions: [] },
-      [`${base}/leaderboard?source=nowcast`]: 404,
       [`${base}/diagnostics`]: { model_bundle: { status: 'ok', artifact_format: 'bundle',
         feature_count: 15, bundle_version: 1,
         training_window: { first: '2030-01-01', last: '2030-01-02', rows: 2 } } },
@@ -58,10 +57,7 @@ for (const [prefix, base, valueKey, actualKey] of [
       { source: 'verified', forecast_date: 'advance-must-not-render' },
       { source: 'backtest', forecast_date: 'backtest-must-not-render' },
     ];
-    api[`${base}/leaderboard?source=nowcast`] = { source: 'nowcast', leaderboard: [
-      { model: 'lightgbm', as_of: 'board-day', mae: 3, rmse: 4 },
-    ] };
-    const { context, nodes } = dashboard(api);
+    const { context, nodes, requested } = dashboard(api);
     await context.initNowcasts(prefix, { evaluation: [
       { model: 'lightgbm', nowcast: { scored_count: 1, pending_count: 1, mae: 3, rmse: 4 },
         verified: { mae: 9999 }, backtest: { mae: 8888 } },
@@ -71,9 +67,14 @@ for (const [prefix, base, valueKey, actualKey] of [
     assert.match(nodes.get(`${prefix}-bundle`).textContent, /Not historical per-prediction/);
     const records = nodes.get(`${prefix}-nowcast-records`).innerHTML;
     assert.match(records, /&lt;unsafe&gt;/);
-    assert.match(records, /board-day/);
     assert.match(records, /Delayed estimate · pending/);
     assert.match(records, /Delayed estimate · scored/);
+    // The duplicate "latest scored day" subtable was removed: the canonical
+    // advance leaderboard below already covers that shape, and the ledger's
+    // scored row carries the same day-level error when n=1.
+    assert.doesNotMatch(records, /leaderboard · latest scored day/);
+    assert.doesNotMatch(requested.join('\n'), /leaderboard\?source=nowcast/);
+    assert.equal(nodes.get(`${prefix}-nowcast-section`).style.display, '');
     assert.doesNotMatch(records, /9999|8888|must-not-render|<unsafe>|undefined/);
     const filtered = context.publishedOnly({ predictions: [
       { source: 'verified', provenance_consistent: true }, { source: 'nowcast' }, { source: 'backtest' },
@@ -89,6 +90,7 @@ for (const [prefix, base, valueKey, actualKey] of [
     assert.equal(nodes.get(`${prefix}-nowcast-latest`).textContent, 'No delayed estimate on record.');
     assert.match(nodes.get(`${prefix}-bundle`).textContent, /Current deployment: bundle/);
     assert.doesNotMatch(nodes.get(`${prefix}-nowcast-records`).innerHTML, /undefined/);
+    assert.equal(nodes.get(`${prefix}-nowcast-section`).style.display, 'none');
   });
 
   test(`${prefix}: artifact corruption is visible`, async () => {
