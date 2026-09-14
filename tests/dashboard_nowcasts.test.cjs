@@ -113,12 +113,19 @@ for (const [prefix, base, valueKey, actualKey] of [
       [`${base}/predictions?model=lightgbm&limit=15&source=daily`]: { predictions: [] },
       [`${base}/leaderboard`]: 404,
     });
-    const { context, nodes } = dashboard(api);
+    const { context, nodes, requested } = dashboard(api);
     await (prefix === 'el' ? context.initElectricity() : context.initDashboard());
     assert.match(nodes.get(prefix === 'el' ? 'el-hero-date' : 'hero-forecast-date').textContent,
       /No advance forecast on record/);
     const metric = nodes.get(prefix === 'el' ? 'el-metric-lgb-mae' : 'metric-lgb-mae');
     assert.equal(metric.textContent, '');
     assert.match(nodes.get(`${prefix}-nowcast-records`).innerHTML, /777/);
+    // Dedup: empty advance duplicates hide when the live record is nowcast-only.
+    // No extra fetch: 6 advance + 3 nowcast payloads, reused — never a 10th.
+    assert.equal(nodes.get(`${prefix}-methodology`).style.display, 'none');
+    assert.equal(nodes.get(`${prefix}-ledger`).style.display, 'none');
+    assert.equal(nodes.get(`${prefix}-nowcast-section`).style.display, '');
+    assert.equal(requested.length, 9);
+    assert.doesNotMatch(requested.join('\n'), /leaderboard\?source=nowcast/);
   });
 }

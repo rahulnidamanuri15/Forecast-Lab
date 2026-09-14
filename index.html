@@ -1444,6 +1444,34 @@
       `).join('');
     }
 
+    // Advance tables (Latest Scored Day + forecast ledger) are source=daily only;
+    // nowcast tables are source=nowcast only. When the deployment is nowcast-only
+    // the advance fetches succeed with empty payloads (or 404 → {no_data:true}),
+    // yet both sets rendered — the "why both?" duplication: an empty
+    // "No prediction published…" ledger next to a live nowcast ledger, plus a
+    // stale leaderboard next to a live nowcast evaluation. Hide the empty advance
+    // duplicate only when the nowcast side already proved it has the live record.
+    // Reuses the caller's already-filtered counts: zero extra requests, zero extra
+    // filter passes, zero backend changes (routes still serve both provenances).
+    function syncAdvanceVisibility(prefix, leaderboard, advanceLedgerRows, predictionsKnown, hasNowcast) {
+      if (!hasNowcast) return;
+      // predictionsKnown=false means the /predictions fetch itself failed (null):
+      // unknown, not empty — leave visible so the partial-failure banner explains
+      // the outage instead of a blank gap. Same for leaderboard null.
+      const boardKnownEmpty = leaderboard
+        ? (leaderboard.no_data ? true
+          : !(leaderboard.leaderboard && leaderboard.leaderboard.length))
+        : false;
+      const ledgerKnownEmpty = predictionsKnown ? advanceLedgerRows === 0 : false;
+      const boardEl = document.getElementById(`${prefix}-methodology`);
+      const ledgerEl = document.getElementById(`${prefix}-ledger`);
+      if (ledgerKnownEmpty && ledgerEl) ledgerEl.style.display = 'none';
+      // A leaderboard without ledger rows is orphaned: its subtitle promises
+      // "the full record is below", but below is hidden/empty, and its day is
+      // stale next to the live nowcast evaluation. Hide it with the ledger.
+      if ((boardKnownEmpty || ledgerKnownEmpty) && boardEl) boardEl.style.display = 'none';
+    }
+
     // Nowcasts are rendered separately; never feed them into advance metrics/charts.
     // One block only: evaluation (aggregate) + ledger (row-level). The per-model
     // "latest scored day" table was removed — it duplicated the canonical
@@ -1494,17 +1522,18 @@
         // Data-driven visibility: show this block only when nowcast rows exist.
         // Otherwise it renders as an empty second set of tables next to the
         // advance ones (the "why both?" duplication). No extra request: this
-        // reuses the three payloads above.
-        if (section) {
-          const hasNowcast = Boolean(
-            (forecast && forecast.source === 'nowcast') || metrics.length || rows.length);
-          section.style.display = hasNowcast ? '' : 'none';
-        }
+        // reuses the three payloads above. Returns the flag so the caller can
+        // hide the empty advance duplicate with zero extra fetches.
+        const hasNowcast = Boolean(
+          (forecast && forecast.source === 'nowcast') || metrics.length || rows.length);
+        if (section) section.style.display = hasNowcast ? '' : 'none';
+        return hasNowcast;
       } catch (err) {
         latest.textContent = `Delayed-estimate diagnostics unavailable: ${err.message}`;
         bundle.textContent = 'Model bundle status unavailable.';
         records.textContent = '';
         if (section) section.style.display = 'none';
+        return false;
       }
     }
 
@@ -1522,7 +1551,7 @@
           fetchJSON('/leaderboard').catch(emptyOrUnavailable),
         ]);
 
-        await initNowcasts('pm25', evaluation);
+        const hasNowcastPm25 = await initNowcasts('pm25', evaluation);
 
         // Loud partials: name what failed instead of rendering bare em-dashes.
         notePartialFailures('pm25-error', [
@@ -1621,6 +1650,11 @@
         // 5. Prediction History Table & Reliability calculation
         const publishedRows = publishedOnly(predictions);
         rawPm25Predictions = publishedRows;
+
+        // Dedup: hide the empty advance Latest-Scored-Day / ledger when the live
+        // record is nowcast-only. Reuses publishedRows above — no new fetch, no
+        // extra filter pass, no backend change.
+        syncAdvanceVisibility('pm25', leaderboard, publishedRows.length, predictions !== null, hasNowcastPm25);
 
         if (publishedRows.length) {
           const rows = publishedRows;
@@ -1845,7 +1879,7 @@
           fetchJSON('/electricity/leaderboard').catch(emptyOrUnavailable),
         ]);
 
-        await initNowcasts('el', evaluation);
+        const hasNowcastEl = await initNowcasts('el', evaluation);
 
         // Loud partials: same contract as the PM2.5 panel above.
         notePartialFailures('el-error', [
@@ -1951,6 +1985,9 @@
         // 5. History table + Error chart
         const elPublishedRows = publishedOnly(predictions);
         rawElPredictions = elPublishedRows;
+
+        // Same dedup as PM2.5: hide empty advance tables when nowcast is live.
+        syncAdvanceVisibility('el', leaderboard, elPublishedRows.length, predictions !== null, hasNowcastEl);
 
         if (elPublishedRows.length) {
           const rows = elPublishedRows;
