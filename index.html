@@ -911,7 +911,7 @@
           <div class="ledger-heading">
             <div>
               <h2 class="panel-title" id="pm25-leaderboard-title">Latest Scored Day across Models</h2>
-              <div class="panel-subtitle">Most recent day scored per model (n≈1) — the full record is below</div>
+              <div class="panel-subtitle" id="pm25-board-subtitle">Most recent day scored per model (n≈1) — the full record is below</div>
             </div>
           </div>
           <div class="table-wrap">
@@ -937,7 +937,7 @@
           <div class="ledger-heading">
             <div>
               <h2 class="panel-title" id="pm25-ledger-title">The forecast ledger</h2>
-              <p class="panel-subtitle">Predictions logged before actual outcomes were known.</p>
+              <p class="panel-subtitle" id="pm25-ledger-subtitle">Predictions logged before actual outcomes were known.</p>
             </div>
             <button class="button" onclick="exportCurrentCSV('pm25')" aria-label="Export PM2.5 forecast ledger as CSV">
               <svg class="icon"><use href="#i-download"/></svg>CSV
@@ -961,7 +961,7 @@
               </tbody>
             </table>
           </div>
-          <div class="ledger-footer">
+          <div class="ledger-footer" id="pm25-ledger-footer">
             Showing verified forecasts logged before outcomes were known. Download CSV to inspect full record.
           </div>
         </section>
@@ -1166,7 +1166,7 @@
           <div class="ledger-heading">
             <div>
               <h2 class="panel-title" id="el-leaderboard-title">Latest Scored Day across Models</h2>
-              <div class="panel-subtitle">Most recent day scored per model (n≈1) — the full record is below</div>
+              <div class="panel-subtitle" id="el-board-subtitle">Most recent day scored per model (n≈1) — the full record is below</div>
             </div>
           </div>
           <div class="table-wrap">
@@ -1193,7 +1193,7 @@
           <div class="ledger-heading">
             <div>
               <h2 class="panel-title" id="el-ledger-title">Prediction History</h2>
-              <p class="panel-subtitle">Predictions logged before actual outcomes were known</p>
+              <p class="panel-subtitle" id="el-ledger-subtitle">Predictions logged before actual outcomes were known</p>
             </div>
             <button class="button" onclick="exportCurrentCSV('electricity')" aria-label="Export electricity ledger as CSV">
               <svg class="icon"><use href="#i-download"/></svg>CSV
@@ -1217,7 +1217,7 @@
               </tbody>
             </table>
           </div>
-          <div class="ledger-footer">
+          <div class="ledger-footer" id="el-ledger-footer">
             Showing verified forecasts logged before outcomes were known. Grid-Sentinel reports lag by 2–4 days.
           </div>
         </section>
@@ -1444,13 +1444,13 @@
       `).join('');
     }
 
-    // Nowcasts are rendered separately; never feed them into advance metrics/charts.
-    // One block only: evaluation (aggregate) + ledger (row-level). The per-model
-    // "latest scored day" table was removed — it duplicated the canonical
-    // "Latest Scored Day across Models" table below, and the ledger's last scored
-    // row already carries the same day-level error when n=1. Removing it also
-    // removes one /leaderboard?source=nowcast round-trip per panel; no backend
-    // route changes.
+    // Single-table rule: the top "Nowcasts" block is a provenance banner only
+    // (DELAYED ESTIMATE line + bundle line). It renders NO tables — the two
+    // duplicate tables it used to carry (evaluation + latest-15 ledger) were the
+    // "why both?" duplication next to the canonical Latest-Scored-Day + ledger
+    // below. When the advance record is empty, the canonical tables render the
+    // nowcast rows instead (fallback, never merged; backend routes unchanged).
+    // Returns the nowcast rows so callers reuse them with zero extra fetches.
     async function initNowcasts(prefix, evaluation) {
       const base = prefix === 'el' ? '/electricity' : '';
       const section = document.getElementById(`${prefix}-nowcast-section`);
@@ -1468,8 +1468,6 @@
           fetchJSON(`${base}/diagnostics`),
         ]);
         const unit = prefix === 'el' ? 'MW' : 'μg/m³';
-        const valueKey = prefix === 'el' ? 'predicted_demand_mw' : 'predicted_pm2_5';
-        const actualKey = prefix === 'el' ? 'actual_demand_mw' : 'actual_pm2_5';
         const forecastKey = prefix === 'el' ? 'forecast_demand_mw' : 'forecast_pm2_5';
         latest.textContent = forecast && forecast.source === 'nowcast'
           ? `DELAYED ESTIMATE · target ${forecast.forecast_date} · ${fmt(forecast[forecastKey])} ${unit} · issued ${forecast.created_at} · ${forecast.status === 'verified' ? 'scored' : 'pending actual'} · cutoff ${forecast.cutoff}`
@@ -1481,31 +1479,49 @@
             + (window ? ` · training ${window.first} to ${window.last} (${window.rows} rows)` : ' · training window unavailable (legacy artifact)')
             + ' · Not historical per-prediction model metadata.'
           : 'MODEL ARTIFACT ERROR: current bundle is missing or invalid.';
-        const metrics = ((evaluation && evaluation.evaluation) || [])
-          .filter(m => m.nowcast).map(m => ({ model: m.model, ...m.nowcast }));
         const rows = ((predictions && predictions.predictions) || []).filter(r => r.source === 'nowcast');
-        records.innerHTML = `<h3>Nowcast evaluation · full record</h3>
-          <table><thead><tr><th>Model</th><th>Scored</th><th>Pending</th><th>MAE (${unit})</th><th>RMSE</th><th>MAPE (%)</th></tr></thead><tbody>`
-          + metrics.map(m => `<tr><td>${esc(m.model)}</td><td>${esc(m.scored_count)}</td><td>${esc(m.pending_count)}</td><td>${fmt(m.mae)}</td><td>${fmt(m.rmse)}</td><td>${fmt(m.mape)}</td></tr>`).join('')
-          + `</tbody></table><h3>Nowcast ledger · latest 15 LightGBM rows</h3>
-          <table><thead><tr><th>Target</th><th>Issued</th><th>Estimate (${unit})</th><th>Actual</th><th>Error</th><th>Status</th></tr></thead><tbody>`
-          + rows.map(r => `<tr><td>${esc(r.forecast_date)}</td><td>${esc(r.created_at)}</td><td>${fmt(r[valueKey])}</td><td>${fmt(r[actualKey])}</td><td>${fmt(r.error)}</td><td>Delayed estimate · ${r[actualKey] == null ? 'pending' : 'scored'}</td></tr>`).join('')
-          + '</tbody></table>';
-        // Data-driven visibility: show this block only when nowcast rows exist.
-        // Otherwise it renders as an empty second set of tables next to the
-        // advance ones (the "why both?" duplication). No extra request: this
-        // reuses the three payloads above.
+        // No duplicate tables: clear any stale markup so only the canonical
+        // tables below ever render rows.
+        if (records) records.innerHTML = '';
+        const hasEvalNowcast = ((evaluation && evaluation.evaluation) || [])
+          .some(m => m.nowcast && (((m.nowcast.scored_count || 0) + (m.nowcast.pending_count || 0)) > 0 || m.nowcast.mae != null));
+        const hasNowcast = Boolean(
+          (forecast && forecast.source === 'nowcast') || rows.length || hasEvalNowcast);
         if (section) {
-          const hasNowcast = Boolean(
-            (forecast && forecast.source === 'nowcast') || metrics.length || rows.length);
           section.style.display = hasNowcast ? '' : 'none';
         }
+        return { hasNowcast, rows };
       } catch (err) {
         latest.textContent = `Delayed-estimate diagnostics unavailable: ${err.message}`;
         bundle.textContent = 'Model bundle status unavailable.';
-        records.textContent = '';
+        if (records) records.textContent = '';
         if (section) section.style.display = 'none';
+        return { hasNowcast: false, rows: [] };
       }
+    }
+
+    // Board known-empty (not unknown): null means the fetch itself failed, so
+    // leave the table alone and let the partial-failure banner explain it.
+    function boardKnownEmpty(board) {
+      if (!board) return false;
+      if (board.no_data) return true;
+      return !(board.leaderboard && board.leaderboard.length);
+    }
+
+    // Relabel the canonical tables when they show delayed estimates, so a
+    // nowcast row is never presented as an advance forecast.
+    function markProvenance(prefix, isNowcast) {
+      if (!isNowcast) return;
+      const boardSub = document.getElementById(`${prefix}-board-subtitle`);
+      const ledgerSub = document.getElementById(`${prefix}-ledger-subtitle`);
+      const ledgerFoot = document.getElementById(`${prefix}-ledger-footer`);
+      if (boardSub) boardSub.textContent = 'Most recent delayed-estimate day scored per model — advance record empty, showing nowcasts.';
+      if (ledgerSub) ledgerSub.textContent = prefix === 'el'
+        ? 'Delayed estimates issued at/after target midnight (Asia/Kolkata) · features(t)→target(t+1), not advance forecasts.'
+        : 'Delayed estimates issued at/after target midnight · features(t)→target(t+1), not advance forecasts.';
+      if (ledgerFoot) ledgerFoot.textContent = prefix === 'el'
+        ? 'Showing delayed estimates (issued at/after midnight). Advance record empty. Grid-Sentinel reports lag by 2–4 days.'
+        : 'Showing delayed estimates (issued at/after midnight). Advance record empty. Download CSV to inspect full record.';
     }
 
     // ==========================================
@@ -1522,7 +1538,7 @@
           fetchJSON('/leaderboard').catch(emptyOrUnavailable),
         ]);
 
-        await initNowcasts('pm25', evaluation);
+        const nowcast = await initNowcasts('pm25', evaluation);
 
         // Loud partials: name what failed instead of rendering bare em-dashes.
         notePartialFailures('pm25-error', [
@@ -1534,7 +1550,32 @@
           !leaderboard && '/leaderboard',
         ].filter(Boolean));
 
-        renderLeaderboard('leaderboard-table-body', leaderboard, 2, false);
+        // Fallback (no merge): advance tables are source=daily only. When they
+        // are known-empty and nowcasts are live, render the nowcast record in
+        // the canonical tables instead of a second set of tables.
+        const advanceRowsPm25 = publishedOnly(predictions);
+        const ledgerKnownEmptyPm25 = predictions !== null ? advanceRowsPm25.length === 0 : false;
+        let ledgerRowsPm25 = advanceRowsPm25;
+        let ledgerIsNowcastPm25 = false;
+        if (ledgerKnownEmptyPm25 && nowcast && nowcast.rows.length) {
+          ledgerRowsPm25 = nowcast.rows;
+          ledgerIsNowcastPm25 = true;
+        }
+        rawPm25Predictions = ledgerRowsPm25;
+
+        let effectiveBoardPm25 = leaderboard;
+        let boardIsNowcastPm25 = false;
+        if (boardKnownEmpty(leaderboard) && nowcast && nowcast.hasNowcast) {
+          try {
+            const nb = await fetchJSON('/leaderboard?source=nowcast');
+            if (nb && nb.leaderboard && nb.leaderboard.length) {
+              effectiveBoardPm25 = nb;
+              boardIsNowcastPm25 = true;
+            }
+          } catch (e) { /* keep empty; banner already names the outage */ }
+        }
+        renderLeaderboard('leaderboard-table-body', effectiveBoardPm25, 2, false);
+        markProvenance('pm25', ledgerIsNowcastPm25 || boardIsNowcastPm25);
 
         // 1. Status Pill
         pm25Health = health;
@@ -1578,8 +1619,19 @@
         // 4. Full-record accuracy & model comparison
         if (evaluation && evaluation.evaluation) {
           const models = evaluation.evaluation.filter(m => m.verified).map(m => ({ ...m, ...(m.verified || {}) }));
-          const lgb = models.find(m => m.model === 'lightgbm');
-          const naive = models.find(m => m.model === 'naive_baseline');
+          // Fallback when advance is empty but nowcasts are live: headline the
+          // delayed-estimate record instead of em-dashes (never averaged in).
+          let metricsModels = models;
+          let metricsIsNowcast = false;
+          if (!models.some(m => m.mae != null)) {
+            const ncModels = evaluation.evaluation.filter(m => m.nowcast).map(m => ({ ...m, ...(m.nowcast || {}) }));
+            if (ncModels.some(m => m.mae != null || m.scored_count != null)) {
+              metricsModels = ncModels;
+              metricsIsNowcast = true;
+            }
+          }
+          const lgb = metricsModels.find(m => m.model === 'lightgbm');
+          const naive = metricsModels.find(m => m.model === 'naive_baseline');
 
           if (lgb && lgb.mae != null) {
             document.getElementById('metric-lgb-mae').textContent = fmt(lgb.mae, 2);
@@ -1592,11 +1644,14 @@
             // next to a last-15 ring.
 
             const bt = lgb.backtest;
-            document.getElementById('kpi-mae-val').title =
-              `Verified over ${lgb.scored_count} published day(s).`
+            document.getElementById('kpi-mae-val').title = metricsIsNowcast
+              ? `Delayed estimates over ${lgb.scored_count} scored day(s). Advance record empty.`
+              : `Verified over ${lgb.scored_count} published day(s).`
               + (bt && bt.mae != null
                   ? ` Launch backtest: MAE ${fmt(bt.mae, 2)} over ${bt.scored_count} days, never averaged in.`
                   : '');
+          } else if (metricsIsNowcast && lgb && lgb.scored_count != null) {
+            document.getElementById('kpi-record-val').textContent = lgb.scored_count;
           }
 
           if (lgb && naive && lgb.mae != null && naive.mae != null) {
@@ -1619,11 +1674,10 @@
         }
 
         // 5. Prediction History Table & Reliability calculation
-        const publishedRows = publishedOnly(predictions);
-        rawPm25Predictions = publishedRows;
-
-        if (publishedRows.length) {
-          const rows = publishedRows;
+        // ledgerRowsPm25 is advance rows, or nowcast rows when advance is
+        // known-empty (fallback set above). Same table, one provenance at a time.
+        if (ledgerRowsPm25.length) {
+          const rows = ledgerRowsPm25;
           let within5Count = 0;
           let totalScored = 0;
           let totalAccuracySum = 0;
@@ -1632,7 +1686,9 @@
           const tableHtml = rows.map(r => {
             let errStr = '—';
             let accStr = '—';
-            let badge = '<span class="status-pill pending"><span class="dot"></span>Pending</span>';
+            let badge = ledgerIsNowcastPm25
+              ? '<span class="status-pill pending"><span class="dot"></span>Delayed estimate · pending</span>'
+              : '<span class="status-pill pending"><span class="dot"></span>Pending</span>';
 
             if (r.actual_pm2_5 !== null && r.actual_pm2_5 !== undefined) {
               const err = Math.abs(r.actual_pm2_5 - r.predicted_pm2_5);
@@ -1648,9 +1704,13 @@
                 accScored++;
               }
 
-              badge = within
-                ? '<span class="status-pill good"><span class="dot"></span>Within threshold</span>'
-                : '<span class="status-pill miss"><span class="dot"></span>Outside threshold</span>';
+              badge = ledgerIsNowcastPm25
+                ? (within
+                  ? '<span class="status-pill good"><span class="dot"></span>Delayed · within threshold</span>'
+                  : '<span class="status-pill miss"><span class="dot"></span>Delayed · outside threshold</span>')
+                : (within
+                  ? '<span class="status-pill good"><span class="dot"></span>Within threshold</span>'
+                  : '<span class="status-pill miss"><span class="dot"></span>Outside threshold</span>');
             }
 
             return `
@@ -1692,7 +1752,7 @@
         }
 
         // 6. Chart: Prediction vs Actual & Accuracy
-        renderPm25Charts(publishedRows);
+        renderPm25Charts(ledgerRowsPm25);
 
       } catch (err) {
         console.error('Failed to initialize PM2.5 dashboard:', err);
@@ -1845,7 +1905,7 @@
           fetchJSON('/electricity/leaderboard').catch(emptyOrUnavailable),
         ]);
 
-        await initNowcasts('el', evaluation);
+        const nowcastEl = await initNowcasts('el', evaluation);
 
         // Loud partials: same contract as the PM2.5 panel above.
         notePartialFailures('el-error', [
@@ -1857,7 +1917,31 @@
           !leaderboard && '/electricity/leaderboard',
         ].filter(Boolean));
 
-        renderLeaderboard('el-leaderboard-table-body', leaderboard, 0, true);
+        // Same fallback as PM2.5: nowcast rows into the canonical tables when
+        // the advance record is known-empty. No merge, no backend change.
+        const advanceRowsEl = publishedOnly(predictions);
+        const ledgerKnownEmptyEl = predictions !== null ? advanceRowsEl.length === 0 : false;
+        let ledgerRowsEl = advanceRowsEl;
+        let ledgerIsNowcastEl = false;
+        if (ledgerKnownEmptyEl && nowcastEl && nowcastEl.rows.length) {
+          ledgerRowsEl = nowcastEl.rows;
+          ledgerIsNowcastEl = true;
+        }
+        rawElPredictions = ledgerRowsEl;
+
+        let effectiveBoardEl = leaderboard;
+        let boardIsNowcastEl = false;
+        if (boardKnownEmpty(leaderboard) && nowcastEl && nowcastEl.hasNowcast) {
+          try {
+            const nb = await fetchJSON('/electricity/leaderboard?source=nowcast');
+            if (nb && nb.leaderboard && nb.leaderboard.length) {
+              effectiveBoardEl = nb;
+              boardIsNowcastEl = true;
+            }
+          } catch (e) { /* keep empty; banner already names the outage */ }
+        }
+        renderLeaderboard('el-leaderboard-table-body', effectiveBoardEl, 0, true);
+        markProvenance('el', ledgerIsNowcastEl || boardIsNowcastEl);
 
         // 1. Status Pill
         elHealth = health;
@@ -1895,11 +1979,21 @@
         // 4. Full-record accuracy across all models
         if (evaluation && evaluation.evaluation) {
           const models = evaluation.evaluation.filter(m => m.verified).map(m => ({ ...m, ...(m.verified || {}) }));
-          const lgb = models.find(m => m.model === 'lightgbm');
-          const naive = models.find(m => m.model === 'naive_baseline');
-          const seasonal = models.find(m => m.model === 'seasonal_naive');
+          // Same fallback as PM2.5: headline delayed estimates when advance is empty.
+          let metricsModelsEl = models;
+          let metricsIsNowcastEl = false;
+          if (!models.some(m => m.mae != null || m.mape != null)) {
+            const ncModels = evaluation.evaluation.filter(m => m.nowcast).map(m => ({ ...m, ...(m.nowcast || {}) }));
+            if (ncModels.some(m => m.mae != null || m.mape != null || m.scored_count != null)) {
+              metricsModelsEl = ncModels;
+              metricsIsNowcastEl = true;
+            }
+          }
+          const lgb = metricsModelsEl.find(m => m.model === 'lightgbm');
+          const naive = metricsModelsEl.find(m => m.model === 'naive_baseline');
+          const seasonal = metricsModelsEl.find(m => m.model === 'seasonal_naive');
 
-          if (lgb) {
+          if (lgb && (lgb.mape != null || lgb.mae != null || lgb.scored_count != null)) {
             const band = getMapeBand(lgb.mape);
             const pill = document.getElementById('el-hero-cat-pill');
             pill.textContent = band.label;
@@ -1912,8 +2006,9 @@
             document.getElementById('el-metric-lgb-rmse').textContent = fmt(lgb.rmse, 0);
 
             const bt = lgb.backtest;
-            document.getElementById('el-kpi-mape-val').title =
-              `Verified over ${lgb.scored_count} published day(s).`
+            document.getElementById('el-kpi-mape-val').title = metricsIsNowcastEl
+              ? `Delayed estimates over ${lgb.scored_count} scored day(s). Advance record empty.`
+              : `Verified over ${lgb.scored_count} published day(s).`
               + (bt && bt.mape != null
                   ? ` Launch backtest: MAPE ${fmt(bt.mape, 2)}% over ${bt.scored_count} days, never averaged in.`
                   : '');
@@ -1931,7 +2026,7 @@
           }
 
           // Model comparison bars
-          const scoredModels = models.filter(m => m.mae != null);
+          const scoredModels = metricsModelsEl.filter(m => m.mae != null);
           if (scoredModels.length) {
             const maxVal = Math.max(...scoredModels.map(m => m.mae)) * 1.35;
             document.getElementById('el-bar-group').innerHTML = scoredModels.map((m, i) => `
@@ -1949,16 +2044,17 @@
         }
 
         // 5. History table + Error chart
-        const elPublishedRows = publishedOnly(predictions);
-        rawElPredictions = elPublishedRows;
-
-        if (elPublishedRows.length) {
-          const rows = elPublishedRows;
+        // ledgerRowsEl is advance rows, or nowcast rows when advance is
+        // known-empty (fallback set above). Same table, one provenance at a time.
+        if (ledgerRowsEl.length) {
+          const rows = ledgerRowsEl;
           let within3 = 0, totalScored = 0, accSum = 0;
 
           document.getElementById('el-history-table-body').innerHTML = rows.map(r => {
             let errStr = '—', pctStr = '—';
-            let badge = '<span class="status-pill pending"><span class="dot"></span>Pending</span>';
+            let badge = ledgerIsNowcastEl
+              ? '<span class="status-pill pending"><span class="dot"></span>Delayed estimate · pending</span>'
+              : '<span class="status-pill pending"><span class="dot"></span>Pending</span>';
 
             if (r.error_pct !== null && r.error_pct !== undefined) {
               errStr = fmt(r.error, 0);
@@ -1967,9 +2063,24 @@
               if (r.error_pct <= 3) within3++;
               accSum += Math.max(0, 100 - r.error_pct);
 
-              badge = r.error_pct <= 3
-                ? '<span class="status-pill good"><span class="dot"></span>Within threshold</span>'
-                : '<span class="status-pill miss"><span class="dot"></span>Outside threshold</span>';
+              badge = ledgerIsNowcastEl
+                ? (r.error_pct <= 3
+                  ? '<span class="status-pill good"><span class="dot"></span>Delayed · within threshold</span>'
+                  : '<span class="status-pill miss"><span class="dot"></span>Delayed · outside threshold</span>')
+                : (r.error_pct <= 3
+                  ? '<span class="status-pill good"><span class="dot"></span>Within threshold</span>'
+                  : '<span class="status-pill miss"><span class="dot"></span>Outside threshold</span>');
+            } else if (ledgerIsNowcastEl && r.actual_demand_mw != null && r.predicted_demand_mw != null) {
+              const err = Math.abs(r.actual_demand_mw - r.predicted_demand_mw);
+              const pct = r.actual_demand_mw ? err / r.actual_demand_mw * 100 : null;
+              errStr = fmt(err, 0);
+              pctStr = pct != null ? `${fmt(pct, 2)}%` : '—';
+              totalScored++;
+              if (pct != null && pct <= 3) within3++;
+              if (pct != null) accSum += Math.max(0, 100 - pct);
+              badge = (pct != null && pct <= 3)
+                ? '<span class="status-pill good"><span class="dot"></span>Delayed · within threshold</span>'
+                : '<span class="status-pill miss"><span class="dot"></span>Delayed · outside threshold</span>';
             }
 
             return `
@@ -2149,15 +2260,16 @@
     // ==========================================
     function exportCurrentCSV(target) {
       const isElec = target === 'electricity';
-      // Verified-only is intentional: rawPm25Predictions/rawElPredictions already went
-      // through publishedOnly(), so the ledger exports the published-then-verified
-      // record, never the walk-forward launch backtest.
+      // Single-provenance export: rawPm25Predictions/rawElPredictions hold the
+      // advance ledger, or the nowcast fallback when advance is empty — never
+      // the walk-forward launch backtest, never a merge.
       const rows = isElec ? rawElPredictions : rawPm25Predictions;
 
       if (!rows || !rows.length) {
-        showToast('No verified forecast rows available to export.');
+        showToast('No forecast rows available to export.');
         return;
       }
+      const isDelayed = rows.length && rows[0] && rows[0].source === 'nowcast';
 
       const headers = isElec
         ? ['Dataset', 'Forecast Date', 'Model', 'Predicted Demand (MW)', 'Actual Demand (MW)', 'Error (MW)', 'Error %', 'Threshold (<=3%)']
@@ -2166,16 +2278,16 @@
       const csvData = [
         headers,
         ...rows.map(r => isElec ? [
-          'Maharashtra Electricity',
+          isDelayed ? 'Maharashtra Electricity (delayed estimate)' : 'Maharashtra Electricity',
           r.forecast_date,
           r.model,
           r.predicted_demand_mw,
           r.actual_demand_mw ?? '',
-          r.error ?? '',
+          r.error ?? (r.actual_demand_mw != null && r.predicted_demand_mw != null ? Math.abs(r.actual_demand_mw - r.predicted_demand_mw) : ''),
           r.error_pct != null ? `${r.error_pct.toFixed(2)}%` : '',
           r.error_pct != null ? (r.error_pct <= 3.0 ? 'PASS' : 'FAIL') : 'PENDING'
         ] : [
-          'Nagpur PM2.5',
+          isDelayed ? 'Nagpur PM2.5 (delayed estimate)' : 'Nagpur PM2.5',
           r.forecast_date,
           r.model,
           r.predicted_pm2_5,
@@ -2192,13 +2304,13 @@
       const link = document.createElement('a');
 
       link.href = url;
-      link.download = `vericast-${target}-verified-ledger.csv`;
+      link.download = `vericast-${target}-${isDelayed ? 'delayed' : 'verified'}-ledger.csv`;
       document.body.appendChild(link);
       link.click();
       link.remove();
 
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      showToast(`CSV export generated · ${rows.length} verified record(s)`);
+      showToast(`CSV export generated · ${rows.length} ${isDelayed ? 'delayed' : 'verified'} record(s)`);
     }
 
     // ==========================================
