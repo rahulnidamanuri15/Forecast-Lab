@@ -273,6 +273,7 @@ def save_model_performance(
 
     insert_sql = """
         INSERT INTO model_performance (
+            city,
             score_date,
             model,
             mae,
@@ -280,7 +281,7 @@ def save_model_performance(
             sample_size,
             source
         )
-        VALUES (%s, %s, %s, %s, %s, 'backtest')
+        VALUES (%s, %s, %s, %s, %s, %s, 'backtest')
         ON CONFLICT (city, score_date, model, source)
         DO UPDATE SET
             mae = EXCLUDED.mae,
@@ -289,7 +290,9 @@ def save_model_performance(
             created_at = CURRENT_TIMESTAMP
         WHERE model_performance.source = 'backtest';
     """
-    delete_sql = "DELETE FROM model_performance WHERE source = 'backtest';"
+    # Scoped by city like the elec mirror: an unscoped DELETE wipes another
+    # city's published backtest history.
+    delete_sql = "DELETE FROM model_performance WHERE city = %s AND source = 'backtest';"
 
     should_close = False
     if conn is None:
@@ -298,7 +301,7 @@ def save_model_performance(
 
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT MIN(score_date) FROM model_performance WHERE source = 'daily'")
+            cur.execute("SELECT MIN(score_date) FROM model_performance WHERE city = %s AND source = 'daily'", (CITY,))
             row = cur.fetchone()
             first_daily = row[0] if row else None
             if first_daily and score_date >= first_daily:
@@ -307,6 +310,7 @@ def save_model_performance(
 
             records = [
                 (
+                    CITY,
                     score_date,
                     "naive_baseline",
                     float(naive_mae),
@@ -314,6 +318,7 @@ def save_model_performance(
                     sample_size,
                 ),
                 (
+                    CITY,
                     score_date,
                     "lightgbm",
                     float(lightgbm_mae),
@@ -322,7 +327,7 @@ def save_model_performance(
                 ),
             ]
 
-            cur.execute(delete_sql)
+            cur.execute(delete_sql, (CITY,))
             stale = cur.rowcount
             cur.executemany(insert_sql, records)
 

@@ -162,7 +162,7 @@ def test_backtest_seeder_cannot_relabel_a_daily_perf_row(script, table):
 # rows are well-formed, /leaderboard filters them out either way, and only a reader of
 # model_performance sees the duplicate.
 @pytest.mark.parametrize("script,table,extra", [
-    ("experiments/save_backtest_results.py", "model_performance", ""),
+    ("experiments/save_backtest_results.py", "model_performance", "city = %s AND "),
     ("experiments/save_elec_backtest_results.py", "electricity_model_performance",
      "state = %s AND "),
 ])

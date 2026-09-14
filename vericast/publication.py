@@ -29,9 +29,17 @@ def publish_predictions(cur, sql, records, forecast_date, target_timezone):
     """
     timing = publication_timing(forecast_date, target_timezone)
     if not records:
-        print(f"[WARN] No predictions to publish for {forecast_date} "
-              f"(all models skipped); nothing written as {timing['source']}.")
-        return timing
+        # Empty is a failure, not a quiet no-op: without this a run where every
+        # model was skipped commits nothing, exits 0, and is indistinguishable
+        # from a healthy publish in the Actions log.
+        from vericast import send_alert
+        msg = (f"No predictions to publish for {forecast_date} "
+               f"(all models skipped); nothing written as {timing['source']}.")
+        print(f"[ERROR] {msg}")
+        try:
+            send_alert("VeriCast empty publish — no forecasts written", msg)
+        finally:
+            raise RuntimeError(msg)
     for record in records:
         cur.execute(sql, (*record, timing["source"], timing["issued_at"]))
     if timing["source"] == "daily":

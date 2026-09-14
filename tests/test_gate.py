@@ -47,8 +47,25 @@ def series(n=120, flat_tail=0):
     return X, y, dates
 
 
-def incumbent(tmp_path, X, y, name="incumbent.txt"):
-    """A saved artifact for challenger_ships to score for drift."""
+def incumbent(tmp_path, X, y, window_dates=None, name="incumbent.txt"):
+    """A saved bundle artifact for challenger_ships to score for drift.
+
+    Production writes bundles only (save_bundle); the legacy raw-.txt path this
+    helper used to stage is not what runs, so the fixture stages what inference
+    actually reads. `window_dates` defaults to one date per row.
+    """
+    from vericast.artifacts import save_bundle
+    path = str(tmp_path / name)
+    model = lgb.train(PARAMS, lgb.Dataset(X, label=y), num_boost_round=ROUNDS)
+    n = len(y)
+    if window_dates is None:
+        window_dates = [date(2026, 1, 1) + timedelta(days=i) for i in range(n)]
+    save_bundle(model, path, list(window_dates), len(window_dates))
+    return path
+
+
+def legacy_incumbent(tmp_path, X, y, name="legacy.txt"):
+    """Raw .txt with no bundle and no sidecar: the pre-bundle artifact state."""
     path = str(tmp_path / name)
     lgb.train(PARAMS, lgb.Dataset(X, label=y),
               num_boost_round=ROUNDS).save_model(path)
@@ -61,12 +78,14 @@ def head(dates):
 
 
 def test_a_window_ending_before_the_holdout_is_comparable(tmp_path, capsys):
-    """The case the sidecar was added for: a retrain skipped for a week or more
+    """The case the bundle window was added for: a retrain skipped for a week or more
     leaves an incumbent that genuinely never saw these rows, so its number can
     be read straight instead of being caveated away."""
     X, y, dates = series()
-    path = incumbent(tmp_path, X, y)
-    gate.record_training_window(path, head(dates), len(head(dates)))
+    h = head(dates)
+    # Incumbent trained through the head only; its bundle window ends before
+    # the holdout opens.
+    path = incumbent(tmp_path, X[:len(h)], y[:len(h)], h)
 
     gate.challenger_ships(X, y, PARAMS, ROUNDS, 0,
                           incumbent_path=path, dates=dates)
@@ -79,8 +98,7 @@ def test_a_window_ending_before_the_holdout_is_comparable(tmp_path, capsys):
 def test_a_window_covering_the_holdout_is_not_comparable(tmp_path, capsys):
     """One day's difference flips the verdict, which is the whole comparison."""
     X, y, dates = series()
-    path = incumbent(tmp_path, X, y)
-    gate.record_training_window(path, dates, len(dates))  # trained on everything
+    path = incumbent(tmp_path, X, y, dates)  # trained on everything
 
     gate.challenger_ships(X, y, PARAMS, ROUNDS, 0,
                           incumbent_path=path, dates=dates)
@@ -90,10 +108,10 @@ def test_a_window_covering_the_holdout_is_not_comparable(tmp_path, capsys):
 
 
 def test_a_missing_sidecar_assumes_the_incumbent_saw_the_holdout(tmp_path, capsys):
-    """Every artifact predating the sidecar is in this state, and the honest
+    """Every artifact predating bundles and sidecars is in this state, and the honest
     reading of an unknown window is the pessimistic one."""
     X, y, dates = series()
-    path = incumbent(tmp_path, X, y)
+    path = legacy_incumbent(tmp_path, X, y)
 
     gate.challenger_ships(X, y, PARAMS, ROUNDS, 0,
                           incumbent_path=path, dates=dates)

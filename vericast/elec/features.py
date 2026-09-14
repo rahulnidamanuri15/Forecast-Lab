@@ -14,6 +14,7 @@ from vericast import (
     acquire_pipeline_lock,
     alignment_sql,
     require_database_url,
+    require_state_of_record,
     verify_alignment as check_alignment,
 )
 
@@ -21,7 +22,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-STATE = os.getenv("STATE", "Maharashtra")
+STATE = require_state_of_record(os.getenv("STATE", "Maharashtra"))
 
 COOLING_BASE = 24.0  # degC above which air-conditioning load kicks in
 

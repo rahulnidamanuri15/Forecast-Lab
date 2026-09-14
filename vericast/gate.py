@@ -55,7 +55,13 @@ def record_training_window(model_path, dates, rows):
 
 def read_training_window(model_path):
     """Read authoritative bundle metadata, with legacy sidecar compatibility."""
-    bundle = read_bundle(model_path)
+    try:
+        bundle = read_bundle(model_path)
+    except (ValueError, OSError):
+        # A corrupt bundle must read as "unknown window", never crash the
+        # retrain this function gates — the comparability line degrades to the
+        # pessimistic note instead.
+        return None
     if bundle is not None:
         return dict(bundle["window"])
     try:
@@ -129,14 +135,31 @@ def challenger_ships(X, y, params, num_boost_round, baseline_col,
     for ok, detail in checks:
         print(f"[gate]   [{'OK' if ok else 'FAIL'}] {detail}")
 
-    # Drift only, no vote - see the module docstring for why it cannot vote.
+    # Drift only, no vote: a stale incumbent losing to the challenger says nothing
+    # about whether the challenger beats persistence, and a fresh incumbent
+    # winning says nothing about whether the challenger clears the bars above.
     if incumbent_path and model_exists(incumbent_path):
         incumbent = load_model(incumbent_path)
         if incumbent.num_feature() == X.shape[1]:
             incumbent_mae = _mae(incumbent.predict(X_hold), y_hold)
-            # Sidecar window comparison: only comparable if incumbent finished before holdout opens
+            # Sidecar window comparison: only comparable if incumbent finished before holdout opens.
+            # `dates` backs the entire temporal-holdout assumption, so validate
+            # it rather than trusting length and monotonicity: without this a
+            # shuffled or duplicated date list silently voids the guarantee.
             window = read_training_window(incumbent_path)
-            holdout_start = str(dates[split]) if dates is not None else None
+            holdout_start = None
+            if dates is not None:
+                try:
+                    dates_list = list(dates)
+                except TypeError:
+                    dates_list = None
+                if dates_list is not None and len(dates_list) == len(X):
+                    iso = [str(d) for d in dates_list]
+                    if iso == sorted(iso) and len(set(iso)) == len(iso):
+                        holdout_start = iso[split]
+            if dates is not None and holdout_start is None:
+                print("[gate]   (incumbent window not comparable: dates missing, "
+                      "misaligned, or non-monotonic — assuming it saw the holdout)")
             def _iso(s):
                 try:
                     from datetime import date as _d

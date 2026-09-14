@@ -67,6 +67,26 @@ def require_city_of_record(city):
     return city
 
 
+# Electricity is Maharashtra-hardcoded just like PM2.5 is Nagpur-pinned:
+# ELEC_MIN/MAX_MW below is the Maharashtra peak range and elec/ingest.py
+# hardcodes Mumbai/Pune/Nagpur coordinates for temperature. A bare
+# STATE=Gujarat would silently produce wrong temperature features; STATE=Goa
+# (~600 MW peak) makes every row implausible and misreports "No new demand rows".
+ELEC_STATE_OF_RECORD = "Maharashtra"
+
+
+def require_state_of_record(state):
+    """Enforce single-state invariant for electricity until coordinates/bounds are parameterized."""
+    if state != ELEC_STATE_OF_RECORD:
+        raise RuntimeError(
+            f"STATE={state!r} but this deployment is single-state: only "
+            f"{ELEC_STATE_OF_RECORD!r} can be ingested, published, scored or served "
+            f"until temperature coordinates and plausibility bounds are parameterized. "
+            f"See vericast/__init__.py and vericast/elec/ingest.py."
+        )
+    return state
+
+
 # Physical plausibility limits for target values.
 # Catch unit errors (kW vs GW) or empty/corrupt fields before they enter the record.
 ELEC_MIN_MW, ELEC_MAX_MW = 15_000.0, 40_000.0  # Maharashtra daily peak demand range (MW)
@@ -110,13 +130,17 @@ PIPELINE_LOCKS = {
 }
 
 
-def acquire_pipeline_lock(cur, name):
+def acquire_pipeline_lock(cur, name, *, allow_missing_lock=False):
     """Serialize overlapping pipeline runs on `name` until transaction end.
 
     Uses pg_advisory_xact_lock(), which needs no table and releases automatically
-    on COMMIT/ROLLBACK, so a crashed holder cannot wedge the next run. Best-effort:
-    if the function is unavailable (e.g. a mocked cursor in unit tests), skip
-    silently rather than failing the run the lock exists to protect.
+    on COMMIT/ROLLBACK, so a crashed holder cannot wedge the next run. The lock
+    is mandatory in production: swallowing lock_timeout/permission/driver errors
+    lets overlapping runs proceed unserialized into last-writer-wins upserts.
+
+    Pass `allow_missing_lock=True` only from unit tests whose stub cursor has no
+    real Postgres. Production callers use the default and fail loudly if the
+    lock cannot be acquired.
     """
     if name not in PIPELINE_LOCKS:
         raise KeyError(f"Unknown pipeline lock: {name!r}. "
@@ -124,11 +148,9 @@ def acquire_pipeline_lock(cur, name):
     try:
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (PIPELINE_LOCKS[name],))
     except Exception:
-        # Mocked cursors in unit tests raise here (no real Postgres); real
-        # connection failures surface on the next statement, so swallowing
-        # only the lock call is safe. KeyError above is deliberately NOT
-        # swallowed so a typo can't silently disable serialization.
-        pass
+        if not allow_missing_lock:
+            raise
+        # Test-double path only: a mocked cursor raises here (no real Postgres).
 
 
 def resume_start(last_date, gap_date):

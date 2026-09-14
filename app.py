@@ -20,6 +20,7 @@ from vericast import (
     MODEL_ELEC,
     local_time,
     require_city_of_record,
+    require_state_of_record,
 )
 
 from vericast.artifacts import model_metadata
@@ -37,9 +38,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is not set")
 
-# Validate single-city constraint for PM2.5 (Nagpur).
+# Validate single-city / single-state constraints (Nagpur / Maharashtra).
 CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
-STATE = os.getenv("STATE", "Maharashtra")  # Target #2: regional electricity demand
+STATE = require_state_of_record(os.getenv("STATE", "Maharashtra"))  # Target #2: regional electricity demand
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")
 
 # Neon serverless connection pool (max 8 connections).
@@ -121,7 +122,12 @@ app.add_middleware(
 
 @app.middleware("http")
 async def cache_control(request, call_next):
-    """Cache successful GET responses for 5 minutes (data updates daily)."""
+    """Attach 5-minute Cache-Control headers to successful GETs (data updates daily).
+
+    Headers only — no server-side cache, no ETag. Correct behind a CDN (query
+    strings are in the URL, allow_credentials=False); with no CDN in front every
+    load still hits Postgres. Add a shared cache or CDN for edge caching.
+    """
     response = await call_next(request)
     if request.method == "GET" and response.status_code == 200:
         response.headers["Cache-Control"] = "public, max-age=300"
@@ -159,13 +165,31 @@ def over_rate_limit(key, now):
 
 def client_key(request):
     """Best available caller identity. Render terminates TLS at its proxy, so
-    request.client.host is the proxy and would throttle every caller as one; the
-    leftmost X-Forwarded-For entry is the originating client as that proxy saw it,
-    and is spoofable - see the note above. Truncated to 45 chars (max IPv6) so a
-    crafted header can't bloat the rate-limit dict."""
+    request.client.host is the proxy and would throttle every caller as one.
+    Use the rightmost X-Forwarded-For entry (the hop closest to us, appended by
+    the trusted proxy) rather than the leftmost, which is entirely
+    attacker-controlled and trivially spoofed to rotate identities. Truncated
+    to 45 chars (max IPv6) so a crafted header can't bloat the rate-limit dict.
+    Deployments behind N trusted proxies should take entry -(N+1); with the
+    default single-proxy setup the rightmost entry is the client as the proxy
+    saw it. Set TRUSTED_PROXY_COUNT if you front with additional hops."""
     forwarded = request.headers.get("x-forwarded-for", "")
-    key = forwarded.split(",")[0].strip() or (
-        request.client.host if request.client else "unknown")
+    parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+    if parts:
+        try:
+            hops = int(os.getenv("TRUSTED_PROXY_COUNT", "1"))
+        except ValueError:
+            hops = 1
+        # Rightmost-untrusted: with `hops` trusted proxies appending, the
+        # client IP sits `hops` positions from the right.
+        idx = max(0, len(parts) - max(1, hops))
+        key = parts[idx] if len(parts) > max(1, hops) - 1 else parts[-1]
+        # Fall back to the rightmost entry when the chain is shorter than the
+        # trusted count (e.g. direct local requests with a spoofed single entry).
+        if not key:
+            key = parts[-1]
+    else:
+        key = request.client.host if request.client else "unknown"
     return key[:45] or "unknown"
 
 
@@ -173,10 +197,19 @@ def client_key(request):
 async def rate_limit(request, call_next):
     """Enforce per-client request limits under active lifespan."""
     if _under_lifespan and over_rate_limit(client_key(request), monotonic()):
+        # 429 short-circuits before CORSMiddleware (added earlier, runs later),
+        # so attach the CORS allow-origin header here or cross-origin clients
+        # see a network error with no .status and retry 3x across ~10 endpoints,
+        # amplifying load exactly when shedding. Mirror the configured origins.
+        cors_headers = {"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)}
+        origin = request.headers.get("origin", "")
+        if origin and (not origins or origin in origins):
+            cors_headers["Access-Control-Allow-Origin"] = origin
+            cors_headers["Vary"] = "Origin"
         return JSONResponse(
             status_code=429,
             content={"detail": "Too many requests; slow down and retry shortly."},
-            headers={"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)},
+            headers=cors_headers,
         )
     return await call_next(request)
 
@@ -276,10 +309,14 @@ def serve_dashboard():
 PM25_MODELS = {"lightgbm", "naive_baseline"}
 
 @app.get("/forecast")
-def get_forecast(model: str = "lightgbm", source: str = "daily"):
-    """Latest prediction in one provenance; 'latest' selects daily/nowcast only.
+def get_forecast(model: str = "lightgbm", source: str = "latest"):
+    """Latest live prediction; defaults to newest daily/nowcast row, never backtest.
 
-    Default remains advance-only. Scoring status is separate from timing_status.
+    Default is `latest` (daily/nowcast) because whole-day features(t) are only
+    complete after target midnight, so production issuance is structurally a
+    delayed estimate (`nowcast`). Advance-only callers pass `source=daily`
+    explicitly and treat a 404 as "no advance forecast on record".
+    Scoring status is separate from timing_status.
     """
     provenance_clause = source_filter(source, allow_latest=True)
 
@@ -292,6 +329,11 @@ def get_forecast(model: str = "lightgbm", source: str = "daily"):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
+                # source=latest spans daily+nowcast: prefer the advance row on a
+                # tied date (audit 3.4 — a cutoff-crossing re-run leaves both, and
+                # the headline record is the advance one), newest issuance after.
+                order_extra = (", CASE WHEN source = 'daily' THEN 0 ELSE 1 END"
+                               if source == "latest" else "")
                 cur.execute(
                     f"""
                     SELECT
@@ -305,7 +347,7 @@ def get_forecast(model: str = "lightgbm", source: str = "daily"):
                     WHERE city = %s
                       AND model = %s
                       AND {provenance_clause}
-                    ORDER BY forecast_date DESC, created_at DESC
+                    ORDER BY forecast_date DESC{order_extra}, created_at DESC
                     LIMIT 1
                     """,
                     (CITY, model),
@@ -430,15 +472,13 @@ def _by_provenance(rows, metric_names, descriptions, window_days):
                for name, v in zip(metric_names, metrics)},
         }
 
-    # Sort on the verified MAE, the figure that matters; a model with only backtest
-    # rows falls back to that, one with neither sorts last. inf rather than a tuple:
-    # two Nones would compare None < None.
+    # Sort on the verified MAE only, the figure that matters. A backtest-only
+    # model sorts last (inf) rather than ranking its fitted-after-the-fact MAE
+    # against live verified MAEs — the docstring above promises provenances never
+    # merge, and sort order is part of that promise.
     def key(entry):
-        for bucket in ("verified", "backtest"):
-            mae = entry.get(bucket, {}).get("mae")
-            if mae is not None:
-                return mae
-        return float("inf")
+        mae = entry.get("verified", {}).get("mae")
+        return mae if mae is not None else float("inf")
 
     return sorted(by_model.values(), key=key)
 
@@ -809,7 +849,9 @@ def health():
             return {"status": "no_data", "latest_observation": None, "stale_days": None,
                     "source_lag_expected": None,
                     "detail": f"no observations for {CITY}"}
-        stale_days = (local_time.today() - latest).days
+        # PM2.5 target days are UTC: compare against UTC today, not IST, or
+        # staleness inflates by one day between 00:00–05:30 IST.
+        stale_days = (local_time.today("UTC") - latest).days
         return {"status": "ok", "latest_observation": latest.isoformat(),
                 "stale_days": stale_days,
                 "source_lag_expected": stale_days <= PM25_STALE_LIMIT_DAYS}
@@ -857,7 +899,8 @@ def electricity_health():
             return {"status": "no_data", "state": STATE, "latest_observation": None,
                     "stale_days": None, "source_lag_expected": None,
                     "detail": f"no electricity observations for {STATE}"}
-        stale_days = (local_time.today() - latest).days
+        # Electricity target days are Asia/Kolkata: explicit IST today.
+        stale_days = (local_time.today("Asia/Kolkata") - latest).days
         return {
             "status": "ok",
             "state": STATE,
@@ -871,8 +914,8 @@ def electricity_health():
 
 
 @app.get("/electricity/forecast")
-def get_electricity_forecast(model: str = "lightgbm", source: str = "daily"):
-    """Latest demand prediction; 'latest' includes daily and nowcast, not backtest."""
+def get_electricity_forecast(model: str = "lightgbm", source: str = "latest"):
+    """Latest live demand prediction; defaults to newest daily/nowcast, not backtest."""
     provenance_clause = source_filter(source, allow_latest=True)
     if model not in ELEC_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
@@ -880,13 +923,15 @@ def get_electricity_forecast(model: str = "lightgbm", source: str = "daily"):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
+                order_extra = (", CASE WHEN source = 'daily' THEN 0 ELSE 1 END"
+                               if source == "latest" else "")
                 cur.execute(
                     f"""
                     SELECT forecast_date, predicted_demand_mw, actual_demand_mw,
                            model, created_at, source
                     FROM electricity_predictions
                     WHERE state = %s AND model = %s AND {provenance_clause}
-                    ORDER BY forecast_date DESC, created_at DESC
+                    ORDER BY forecast_date DESC{order_extra}, created_at DESC
                     LIMIT 1
                     """,
                     (STATE, model),

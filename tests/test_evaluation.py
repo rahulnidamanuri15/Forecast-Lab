@@ -221,11 +221,12 @@ def test_evaluation_sorts_unscored_models_last():
 
 
 def test_evaluation_sorts_on_verified_mae():
-    """Ordering follows the verified figure, and a backtest-only model still sorts.
+    """Ordering follows the verified figure only; backtest never ranks.
 
-    The unscored model has to land last rather than raising on None < None, and a
-    model whose only metric is a backtest one falls back to it instead of being
-    treated as unscored.
+    The unscored model has to land last rather than raising on None < None, and
+    a model whose only metric is a backtest one sorts last too instead of
+    ranking its fitted-after-the-fact MAE against live verified MAEs (the
+    provenances never merge — sort order included).
     """
     with patch('app.get_db_connection') as mock_get_db:
         wire_cursor(mock_get_db, [
@@ -239,4 +240,4 @@ def test_evaluation_sorts_on_verified_mae():
 
         assert response.status_code == 200
         assert [e["model"] for e in response.json()["evaluation"]] == [
-            "best", "backtest_only", "worse", "unscored"]
+            "best", "worse", "unscored", "backtest_only"]

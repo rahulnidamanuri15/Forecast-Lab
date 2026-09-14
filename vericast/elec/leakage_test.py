@@ -30,13 +30,13 @@ from datetime import timedelta
 import psycopg
 from dotenv import load_dotenv
 
-from vericast import require_database_url
+from vericast import require_database_url, require_state_of_record
 from vericast.elec.features import COOLING_BASE
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-STATE = os.getenv("STATE", "Maharashtra")
+STATE = require_state_of_record(os.getenv("STATE", "Maharashtra"))
 
 TOLERANCE = 1e-9
 

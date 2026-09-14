@@ -21,6 +21,7 @@ from vericast import (
     refuse_implausible,
     refuse_stale,
     require_database_url,
+    require_state_of_record,
     send_alert,
 )
 from vericast.elec.train import FEATURE_COLUMNS
@@ -30,7 +31,7 @@ from vericast.publication import publish_predictions
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-STATE = os.getenv("STATE", "Maharashtra")
+STATE = require_state_of_record(os.getenv("STATE", "Maharashtra"))
 
 UNIT = "MW"
 
@@ -79,7 +80,8 @@ def make_daily_prediction():
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
         acquire_pipeline_lock(cur, "elec_predict")
 
-        today = local_time.today()
+        # Electricity target days are Asia/Kolkata.
+        today = local_time.today("Asia/Kolkata")
         yesterday = today - timedelta(days=1)
 
         cur.execute("""

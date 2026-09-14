@@ -724,7 +724,7 @@
     <!-- ==================== PM2.5 PANEL ==================== -->
     <div id="panel-pm25">
       <div class="error-banner" id="pm25-error" role="alert" hidden></div>
-      <section class="panel" id="pm25-nowcast-section" style="display:none" aria-labelledby="pm25-nowcast-title">
+      <section class="panel" id="pm25-nowcast-section" aria-labelledby="pm25-nowcast-title">
         <h2 id="pm25-nowcast-title">Nowcasts / delayed estimates</h2>
         <p class="panel-subtitle">Issued at or after target-day midnight. Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
         <p id="pm25-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
@@ -986,7 +986,7 @@
       <!-- ==================== ELECTRICITY PANEL ==================== -->
       <div id="panel-electricity" hidden>
         <div class="error-banner" id="el-error" role="alert" hidden></div>
-        <section class="panel" id="el-nowcast-section" style="display:none" aria-labelledby="el-nowcast-title">
+        <section class="panel" id="el-nowcast-section" aria-labelledby="el-nowcast-title">
           <h2 id="el-nowcast-title">Nowcasts / delayed estimates</h2>
           <p class="panel-subtitle">Issued at or after target-day midnight (Asia/Kolkata). Model horizon remains features(t) → target(t+1); these are not advance forecasts.</p>
           <p id="el-nowcast-latest" class="forecast-change">Loading delayed estimates…</p>
@@ -1329,7 +1329,10 @@
     }
 
     function publishedOnly(payload) {
-      return ((payload && payload.predictions) || []).filter(r => r.source === 'verified');
+      // Allowlist advance rows with consistent issuance only: unknown-issuance
+      // rows (provenance_consistent === false) flow into the ledger otherwise
+      // under the heading "logged before actual outcomes were known".
+      return ((payload && payload.predictions) || []).filter(r => r.source === 'verified' && r.provenance_consistent !== false);
     }
 
     function emptyHistoryRow(tbodyId) {
@@ -1501,7 +1504,7 @@
       try {
         const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
           fetchJSON('/health').catch(() => null),
-          fetchJSON('/forecast?model=lightgbm').catch(emptyOrUnavailable),
+          fetchJSON('/forecast?model=lightgbm&source=daily').catch(emptyOrUnavailable),
           fetchJSON('/history?days=30').catch(() => null),
           fetchJSON('/evaluation').catch(() => null),
           fetchJSON('/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
@@ -1572,7 +1575,10 @@
             document.getElementById('metric-lgb-rmse').textContent = fmt(lgb.rmse, 2);
             document.getElementById('bar-lgb-val').textContent = fmt(lgb.mae, 2);
             document.getElementById('kpi-record-val').textContent = lgb.scored_count;
-            document.getElementById('metric-total-scored').textContent = lgb.scored_count;
+            // metric-total-scored is NOT set here: it belongs to the reliability
+            // ring below, which scores the /predictions?limit=15 window — setting
+            // it from the full-record evaluation put a full-record denominator
+            // next to a last-15 ring.
 
             const bt = lgb.backtest;
             document.getElementById('kpi-mae-val').title =
@@ -1656,6 +1662,9 @@
             document.getElementById('metric-within-5').textContent = `${withinPct}%`;
             document.getElementById('metric-within-5-name').textContent =
               `Within ±5 μg/m³ (last ${totalScored} scored)`;
+            // Total Scored shares the ring's window (last-N ledger rows), not the
+            // full-record /evaluation denominator.
+            document.getElementById('metric-total-scored').textContent = totalScored;
 
             document.getElementById('pm25-ring-pct').textContent = `${withinPct}%`;
             const circumference = 2 * Math.PI * 49;
@@ -1818,7 +1827,7 @@
 
         const [health, forecast, history, evaluation, predictions, leaderboard] = await Promise.all([
           fetchJSON('/electricity/health').catch(() => null),
-          fetchJSON('/electricity/forecast?model=lightgbm').catch(emptyOrUnavailable),
+          fetchJSON('/electricity/forecast?model=lightgbm&source=daily').catch(emptyOrUnavailable),
           fetchJSON('/electricity/history?days=30').catch(() => null),
           fetchJSON('/electricity/evaluation').catch(() => null),
           fetchJSON('/electricity/predictions?model=lightgbm&limit=15&source=daily').catch(() => null),
@@ -1886,7 +1895,8 @@
             pill.className = `category-pill ${band.cls}`;
 
             document.getElementById('el-kpi-record-val').textContent = lgb.scored_count;
-            document.getElementById('el-metric-total-scored').textContent = lgb.scored_count;
+            // el-metric-total-scored belongs to the ring window below, not the
+            // full-record evaluation (see PM2.5 panel).
             document.getElementById('el-metric-lgb-mae').textContent = fmt(lgb.mae, 0);
             document.getElementById('el-metric-lgb-rmse').textContent = fmt(lgb.rmse, 0);
 
@@ -1969,6 +1979,7 @@
             document.getElementById('el-metric-within-3').textContent = `${withinPct}%`;
             document.getElementById('el-metric-within-3-name').textContent =
               `Within ±3% (last ${totalScored} scored)`;
+            document.getElementById('el-metric-total-scored').textContent = totalScored;
             document.getElementById('el-acc-big-num').innerHTML =
               `${(accSum / totalScored).toFixed(1)}% <span>last ${totalScored} scored</span>`;
 

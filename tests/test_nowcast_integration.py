@@ -184,7 +184,7 @@ def test_delayed_pipeline_scoring_and_api_are_isolated(isolated_db, monkeypatch,
     assert payload["provenance_consistent"] is True
     assert payload["feature_as_of"] == as_of.isoformat()
     assert payload["horizon_days"] == 1
-    assert client.get(f"{base}/forecast?model=naive_baseline").json()["source"] == "verified"
+    assert client.get(f"{base}/forecast?model=naive_baseline&source=daily").json()["source"] == "verified"
     for source, alias, mae in (("daily", "verified", 9), ("nowcast", "nowcast", 1)):
         response = client.get(f"{base}/leaderboard?source={source}")
         assert response.status_code == 200

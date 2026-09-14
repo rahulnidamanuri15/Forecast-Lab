@@ -26,6 +26,7 @@ from vericast import (
     MODEL_ELEC as MODEL_PATH,
     local_time,
     require_database_url,
+    require_state_of_record,
     send_alert,
 )
 from vericast.elec.train import FEATURE_COLUMNS
@@ -34,7 +35,7 @@ from vericast.publication import publication_timing
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-STATE = os.getenv("STATE", "Maharashtra")
+STATE = require_state_of_record(os.getenv("STATE", "Maharashtra"))
 
 # Shared with elec/ingest.py's gate on the incoming observation, so the publish gate
 # cannot drift looser than the ingest one. When this file owned a second copy,
