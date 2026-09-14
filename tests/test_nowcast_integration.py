@@ -128,7 +128,7 @@ def test_delayed_pipeline_scoring_and_api_are_isolated(isolated_db, monkeypatch,
     as_of = today - timedelta(days=lag)
     target = as_of + timedelta(days=1)
     issued_at = datetime(2030, 1, 10, 12, tzinfo=timezone.utc)
-    monkeypatch.setattr(predict.local_time, "today", lambda: today)
+    monkeypatch.setattr(predict.local_time, "today", lambda *a, **kw: today)
     clock = type("Clock", (), {"now": staticmethod(lambda tz: issued_at),
                                "combine": staticmethod(datetime.combine)})
     monkeypatch.setattr(publication, "datetime", clock)
