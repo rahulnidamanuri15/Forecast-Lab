@@ -51,7 +51,7 @@ jobs:
         timeout-minutes: 10
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.lock
 
       - name: Retrain production model
         timeout-minutes: 20

@@ -214,12 +214,13 @@ def test_predictions_endpoint_no_data():
 @pytest.mark.parametrize("path", ["/predictions", "/electricity/predictions"])
 def test_a_filtered_log_answers_200_with_an_empty_list(path):
     with patch('app.get_db_connection') as mock_get_db:
-        wire_cursor(mock_get_db, rows=[])
+        mock_cursor = wire_cursor(mock_get_db, rows=[])
+        mock_cursor.fetchone.return_value = (0,)
 
         response = client.get(f"{path}?model=lightgbm&limit=5&source=daily")
 
         assert response.status_code == 200
-        assert response.json() == {"predictions": [], "count": 0}
+        assert response.json() == {"predictions": [], "count": 0, "total": 0}
 
 
 @pytest.mark.parametrize("path", [

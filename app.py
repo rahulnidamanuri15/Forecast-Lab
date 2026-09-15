@@ -7,11 +7,12 @@ from time import monotonic
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 from psycopg_pool import ConnectionPool
 from dotenv import load_dotenv
-from typing import Optional
+from typing import Any, Optional
 
 from vericast import (
     ELEC_STALE_LIMIT_DAYS,
@@ -34,9 +35,17 @@ load_dotenv()
 # its records carry the level and timestamp the log viewer filters on.
 log = logging.getLogger("vericast.api")
 
+# Read lazily via get_database_url() so `import app` works for tooling/tests
+# without a live DSN; request paths and lifespan fail fast with a clear error.
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL environment variable is not set")
+
+
+def get_database_url() -> str:
+    """Return the configured DSN or raise the actionable error."""
+    url = DATABASE_URL or os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("DATABASE_URL environment variable is not set")
+    return url
 
 # Validate single-city / single-state constraints (Nagpur / Maharashtra).
 CITY = require_city_of_record(os.getenv("CITY", "Nagpur"))
@@ -53,15 +62,16 @@ async def lifespan(_app: FastAPI):
     global _pool, _under_lifespan
     _under_lifespan = True
     try:
+        database_url = get_database_url()
         # Preserve DSN options (notably search_path) so pooled API reads use
         # the same schema as workers. Enforce the timeout last.
         try:
-            base_options = (conninfo_to_dict(DATABASE_URL).get("options", "") or "").strip()
+            base_options = (conninfo_to_dict(database_url).get("options", "") or "").strip()
         except Exception:
             base_options = ""
         pool_options = f"{base_options} -c statement_timeout=10000".strip() if base_options else "-c statement_timeout=10000"
         _pool = ConnectionPool(
-            DATABASE_URL,
+            database_url,
             min_size=1,
             max_size=8,
             timeout=10,                              # wait for a free slot, then fail
@@ -102,7 +112,7 @@ app = FastAPI(
         f"Read-only t+1 prediction record with separate advance forecasts, delayed "
         f"estimates, and backtests: {CITY} PM2.5 (ug/m3) and {STATE} peak demand met (MW)."
     ),
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -221,13 +231,23 @@ def get_db_connection():
     if _under_lifespan:
         log.error("connection pool is absent under the lifespan")
         raise HTTPException(status_code=503, detail="Service unavailable")
-    return psycopg.connect(DATABASE_URL)
+    # Direct path (tests / scripts): same 10s statement timeout as the pool.
+    return psycopg.connect(get_database_url(), options="-c statement_timeout=10000")
 
 
 def db_error(exc: Exception) -> HTTPException:
     """Log exception details and return sanitized 500 HTTPException."""
     log.exception("db error on request: %s", type(exc).__name__)
     return HTTPException(status_code=500, detail="Internal server error")
+
+
+# Pydantic response shapes for the queryable logs. List endpoints return
+# `predictions` (this page) plus `count` (this page) and `total` (all rows
+# matching the filters, ignoring limit/offset) so clients can paginate.
+class PredictionPage(BaseModel):
+    predictions: list[dict[str, Any]]
+    count: int
+    total: int
 
 @app.get("/")
 async def root():
@@ -314,8 +334,10 @@ def get_forecast(model: str = "lightgbm", source: str = "latest"):
 
     Default is `latest` (daily/nowcast) because whole-day features(t) are only
     complete after target midnight, so production issuance is structurally a
-    delayed estimate (`nowcast`). Advance-only callers pass `source=daily`
-    explicitly and treat a 404 as "no advance forecast on record".
+    delayed estimate (`nowcast`). `latest` returns the newest issuance by
+    `(forecast_date, created_at)` — it does not prefer `daily` on tied dates.
+    Advance-only callers pass `source=daily` explicitly and treat a 404 as
+    "no advance forecast on record".
     Scoring status is separate from timing_status.
     """
     provenance_clause = source_filter(source, allow_latest=True)
@@ -541,7 +563,7 @@ def get_leaderboard(source: str = "daily"):
         raise db_error(e)
 
 
-@app.get("/predictions")
+@app.get("/predictions", response_model=PredictionPage)
 def get_predictions(
     model: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
@@ -573,8 +595,8 @@ def get_predictions(
     so "nothing matches model=X, source=Y, scored_only=Z" is an answer about the
     filter the caller composed. /forecast, /history, /leaderboard and /evaluation
     each return *the* record, where absence means the pipeline has not produced
-    one yet - a fault worth a status code. `count` reports the same emptiness
-    without making every caller special-case a status.
+    one yet - a fault worth a status code. `count` is this page, `total` is all
+    rows matching the filters ignoring limit/offset.
     """
     if model is not None and model not in PM25_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
@@ -628,7 +650,14 @@ def get_predictions(
 
                 # Safe parameterized query with allowlisted clauses
                 where_clause = " AND ".join(clauses)
+                count_params = list(params)
                 params.extend([limit, offset])
+
+                cur.execute(f"""
+                    SELECT COUNT(*) FROM predictions WHERE {where_clause}
+                """, count_params)
+                total_row = cur.fetchone()
+                total = int(total_row[0]) if total_row else 0
 
                 cur.execute(f"""
                     SELECT forecast_date, model, predicted_pm2_5, actual_pm2_5, created_at, source
@@ -672,6 +701,7 @@ def get_predictions(
         return {
             "predictions": predictions,
             "count": len(predictions),
+            "total": total,
         }
     except HTTPException:
         raise
@@ -910,7 +940,7 @@ def electricity_health():
 
 @app.get("/electricity/forecast")
 def get_electricity_forecast(model: str = "lightgbm", source: str = "latest"):
-    """Latest live demand prediction; defaults to newest daily/nowcast, not backtest."""
+    """Latest live demand prediction; `latest` is newest daily/nowcast issuance, not backtest."""
     provenance_clause = source_filter(source, allow_latest=True)
     if model not in ELEC_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
@@ -957,7 +987,7 @@ def get_electricity_forecast(model: str = "lightgbm", source: str = "latest"):
         raise db_error(exc)
 
 
-@app.get("/electricity/predictions")
+@app.get("/electricity/predictions", response_model=PredictionPage)
 def get_electricity_predictions(
     model: Optional[str] = None,
     limit: int = Query(50, ge=1, le=500),
@@ -985,6 +1015,7 @@ def get_electricity_predictions(
     two and post-filtering a payload would keep only a fraction of it.
 
     No rows is 200 with an empty list, for the reason /predictions gives.
+    `count` is this page, `total` is all rows matching the filters.
     """
     if model is not None and model not in ELEC_MODELS:
         raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
@@ -1035,7 +1066,14 @@ def get_electricity_predictions(
 
                 # Safe parameterized query with allowlisted clauses
                 where_clause = " AND ".join(clauses)
+                count_params = list(params)
                 params.extend([limit, offset])
+
+                cur.execute(f"""
+                    SELECT COUNT(*) FROM electricity_predictions WHERE {where_clause}
+                """, count_params)
+                total_row = cur.fetchone()
+                total = int(total_row[0]) if total_row else 0
 
                 cur.execute(f"""
                     SELECT forecast_date, model, predicted_demand_mw,
@@ -1072,7 +1110,7 @@ def get_electricity_predictions(
                 **timing_payload(forecast_date, created_at, row_source, "Asia/Kolkata"),
             })
 
-        return {"predictions": predictions, "count": len(predictions)}
+        return {"predictions": predictions, "count": len(predictions), "total": total}
     except HTTPException:
         raise
     except Exception as e:

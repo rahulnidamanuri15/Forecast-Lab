@@ -52,10 +52,10 @@ jobs:
           python-version-file: .python-version
           cache: pip
 
-      # requirements.txt alone: the gate imports httpx and psycopg, both of which
-      # are production deps. It needs no test runner.
+      # requirements.lock: the gate imports httpx and psycopg, pinned to the same
+      # tree CI tested so gate results match what CI verified.
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.lock
 
       # Render free tier sleeps after 15 minutes idle and answers the first
       # request with a cold start, which outlasts the gate's 10s httpx timeout and

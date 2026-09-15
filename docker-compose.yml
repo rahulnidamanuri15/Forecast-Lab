@@ -1,0 +1,39 @@
+# Local development stack: API + throwaway Postgres 17 (matches CI service).
+# Usage:
+#   docker compose up --build
+#   # API on http://localhost:8000, DB on 127.0.0.1:5432
+#   python -m vericast.schema
+#   python -m pytest tests -q
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: vericast
+      POSTGRES_PASSWORD: vericast
+      POSTGRES_DB: vericast
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vericast"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://vericast:vericast@db:5432/vericast
+      CITY: Nagpur
+      STATE: Maharashtra
+      FRONTEND_ORIGIN: http://localhost:8000
+      PORT: 8000
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:

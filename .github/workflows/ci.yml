@@ -54,14 +54,14 @@ jobs:
           # digest-pinned base image is the one independent copy; Dependabot bumps it.
           python-version-file: .python-version
           cache: pip
-      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pip install -r requirements.lock
 
       # Idempotent CREATE TABLE IF NOT EXISTS for all eight tables.
       - run: python -m vericast.schema
 
       # Repeat migrations to catch non-idempotent changes before production rollout.
       - run: python -m vericast.schema
-      - run: python -m pytest tests -q -ra --cov=vericast --cov=app --cov-report=term-missing --cov-fail-under=60
+      - run: python -m pytest tests -q -ra --cov=vericast --cov=app --cov-report=term-missing --cov-fail-under=70
       - run: node --test tests/dashboard_nowcasts.test.cjs
 
       - name: Build Docker image (so CI proves what ships)

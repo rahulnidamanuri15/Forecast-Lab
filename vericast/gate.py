@@ -2,7 +2,7 @@
 
 Evaluates a challenger model trained on the training head against a 30-day holdout block.
 Rejects degraded or broken models using three calibrated criteria:
-  1. MAE vs persistence baseline <= 0.99x (at least 1% improvement).
+  1. MAE vs persistence baseline <= 0.95x (at least 5% improvement).
   2. Prediction spread >= 0.2x of actuals spread (rejects constant/collapsed predictions).
   3. Pearson correlation r > 0.0 with actuals (rejects sign-inverted predictions).
 
@@ -19,8 +19,10 @@ from vericast.artifacts import load_model, model_exists, read_bundle, save_bundl
 HOLDOUT_DAYS = 30
 MIN_TRAIN_ROWS = 60      # below this a 30-day holdout leaves too little to fit
 
-# Production promotion requires at least 1% improvement over persistence.
-MAX_BASELINE_RATIO = 0.99
+# Production promotion requires at least 5% improvement over persistence.
+# 1% promoted noise on 30-day holdouts; 0.95 keeps the honest-fit margin
+# (synthetic 0.20x, live PM2.5 0.86x, elec 0.79x) while rejecting near-ties.
+MAX_BASELINE_RATIO = 0.95
 MIN_SPREAD_FRACTION = 0.2    # Standard deviation of predictions must be >= 20% of actuals std dev
 MIN_CORRELATION = 0.0        # Pearson correlation between predictions and actuals must be positive
 

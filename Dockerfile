@@ -14,7 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
 
 COPY requirements.txt .
 # Production deps only: .dockerignore excludes tests/, so pytest would have
-# nothing to run here.
+# nothing to run here. CI/daily/weekly install requirements.lock (same pins +
+# transitive tree); the image installs requirements.txt to avoid shipping the
+# dev test runner. Direct pins match the lock — keep them in sync via
+# `pip freeze` after any dependency change.
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
@@ -42,4 +45,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ['PORT']+'/health',timeout=4).status==200 else 1)" \
     || exit 1
 
-CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+# Single worker: the in-memory rate limiter (app.py) is per-process, so
+# --workers 1 keeps 120 req/min per IP exact. Scale with Redis or a CDN
+# rate limit before raising this.
+CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port ${PORT} --workers 1"]

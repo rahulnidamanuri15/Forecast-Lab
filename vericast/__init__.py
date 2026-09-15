@@ -89,6 +89,9 @@ def require_state_of_record(state):
 
 # Physical plausibility limits for target values.
 # Catch unit errors (kW vs GW) or empty/corrupt fields before they enter the record.
+# PM25_MIN is 1.0, not 0.0, by design: 0.0 means an empty field upstream, not clean
+# air (see test_a_pm25_unit_change_or_sentinel_is_rejected). Observed daily means
+# 2023-2026 span 4-160, so 1.0 leaves headroom without accepting sentinels.
 ELEC_MIN_MW, ELEC_MAX_MW = 15_000.0, 40_000.0  # Maharashtra daily peak demand range (MW)
 PM25_MIN, PM25_MAX = 1.0, 500.0                # Nagpur daily mean PM2.5 range (ug/m3)
 
