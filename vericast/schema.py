@@ -239,8 +239,9 @@ MIGRATIONS = (
     # the cutoff therefore inserts a second row rather than conflicting. The
     # fix is at read time, not with a forbidding index: /evaluation never
     # merges provenances (separate verified/nowcast/backtest blocks, sorted on
-    # verified MAE only) and /forecast?source=latest prefers daily for a tied
-    # date (see app.py). No partial unique index is created here on purpose.
+    # verified MAE only) and /forecast?source=latest returns the newest issuance
+    # by (forecast_date, created_at), never preferring daily on tied dates
+    # (see app.py). No partial unique index is created here on purpose.
 )
 
 

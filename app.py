@@ -232,7 +232,15 @@ def get_db_connection():
         log.error("connection pool is absent under the lifespan")
         raise HTTPException(status_code=503, detail="Service unavailable")
     # Direct path (tests / scripts): same 10s statement timeout as the pool.
-    return psycopg.connect(get_database_url(), options="-c statement_timeout=10000")
+    # Preserve DSN options (notably search_path) so isolated-DB tests read the
+    # same schema as workers; enforce the timeout last, mirroring lifespan().
+    database_url = get_database_url()
+    try:
+        base_options = (conninfo_to_dict(database_url).get("options", "") or "").strip()
+    except Exception:
+        base_options = ""
+    pool_options = f"{base_options} -c statement_timeout=10000".strip() if base_options else "-c statement_timeout=10000"
+    return psycopg.connect(database_url, options=pool_options)
 
 
 def db_error(exc: Exception) -> HTTPException:
