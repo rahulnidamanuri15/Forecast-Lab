@@ -294,6 +294,37 @@ def migrate_backtest_labels(cur):
     cur.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
 
 
+def reconcile_backtest_predictions(cur):
+    """Reconcile legacy pre-cutoff prediction rows with a fresh migration version.
+
+    Ensures pre-cutoff prediction rows matching backtest evaluation records are labelled
+    source='backtest' even on databases where 2026-08-backtest-source-labels was
+    recorded before this table update was applied.
+    """
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    version = "2026-10-backtest-prediction-reconcile"
+    cur.execute("SELECT 1 FROM schema_migrations WHERE version = %s", (version,))
+    if cur.fetchone():
+        return
+    cur.execute(
+        "UPDATE predictions SET source = 'backtest' "
+        "WHERE source = 'daily' AND forecast_date <= "
+        "(SELECT MAX(score_date) FROM model_performance WHERE source = 'backtest') "
+        f"AND created_at < '{MIGRATION_CUTOFF}';")
+    cur.execute(
+        "UPDATE electricity_predictions p SET source = 'backtest' "
+        "WHERE p.source = 'daily' AND p.forecast_date <= "
+        "(SELECT MAX(score_date) FROM electricity_model_performance "
+        " WHERE source = 'backtest' AND state = p.state) "
+        f"AND p.created_at < '{MIGRATION_CUTOFF}';")
+    cur.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
+
+
 def migrate_nowcasts(cur):
     """One-time provenance correction and source-aware keys, in the DDL transaction.
 
@@ -392,6 +423,7 @@ def create_tables():
                 cur.execute(sql)
                 print(f"[OK] {sql[:58]}... ({cur.rowcount} rows)")
             migrate_backtest_labels(cur)
+            reconcile_backtest_predictions(cur)
             migrate_nowcasts(cur)
             conn.commit()
 

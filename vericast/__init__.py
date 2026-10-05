@@ -18,9 +18,9 @@ MODEL_ELEC = str(ROOT / "models" / "lightgbm_elec_model.txt")
 
 # Upstream staleness thresholds (days).
 # PM2.5 (Open-Meteo) updates daily (limit: 2 days).
-# Electricity (Grid-Sentinel) lags real-time by 2-4 days (limit: 5 days).
+# Electricity (Grid-Sentinel) lags real-time by 2-4 days (limit: 7 days to accommodate weekends/holidays).
 PM25_STALE_LIMIT_DAYS = 2
-ELEC_STALE_LIMIT_DAYS = 5
+ELEC_STALE_LIMIT_DAYS = 7
 
 
 def require_database_url(url=None):
