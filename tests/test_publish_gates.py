@@ -23,8 +23,10 @@ import pytest
 from vericast import (
     ELEC_MAX_MW,
     ELEC_MIN_MW,
+    ELEC_STALE_LIMIT_DAYS,
     PM25_MAX,
     PM25_MIN,
+    PM25_STALE_LIMIT_DAYS,
     local_time,
     refuse_implausible,
 )
@@ -96,7 +98,7 @@ def test_a_stalled_pm25_source_publishes_nothing_at_all():
     forecast_date is latest_obs + 1 day: a source three days behind produces a
     forecast that is internally consistent and quietly three days out of date.
     """
-    stalled = local_time.today() - timedelta(days=3)
+    stalled = local_time.today() - timedelta(days=PM25_STALE_LIMIT_DAYS + 1)
 
     with patch("psycopg.connect") as mock_connect, \
          patch.object(pm25_predict, "load_lightgbm_model", return_value=None):
@@ -129,8 +131,8 @@ def test_an_out_of_range_elec_feature_is_not_published():
 
 
 def test_a_stalled_elec_source_publishes_nothing_at_all():
-    """2-4 days behind is this mirror's normal state; past 5 it has stalled."""
-    stalled = local_time.today() - timedelta(days=6)
+    """2-4 days behind is this mirror's normal state; past limit it has stalled."""
+    stalled = local_time.today() - timedelta(days=ELEC_STALE_LIMIT_DAYS + 1)
 
     with patch("psycopg.connect") as mock_connect, \
          patch.object(elec_predict, "load_lightgbm_model", return_value=None):

@@ -258,7 +258,7 @@ Artifacts: `models/lightgbm_model.txt.bundle.json` and `models/lightgbm_elec_mod
 - Horizon is strictly `features(t) → target(t+1)`. Values and issuance timestamps are immutable; actuals/errors update on upstream revisions.
 - PM2.5 target days are **UTC**; electricity days are **Asia/Kolkata**.
 - Whole-day `features(t)` complete only after day `t` ends, so live output is structurally a **delayed estimate** (`nowcast`) more often than an advance forecast. This is expected, not a failure.
-- Electricity upstream lags 2–4 days normally (`ELEC_STALE_LIMIT_DAYS=5`); PM2.5 limit is 2 days. `stale_days` of 2–4 on electricity is healthy.
+- Electricity upstream lags 2–4 days normally (`ELEC_STALE_LIMIT_DAYS=7` to accommodate weekends/holidays); PM2.5 limit is 2 days. `stale_days` of 2–4 on electricity is healthy.
 - `0.0` PM2.5 is rejected as an empty-field sentinel, not clean air. Bounds `1–500 μg/m³` and `15,000–40,000 MW` catch unit changes (mg/m³, kW/GW) before they enter the scored record.
 - Longer horizons need separate training + backtesting; this release does not attempt them.
 
