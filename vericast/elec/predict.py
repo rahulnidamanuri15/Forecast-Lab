@@ -101,8 +101,22 @@ def make_daily_prediction():
 
         # Raises past the limit, before anything is published. 2-4 days is the
         # normal lag for this mirror, so only past ELEC_STALE_LIMIT_DAYS has it
-        # actually stalled.
-        stale_days = refuse_stale(as_of, today, ELEC_STALE_LIMIT_DAYS, "electricity")
+        # actually stalled. The chained note names the recovery path because the
+        # bare "has stalled" error otherwise reads as an ingest bug: ingest is
+        # usually already at the mirror head and there is simply nothing newer
+        # to anchor to. Do NOT raise ELEC_STALE_LIMIT_DAYS to silence this -
+        # that would publish a forecast anchored N days back as if it were for
+        # tomorrow. The run auto-backfills up to RESCAN_DAYS once the mirror
+        # resumes.
+        try:
+            stale_days = refuse_stale(as_of, today, ELEC_STALE_LIMIT_DAYS, "electricity")
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{exc} Check the mirror head at the DEMAND_CSV_URL in "
+                f"vericast/elec/ingest.py: if the 1/6 ingest step reported no "
+                f"new demand rows, the mirror itself has stalled and re-running "
+                f"ingest cannot help until it resumes."
+            ) from exc
         if as_of != yesterday:
             print(f"[WARN] Most recent observation is from {as_of}, {stale_days} "
                   f"day(s) old (expected data through {yesterday}; normal lag for "

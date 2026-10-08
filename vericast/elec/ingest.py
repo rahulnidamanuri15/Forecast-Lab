@@ -29,6 +29,7 @@ from vericast import (
     ACTUAL_TOLERANCE,
     ELEC_MAX_MW,
     ELEC_MIN_MW,
+    ELEC_STALE_LIMIT_DAYS,
     RESCAN_DAYS,
     acquire_pipeline_lock,
     local_time,
@@ -464,6 +465,16 @@ def main():
         # frequently no new demand row even though the date range is non-empty.
         print(f"No new {STATE} demand rows in range (mirror lags real time by "
               f"a few days); nothing to insert.")
+        # Name the range and the consequence: a "no new rows" day is routine,
+        # but a run of them means the mirror itself has stalled, and past
+        # ELEC_STALE_LIMIT_DAYS vericast/elec/predict.py refuses to publish
+        # rather than anchor a forecast to stale data. Surfacing that here -
+        # at the 1/6 step - beats discovering it at the 5/6 crash.
+        print(f"  Queried {start_date} -> {end_date} at {DEMAND_CSV_URL}. If no "
+              f"new rows persist for more than "
+              f"ELEC_STALE_LIMIT_DAYS={ELEC_STALE_LIMIT_DAYS} days, the mirror "
+              f"has stalled upstream; the RESCAN_DAYS re-scan backfills "
+              f"automatically once it resumes.")
         return
 
     temps = fetch_temperature(start_date, end_date)
