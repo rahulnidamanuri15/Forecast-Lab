@@ -115,7 +115,12 @@ def make_daily_prediction():
                 f"{exc} Check the mirror head at the DEMAND_CSV_URL in "
                 f"vericast/elec/ingest.py: if the 1/6 ingest step reported no "
                 f"new demand rows, the mirror itself has stalled and re-running "
-                f"ingest cannot help until it resumes."
+                f"ingest cannot help until it resumes. To unblock, backfill the "
+                f"missing days from the official NLDC PSP reports with "
+                f"python -m vericast.elec.backfill DATE:MW [...], then run "
+                f"features, leakage_test, score, predict, diagnose. Do not "
+                f"estimate or carry values forward, and do not raise "
+                f"ELEC_STALE_LIMIT_DAYS to silence this."
             ) from exc
         if as_of != yesterday:
             print(f"[WARN] Most recent observation is from {as_of}, {stale_days} "

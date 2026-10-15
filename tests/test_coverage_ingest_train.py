@@ -294,17 +294,29 @@ def test_elec_main_branches():
         ei.main()  # nothing to fetch
     with patch.object(ei, "resolve_date_range",
                       return_value=(date(2026, 8, 1), date(2026, 8, 5))), \
-         patch.object(ei, "fetch_demand", return_value={}):
-        ei.main()  # mirror lag, no demand
+         patch.object(ei, "fetch_demand", return_value={}), \
+         patch.object(ei, "fetch_nldc_demand", return_value={}):
+        ei.main()  # mirror lag, no demand (NLDC also empty)
+    with patch.object(ei, "resolve_date_range",
+                      return_value=(date(2026, 8, 1), date(2026, 8, 5))), \
+         patch.object(ei, "fetch_demand", return_value={}), \
+         patch.object(ei, "fetch_nldc_demand",
+                      side_effect=RuntimeError("api down")):
+        ei.main()  # gap-fill crash must never fail ingest
     with patch.object(ei, "resolve_date_range",
                       return_value=(date(2026, 8, 1), date(2026, 8, 2))), \
          patch.object(ei, "fetch_demand",
                       return_value={"2026-08-01": (25000.0, 500.0)}), \
+         patch.object(ei, "fetch_nldc_demand",
+                      return_value={"2026-08-02": (26000.0, 510.0)}), \
          patch.object(ei, "fetch_temperature",
-                      return_value={"2026-08-01": (30.0, 35.0)}), \
+                      return_value={"2026-08-01": (30.0, 35.0),
+                                    "2026-08-02": (31.0, 36.0)}), \
          patch.object(ei, "insert_observations") as ins:
         ei.main()
         ins.assert_called_once()
+        (records,), _ = ins.call_args
+        assert [r[1] for r in records] == ["2026-08-01", "2026-08-02"]
 
 
 # ------------------------------------------------------- pm25 ingest

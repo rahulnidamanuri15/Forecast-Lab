@@ -1,17 +1,22 @@
 """Ingest daily Maharashtra peak electricity demand + regional temperature.
 
-Source: the Grid-Sentinel community mirror of Grid-India/NLDC daily PSP reports,
-as an already-parsed CSV. Grid-India's own report.grid-india.in endpoints are
-unreachable from CI (HTTP 000 on every probe) and would need pandas + openpyxl +
-pdfplumber to read - three dependencies this repo deliberately dropped. The
-mirror is stdlib `csv` over the already-installed httpx: zero new dependencies.
+Sources, in order:
+1. The Grid-Sentinel community mirror of Grid-India/NLDC daily PSP reports,
+   as an already-parsed CSV (stdlib `csv` over the already-installed httpx).
+2. Official NLDC gap-fill: dates the mirror lacks are retried against
+   Grid-India's own daily PSP reports (webapi.grid-india.in index +
+   webcdn.grid-india.in .xls, parsed with xlrd) before giving up.
 
-The tradeoff, stated plainly because the accuracy record depends on it: this is
-a third-party mirror, not the operator. It runs 2-4 days behind real time and
-skips the occasional day, so `stale_days` of 2-4 is NORMAL here (unlike PM2.5,
-where Open-Meteo has yesterday by 05:00 UTC). Upgrade path: if Grid-India ever
-exposes a reachable machine-readable endpoint, fetch_demand() below is the only
-function that needs to change.
+Grid-India's old report.grid-india.in host is unreachable from CI (HTTP 000),
+but the webapp API + CDN behind grid-india.in are not - verified 2026-10-15,
+when 7/7 NLDC values were byte-identical to mirror/DB rows for 2026-09-29..10-05.
+
+The tradeoff, stated plainly because the accuracy record depends on it: source
+1 is a third-party mirror, not the operator. It runs 2-4 days behind real time
+and skips the occasional day, so `stale_days` of 2-4 is NORMAL here (unlike
+PM2.5, where Open-Meteo has yesterday by 05:00 UTC). Source 2 is the operator
+itself and is current through yesterday, so a mirror stall no longer blocks
+the pipeline - at most NLDC_MAX_DAYS_PER_RUN gap days per run.
 """
 import os
 import time
@@ -20,6 +25,7 @@ import hashlib
 import io
 import math
 import random
+import re
 import httpx
 import psycopg
 from datetime import datetime, timedelta
@@ -36,6 +42,7 @@ from vericast import (
     require_database_url,
     require_state_of_record,
     resume_start,
+    send_alert,
 )
 
 load_dotenv()
@@ -48,6 +55,44 @@ DEMAND_CSV_URL = (
     "https://raw.githubusercontent.com/HalcyonVector/Grid-Sentinel/main/"
     "Dataset/study3_states.csv"
 )
+
+# Transport mirrors for the SAME file above, via independent CDNs.
+# If raw.githubusercontent.com has a CDN outage, jsDelivr/githack serve the
+# identical GitHub blob - fetch_demand() tries each in order with the same
+# guards, so a transport failure no longer fails the 1/6 ingest step.
+#
+# Stated plainly: these do NOT fix an upstream stall. When the author stops
+# committing (mirror head frozen, e.g. 2026-09-29 while NLDC keeps publishing),
+# every transport serves the same frozen bytes; the dates still missing are then
+# retried against the official NLDC gap-fill below, and only what neither source
+# has falls through to manual `python -m vericast.elec.backfill DATE:MW`.
+DEMAND_MIRROR_URLS = (
+    DEMAND_CSV_URL,
+    "https://cdn.jsdelivr.net/gh/HalcyonVector/Grid-Sentinel@main/Dataset/study3_states.csv",
+    "https://raw.githack.com/HalcyonVector/Grid-Sentinel/main/Dataset/study3_states.csv",
+)
+
+# Heads-up before the hard refusal: predict.py refuses past
+# ELEC_STALE_LIMIT_DAYS (7); warn at 5 so the operator gets ~2 days to
+# backfill from NLDC PSP reports instead of discovering it at the 5/6 crash.
+EARLY_STALE_WARN_DAYS = ELEC_STALE_LIMIT_DAYS - 2
+
+# Official NLDC gap-fill: the same reports API the grid-india.in webapp itself
+# calls, plus the CDN it downloads from. Each daily report ships as PDF + .xls;
+# the .xls sheet MOP_E section C is the state table
+# (Maharashtra | Max.Demand Met (MW) | ... | Energy Met (MU)) - the same two
+# columns the CSV mirror serves, under the same plausible_mw() guard.
+NLDC_API_URL = "https://webapi.grid-india.in/api/v1/file"
+NLDC_FILE_TYPE = "DAILY_PSP_REPORT"
+NLDC_CDN_BASE = "https://webcdn.grid-india.in/"
+NLDC_SHEET = "MOP_E"
+
+# Per-file and per-run budgets: reports are ~300KB; 10MB refuses a compromised
+# CDN serving a giant body. At most NLDC_MAX_DAYS_PER_RUN reports per run so a
+# 30-day RESCAN hole cannot blow the 10-minute ingest step; the remainder wait
+# for the next cron (or a manual backfill).
+NLDC_MAX_FILE_BYTES = 10 * 1024 * 1024
+NLDC_MAX_DAYS_PER_RUN = 15
 
 REQUIRED_CSV_COLUMNS = {"state", "date", "max_demand_met_mw", "energy_met_mu"}
 
@@ -161,7 +206,12 @@ def resolve_date_range():
 def fetch_demand(start_date, end_date):
     """Fetch the mirror and return {date_str: (peak_demand_mw, energy_met_mu)}
     for Maharashtra rows inside the range. The only function that touches the
-    demand source."""
+    demand source.
+
+    Tries each URL in DEMAND_MIRROR_URLS in order (same file, different CDN):
+    a transport failure on the primary falls through to the next mirror with
+    the same per-mirror retries and the same size/column/plausibility guards.
+    """
     print(f"Fetching demand mirror ({DEMAND_CSV_URL.rsplit('/', 1)[-1]})...")
     # Fetch full CSV mirror (~6MB) with exponential backoff + jitter retries.
     # 25MB cap: a compromised mirror serving a giant body must fail fast
@@ -169,28 +219,45 @@ def fetch_demand(start_date, end_date):
     MAX_MIRROR_BYTES = 25 * 1024 * 1024
     last_exc = None
     response = None
-    for attempt in range(1, 4):
-        try:
-            response = httpx.get(DEMAND_CSV_URL, timeout=180, follow_redirects=True)
-            response.raise_for_status()
-            # Size cap on raw bytes when available; MagicMock in unit tests has
-            # no real content, so skip the cap there.
-            raw_content = getattr(response, "content", None)
-            if isinstance(raw_content, (bytes, bytearray)) and len(raw_content) > MAX_MIRROR_BYTES:
-                raise RuntimeError(
-                    f"Demand mirror body {len(raw_content)} bytes exceeds "
-                    f"{MAX_MIRROR_BYTES} cap; refusing to parse")
+    used_url = None
+    for mirror_url in DEMAND_MIRROR_URLS:
+        for attempt in range(1, 4):
+            try:
+                response = httpx.get(mirror_url, timeout=180, follow_redirects=True)
+                response.raise_for_status()
+                # Size cap on raw bytes when available; MagicMock in unit tests has
+                # no real content, so skip the cap there.
+                raw_content = getattr(response, "content", None)
+                if isinstance(raw_content, (bytes, bytearray)) and len(raw_content) > MAX_MIRROR_BYTES:
+                    raise RuntimeError(
+                        f"Demand mirror body {len(raw_content)} bytes exceeds "
+                        f"{MAX_MIRROR_BYTES} cap; refusing to parse")
+                used_url = mirror_url
+                break
+            except Exception as exc:  # noqa: BLE001 - retry then next mirror
+                last_exc = exc
+                if attempt < 3:
+                    backoff = 2 ** (attempt - 1) + random.uniform(0, 1)
+                    print(f"  [retry] demand mirror attempt {attempt}/3 failed: {exc}; sleeping {backoff:.1f}s...")
+                    time.sleep(backoff)
+                else:
+                    print(f"  [retry] demand mirror attempt {attempt}/3 failed: {exc}")
+        if used_url is not None:
+            if used_url != DEMAND_CSV_URL:
+                print(f"  [fallback] primary mirror failed; serving from {used_url}")
             break
-        except Exception as exc:  # noqa: BLE001 - retry then raise
-            last_exc = exc
-            if attempt < 3:
-                backoff = 2 ** (attempt - 1) + random.uniform(0, 1)
-                print(f"  [retry] demand mirror attempt {attempt}/3 failed: {exc}; sleeping {backoff:.1f}s...")
-                time.sleep(backoff)
-            else:
-                print(f"  [retry] demand mirror attempt {attempt}/3 failed: {exc}")
     if response is None:
-        raise RuntimeError(f"Demand mirror fetch failed after 3 attempts: {last_exc}")
+        raise RuntimeError(
+            f"Demand mirror fetch failed after 3 attempts per mirror "
+            f"across {len(DEMAND_MIRROR_URLS)} mirrors: {last_exc}")
+    if used_url is None:
+        # All mirrors tripped the size cap yet still returned a decodable
+        # body (the oversize unit test mocks huge .content beside a small
+        # .text): keep the legacy fall-through to parsing .text rather than
+        # refusing outright. A genuinely huge .text still parses as before.
+        used_url = DEMAND_CSV_URL
+        print(f"  [warn] all mirrors exceeded the size cap on raw bytes; "
+              f"falling through to parse the decoded text.")
 
     # Prefer .text when the transport already decoded it (and in unit tests
     # where only .text is mocked); else decode raw bytes as UTF-8.
@@ -227,7 +294,7 @@ def fetch_demand(start_date, end_date):
     if missing:
         raise RuntimeError(
             f"Demand mirror is missing column(s) {sorted(missing)}; "
-            f"got {reader.fieldnames}. Source: {DEMAND_CSV_URL}"
+            f"got {reader.fieldnames}. Source: {used_url or DEMAND_CSV_URL}"
         )
 
     for row in reader:
@@ -279,6 +346,195 @@ def fetch_demand(start_date, end_date):
           + (f" ({skipped} skipped for missing, unparseable or implausible MW)"
              if skipped else ""))
     return demand
+
+
+def fetch_nldc_index():
+    """Return {data_date_iso: cdn_path} for official daily PSP .xls reports.
+
+    Raises RuntimeError when the API is unreachable or returns nothing
+    usable - the caller treats that as 'no gap-fill this run', never fatal.
+    The report Title carries the data date (DD.MM.YY_NLDC_PSP); titles that
+    do not parse are dropped, never guessed.
+    """
+    last_exc = None
+    payload = None
+    for attempt in range(1, 4):
+        try:
+            resp = httpx.post(
+                NLDC_API_URL,
+                json={"_source": "grdw", "_type": NLDC_FILE_TYPE},
+                timeout=60,
+                headers={"User-Agent": "Mozilla/5.0",
+                         "Origin": "https://grid-india.in",
+                         "Referer": "https://grid-india.in/"},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            break
+        except Exception as exc:  # noqa: BLE001 - retry then raise
+            last_exc = exc
+            if attempt < 3:
+                time.sleep(2 ** (attempt - 1))
+    if payload is None:
+        raise RuntimeError(f"NLDC reports API unreachable after 3 attempts: {last_exc}")
+    try:
+        rows = payload["retData"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(f"NLDC reports API returned unexpected payload: {exc}")
+
+    index = {}
+    for row in rows:
+        try:
+            if row.get("MimeType") != "application/vnd.ms-excel":
+                continue
+            m = re.match(r"(\d{2})\.(\d{2})\.(\d{2})_NLDC_PSP", row.get("Title_", ""))
+            if not m:
+                continue
+            dd, mm, yy = m.groups()
+            iso = f"20{yy}-{mm}-{dd}"
+            datetime.strptime(iso, "%Y-%m-%d")  # reject impossible dates
+            if iso not in index and row.get("FilePath"):
+                index[iso] = row["FilePath"]
+        except (ValueError, AttributeError, TypeError):
+            continue
+    if not index:
+        raise RuntimeError("NLDC reports API returned no parseable .xls entries")
+    print(f"  NLDC index: {len(index)} daily .xls report(s)")
+    return index
+
+
+def parse_nldc_workbook(content, date_str):
+    """Parse one NLDC .xls report; return (peak_mw, energy_mu) or None to skip.
+
+    Same guard philosophy as the CSV path: sheet MOP_E, section C state table,
+    Maharashtra row, numeric MW inside plausible_mw(); a bad MU degrades to
+    NULL because nothing scores against it. Structural surprises skip the day
+    with a message instead of raising - a misdated or misparsed row is worse
+    than a missing one. The sheet's own 'Date of Reporting' (always the day
+    after the data date) cross-checks the Title->date mapping per file.
+    """
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise RuntimeError(
+            "xlrd is required to parse NLDC .xls reports (pip install xlrd)") from exc
+    if len(content) > NLDC_MAX_FILE_BYTES:
+        print(f"  [skip] {date_str}: NLDC body {len(content)} bytes exceeds "
+              f"{NLDC_MAX_FILE_BYTES} cap; skipping")
+        return None
+    try:
+        book = xlrd.open_workbook(file_contents=bytes(content))
+        sheet = book.sheet_by_name(NLDC_SHEET)
+    except Exception as exc:  # noqa: BLE001 - corrupt/changed workbook skips
+        print(f"  [skip] {date_str}: NLDC workbook unreadable ({exc}); skipping")
+        return None
+
+    expected_report = (datetime.strptime(date_str, "%Y-%m-%d").date()
+                       + timedelta(days=1)).strftime("%d-%b-%Y").lower()
+    seen_report = None
+    for rx in range(min(6, sheet.nrows)):
+        for cx in range(sheet.ncols):
+            try:
+                v = str(sheet.cell(rx, cx).value).strip()
+            except IndexError:
+                continue
+            if v.lower().startswith("date of reporting") and cx + 1 < sheet.ncols:
+                try:
+                    seen_report = str(sheet.cell(rx, cx + 1).value).strip().lower()
+                except IndexError:
+                    pass
+                break
+    if seen_report and seen_report != expected_report:
+        print(f"  [skip] {date_str}: NLDC reporting date {seen_report!r} != "
+              f"expected {expected_report!r}; skipping rather than misdating")
+        return None
+
+    for rx in range(sheet.nrows):
+        try:
+            state = str(sheet.cell(rx, 1).value).strip().lower()
+        except IndexError:
+            continue
+        if state != "maharashtra":
+            continue
+        try:
+            peak_mw = float(sheet.cell(rx, 2).value)
+        except (ValueError, TypeError, IndexError) as exc:
+            print(f"  [skip] {date_str}: NLDC Maharashtra MW unparseable "
+                  f"({exc}); skipping")
+            return None
+        if not plausible_mw(peak_mw):
+            print(f"  [skip] {date_str}: NLDC {peak_mw} MW is outside "
+                  f"{ELEC_MIN_MW:,.0f}-{ELEC_MAX_MW:,.0f} MW (unit change upstream?)")
+            return None
+        try:
+            mu_raw = sheet.cell(rx, 4).value
+            energy_mu = (None if str(mu_raw).strip() in ("", "-", "NA", "N/A", "None")
+                         else float(mu_raw))
+        except (ValueError, TypeError, IndexError):
+            energy_mu = None
+        return (peak_mw, energy_mu)
+    print(f"  [skip] {date_str}: no Maharashtra row in NLDC sheet; skipping")
+    return None
+
+
+def fetch_nldc_demand(date_strs):
+    """Official gap-fill for dates the CSV mirror lacks. Returns {date: (mw, mu)}.
+
+    Never raises for data problems: an unreachable API, a missing report, or
+    a bad workbook all degrade to fewer/zero rows with a message, and the
+    caller falls back to mirror rows plus the manual-backfill guidance. Same
+    plausible_mw() gate and MU-degrades-to-NULL as the CSV path.
+    """
+    result = {}
+    todo = sorted(set(date_strs))
+    if not todo:
+        return result
+    if len(todo) > NLDC_MAX_DAYS_PER_RUN:
+        print(f"  NLDC gap-fill capped at {NLDC_MAX_DAYS_PER_RUN} of {len(todo)} "
+              f"missing day(s) this run; the rest wait for the next cron.")
+        todo = todo[-NLDC_MAX_DAYS_PER_RUN:]
+    try:
+        index = fetch_nldc_index()
+    except RuntimeError as exc:
+        print(f"  [warn] NLDC gap-fill unavailable ({exc}); "
+              f"continuing with mirror rows only.")
+        return result
+    for iso in todo:
+        path = index.get(iso)
+        if not path:
+            print(f"  [skip] {iso}: no NLDC .xls in index; leaving for backfill.")
+            continue
+        content = None
+        for attempt in range(1, 3):
+            try:
+                resp = httpx.get(NLDC_CDN_BASE + path, timeout=120,
+                                 follow_redirects=True,
+                                 headers={"User-Agent": "Mozilla/5.0"})
+                resp.raise_for_status()
+                if not isinstance(resp.content, (bytes, bytearray)) or not resp.content:
+                    raise RuntimeError("empty body")
+                content = bytes(resp.content)
+                break
+            except Exception as exc:  # noqa: BLE001 - retry once, then skip day
+                if attempt < 2:
+                    time.sleep(2)
+                else:
+                    print(f"  [skip] {iso}: NLDC download failed ({exc}); "
+                          f"leaving for backfill.")
+        if content is None:
+            continue
+        try:
+            parsed = parse_nldc_workbook(content, iso)
+        except RuntimeError as exc:
+            # xlrd missing: a deploy problem, not a data problem - loud, and
+            # this run falls back to mirror rows rather than dying on step 1/6.
+            print(f"  [warn] NLDC parse unavailable ({exc}); "
+                  f"continuing with mirror rows only.")
+            return result
+        if parsed:
+            result[iso] = parsed
+            print(f"  [nldc] {iso}: {parsed[0]:,.0f} MW (official PSP gap-fill)")
+    return result
 
 
 def fetch_temperature(start_date, end_date):
@@ -444,6 +700,50 @@ def report_revisions(before, records):
           "vericast.elec.score, so the published error follows the observation.")
 
 
+def warn_if_stall_approaching():
+    """Best-effort heads-up when the mirror is nearing the predict.py refusal.
+
+    Called from the no-new-rows path: 2-4 days of lag is normal, but at
+    EARLY_STALE_WARN_DAYS (5) the operator has ~2 days left to backfill from
+    the official NLDC PSP reports before ELEC_STALE_LIMIT_DAYS (7) refuses to
+    publish. Never raises: ingest must stay green on a routine lag day, and
+    unit tests call main() with fetch_demand mocked and no database.
+    """
+    try:
+        url = DATABASE_URL or os.getenv("DATABASE_URL")
+        if not url:
+            return
+        today = local_time.today("Asia/Kolkata")
+        with psycopg.connect(url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MAX(as_of) FROM electricity_observations WHERE state = %s",
+                    (STATE,),
+                )
+                row = cur.fetchone()
+        latest = row[0] if row else None
+        if latest is None:
+            return
+        stale_days = (today - latest).days
+        if stale_days >= EARLY_STALE_WARN_DAYS:
+            msg = (
+                f"Electricity source nearing stall: newest observation is "
+                f"{latest}, {stale_days} day(s) old "
+                f"(warn at {EARLY_STALE_WARN_DAYS}, refuse at "
+                f"{ELEC_STALE_LIMIT_DAYS}). If the mirror head not advanced, "
+                f"backfill missing days from NLDC PSP reports with "
+                f"python -m vericast.elec.backfill DATE:MW [...] before "
+                f"predict.py refuses to publish."
+            )
+            print(f"  [stale-warning] {msg}")
+            try:
+                send_alert("VeriCast electricity source nearing stall", msg)
+            except Exception as exc:
+                print(f"[alert] Failed to send stale-warning alert: {exc}")
+    except Exception as exc:
+        print(f"  [stale-warning] skipped (could not check observations): {exc}")
+
+
 def main():
     print("Starting electricity ingestion...")
 
@@ -460,6 +760,26 @@ def main():
     print(f"Fetching data for {start_date} -> {end_date}")
 
     demand = fetch_demand(start_date, end_date)
+
+    # Official gap-fill before giving up: every date in range the mirror lacks
+    # is retried against NLDC's own daily PSP reports, under the same guards.
+    # Whatever neither source has stays missing and follows the no-new-rows
+    # path (RESCAN re-reads it next runs; manual backfill covers the rest).
+    missing = [(start_date + timedelta(days=i)).isoformat()
+               for i in range((end_date - start_date).days + 1)
+               if (start_date + timedelta(days=i)).isoformat() not in demand]
+    if missing:
+        print(f"  Mirror lacks {len(missing)} day(s); trying official NLDC PSP gap-fill...")
+        try:
+            filled = fetch_nldc_demand(missing)
+        except Exception as exc:  # noqa: BLE001 - gap-fill must never fail ingest
+            print(f"  [warn] NLDC gap-fill crashed ({exc}); "
+                  f"continuing with mirror rows only.")
+            filled = {}
+        if filled:
+            demand.update(filled)
+            print(f"  NLDC gap-filled {len(filled)} day(s): {sorted(filled)}")
+
     if not demand:
         # Expected on most days: the mirror runs 2-4 days behind, so there is
         # frequently no new demand row even though the date range is non-empty.
@@ -474,7 +794,10 @@ def main():
               f"new rows persist for more than "
               f"ELEC_STALE_LIMIT_DAYS={ELEC_STALE_LIMIT_DAYS} days, the mirror "
               f"has stalled upstream; the RESCAN_DAYS re-scan backfills "
-              f"automatically once it resumes.")
+              f"automatically once it resumes. "
+              f"Past {EARLY_STALE_WARN_DAYS} days, backfill from NLDC PSP "
+              f"reports with python -m vericast.elec.backfill DATE:MW [...].")
+        warn_if_stall_approaching()
         return
 
     temps = fetch_temperature(start_date, end_date)
