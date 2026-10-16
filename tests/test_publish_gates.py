@@ -15,7 +15,7 @@ both pass a test that only looked at the exception.
 `psycopg.connect` is patched directly rather than through conftest's wire_cursor,
 which exists for app.get_db_connection and does not reach here.
 """
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -97,10 +97,44 @@ def test_a_stalled_pm25_source_publishes_nothing_at_all():
 
     forecast_date is latest_obs + 1 day: a source three days behind produces a
     forecast that is internally consistent and quietly three days out of date.
+
+    Anchored to UTC, not bare today(): pm25/predict.py reads
+    local_time.today("UTC") (PM2.5 target days are UTC), while bare today() is
+    Asia/Kolkata. Between 00:00-05:30 IST the two dates differ by one day, and
+    an IST-anchored "3 days stale" fixture computes as only 2 days stale
+    inside the module - so this test flaked red nightly on the real clock.
     """
-    stalled = local_time.today() - timedelta(days=PM25_STALE_LIMIT_DAYS + 1)
+    stalled = local_time.today("UTC") - timedelta(days=PM25_STALE_LIMIT_DAYS + 1)
 
     with patch("psycopg.connect") as mock_connect, \
+         patch.object(pm25_predict, "load_lightgbm_model", return_value=None):
+        conn, cur = wire_connect(mock_connect, [(stalled, 42.0)])
+
+        with pytest.raises(RuntimeError, match="has stalled"):
+            pm25_predict.make_daily_prediction()
+
+    assert not upserts(cur, "predictions")
+    assert not conn.commit.called
+
+
+def test_a_stalled_pm25_source_still_refuses_between_ist_midnight_and_0530():
+    """Regression test for the nightly flake above, pinned to a fake clock.
+
+    At 01:00 IST the UTC date is still yesterday, so an IST-anchored fixture
+    reads one day fresher inside the module and the refusal never fires. A
+    single fake clock serving both zones reproduces that instant exactly;
+    only a UTC-anchored fixture refuses under it.
+    """
+    ist_date = date(2026, 10, 15)  # 01:00 IST ...
+    utc_date = date(2026, 10, 14)  # ... is 19:30 UTC the previous day
+
+    def fake_today(tz=None):
+        return utc_date if tz == "UTC" else ist_date
+
+    stalled = utc_date - timedelta(days=PM25_STALE_LIMIT_DAYS + 1)
+
+    with patch.object(pm25_predict.local_time, "today", side_effect=fake_today), \
+         patch("psycopg.connect") as mock_connect, \
          patch.object(pm25_predict, "load_lightgbm_model", return_value=None):
         conn, cur = wire_connect(mock_connect, [(stalled, 42.0)])
 
