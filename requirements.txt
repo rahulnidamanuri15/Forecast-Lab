@@ -5,7 +5,7 @@ httpx==0.28.1
 # BIFF .xls on webcdn.grid-india.in; xlrd is pure-python and reads them with
 # no pandas/numpy-sidecar weight.
 xlrd==2.0.2
-psycopg[binary]==3.3.5
+psycopg[binary]==3.3.6
 # Connection pool for app.py - separate distribution from psycopg itself. Without
 # it every request pays a fresh connect + TLS handshake + auth to Neon.
 psycopg-pool==3.3.1
