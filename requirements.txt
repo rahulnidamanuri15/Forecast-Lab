@@ -10,7 +10,7 @@ psycopg[binary]==3.3.6
 # it every request pays a fresh connect + TLS handshake + auth to Neon.
 psycopg-pool==3.3.3
 numpy==2.4.6
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 lightgbm==4.7.0
 fastapi==0.141.1
 uvicorn==0.54.0
