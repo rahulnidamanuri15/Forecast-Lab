@@ -295,14 +295,18 @@ def test_elec_main_branches():
     with patch.object(ei, "resolve_date_range",
                       return_value=(date(2026, 8, 1), date(2026, 8, 5))), \
          patch.object(ei, "fetch_demand", return_value={}), \
-         patch.object(ei, "fetch_nldc_demand", return_value={}):
+         patch.object(ei, "fetch_nldc_demand", return_value={}), \
+         patch.object(ei, "warn_if_stall_approaching"), \
+         patch.object(ei, "assert_fresh_enough"):
         ei.main()  # mirror lag, no demand (NLDC also empty)
     with patch.object(ei, "resolve_date_range",
                       return_value=(date(2026, 8, 1), date(2026, 8, 5))), \
          patch.object(ei, "fetch_demand", return_value={}), \
          patch.object(ei, "fetch_nldc_demand",
-                      side_effect=RuntimeError("api down")):
-        ei.main()  # gap-fill crash must never fail ingest
+                      side_effect=RuntimeError("api down")), \
+         patch.object(ei, "warn_if_stall_approaching"), \
+         patch.object(ei, "assert_fresh_enough"):
+        ei.main()  # gap-fill crash is judged by the freshness gate
     with patch.object(ei, "resolve_date_range",
                       return_value=(date(2026, 8, 1), date(2026, 8, 2))), \
          patch.object(ei, "fetch_demand",
@@ -312,11 +316,27 @@ def test_elec_main_branches():
          patch.object(ei, "fetch_temperature",
                       return_value={"2026-08-01": (30.0, 35.0),
                                     "2026-08-02": (31.0, 36.0)}), \
-         patch.object(ei, "insert_observations") as ins:
+         patch.object(ei, "insert_observations") as ins, \
+         patch.object(ei, "warn_if_stall_approaching"), \
+         patch.object(ei, "assert_fresh_enough"):
         ei.main()
         ins.assert_called_once()
         (records,), _ = ins.call_args
         assert [r[1] for r in records] == ["2026-08-01", "2026-08-02"]
+
+
+def test_elec_main_fails_at_ingest_when_source_is_stale():
+    from vericast.elec import ingest as ei
+
+    with patch.object(ei, "resolve_date_range",
+                      return_value=(date(2026, 8, 1), date(2026, 8, 5))), \
+         patch.object(ei, "fetch_demand", return_value={}), \
+         patch.object(ei, "fetch_nldc_demand", return_value={}), \
+         patch.object(ei, "warn_if_stall_approaching"), \
+         patch.object(ei, "assert_fresh_enough",
+                      side_effect=RuntimeError("source has stalled")):
+        with pytest.raises(RuntimeError, match="source has stalled"):
+            ei.main()
 
 
 # ------------------------------------------------------- pm25 ingest

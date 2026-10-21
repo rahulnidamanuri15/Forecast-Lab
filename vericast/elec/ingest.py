@@ -15,8 +15,10 @@ The tradeoff, stated plainly because the accuracy record depends on it: source
 1 is a third-party mirror, not the operator. It runs 2-4 days behind real time
 and skips the occasional day, so `stale_days` of 2-4 is NORMAL here (unlike
 PM2.5, where Open-Meteo has yesterday by 05:00 UTC). Source 2 is the operator
-itself and is current through yesterday, so a mirror stall no longer blocks
-the pipeline - at most NLDC_MAX_DAYS_PER_RUN gap days per run.
+itself and is current through yesterday. Ingest fails at 1/6 with the source
+status when neither source can supply data within ELEC_STALE_LIMIT_DAYS, so
+predict.py never receives a stale series. At most NLDC_MAX_DAYS_PER_RUN gap
+days are attempted per run; the next run picks up the remainder.
 """
 import os
 import time
@@ -39,6 +41,7 @@ from vericast import (
     RESCAN_DAYS,
     acquire_pipeline_lock,
     local_time,
+    refuse_stale,
     require_database_url,
     require_state_of_record,
     resume_start,
@@ -82,7 +85,12 @@ EARLY_STALE_WARN_DAYS = ELEC_STALE_LIMIT_DAYS - 2
 # the .xls sheet MOP_E section C is the state table
 # (Maharashtra | Max.Demand Met (MW) | ... | Energy Met (MU)) - the same two
 # columns the CSV mirror serves, under the same plausible_mw() guard.
-NLDC_API_URL = "https://webapi.grid-india.in/api/v1/file"
+NLDC_API_BASE = "https://webapi.grid-india.in/api/v1"
+NLDC_API_URL = f"{NLDC_API_BASE}/file"
+NLDC_PAGE_URL = f"{NLDC_API_BASE}/page"
+NLDC_PAGE_PATH = "/en/reports/daily-psp-report"
+NLDC_SOURCE = "GRDW"
+# Legacy symbolic type; fetch_nldc_index() falls back to the page's FileType.
 NLDC_FILE_TYPE = "DAILY_PSP_REPORT"
 NLDC_CDN_BASE = "https://webcdn.grid-india.in/"
 NLDC_SHEET = "MOP_E"
@@ -203,7 +211,7 @@ def resolve_date_range():
     return start, yesterday
 
 
-def fetch_demand(start_date, end_date):
+def fetch_demand(start_date, end_date, diagnostics=None):
     """Fetch the mirror and return {date_str: (peak_demand_mw, energy_met_mu)}
     for Maharashtra rows inside the range. The only function that touches the
     demand source.
@@ -211,6 +219,11 @@ def fetch_demand(start_date, end_date):
     Tries each URL in DEMAND_MIRROR_URLS in order (same file, different CDN):
     a transport failure on the primary falls through to the next mirror with
     the same per-mirror retries and the same size/column/plausibility guards.
+
+    `diagnostics` is an optional dict populated with `mirror_url` and
+    `mirror_head` (the newest Maharashtra date in the CSV, even outside the
+    requested range). Ingest prints it so a stalled mirror is distinguishable
+    from a dead official feed without reading the whole CSV.
     """
     print(f"Fetching demand mirror ({DEMAND_CSV_URL.rsplit('/', 1)[-1]})...")
     # Fetch full CSV mirror (~6MB) with exponential backoff + jitter retries.
@@ -286,6 +299,7 @@ def fetch_demand(start_date, end_date):
     start_str, end_str = start_date.isoformat(), end_date.isoformat()
     demand = {}
     skipped = 0
+    mirror_head = None
 
     reader = csv.DictReader(io.StringIO(text))
     # Fail naming the URL, not with a KeyError mid-loop after some rows have
@@ -301,6 +315,12 @@ def fetch_demand(start_date, end_date):
         if row["state"].strip() != STATE:
             continue
         date_str = row["date"].strip()
+        # Track the head across the whole file, not just the requested range:
+        # the most common failure is a mirror frozen weeks before the range,
+        # and "0 rows in range" alone does not say whether the mirror is dead
+        # or merely behind.
+        if date_str and (mirror_head is None or date_str > mirror_head):
+            mirror_head = date_str
         if not (start_str <= date_str <= end_str):
             continue
 
@@ -342,50 +362,63 @@ def fetch_demand(start_date, end_date):
 
         demand[date_str] = (peak_mw, energy_mu)
 
+    if diagnostics is not None:
+        diagnostics["mirror_url"] = used_url or DEMAND_CSV_URL
+        diagnostics["mirror_head"] = mirror_head
+
     print(f"{STATE} demand days in range: {len(demand)}"
           + (f" ({skipped} skipped for missing, unparseable or implausible MW)"
              if skipped else ""))
+    print(f"  Mirror head: {mirror_head or 'no Maharashtra rows'}")
     return demand
 
 
-def fetch_nldc_index():
-    """Return {data_date_iso: cdn_path} for official daily PSP .xls reports.
-
-    Raises RuntimeError when the API is unreachable or returns nothing
-    usable - the caller treats that as 'no gap-fill this run', never fatal.
-    The report Title carries the data date (DD.MM.YY_NLDC_PSP); titles that
-    do not parse are dropped, never guessed.
-    """
+def _post_nldc_json(url, payload, label):
+    """POST a Grid-India API payload with retries for transport failures."""
     last_exc = None
-    payload = None
     for attempt in range(1, 4):
         try:
             resp = httpx.post(
-                NLDC_API_URL,
-                json={"_source": "grdw", "_type": NLDC_FILE_TYPE},
+                url,
+                json=payload,
                 timeout=60,
                 headers={"User-Agent": "Mozilla/5.0",
                          "Origin": "https://grid-india.in",
                          "Referer": "https://grid-india.in/"},
             )
             resp.raise_for_status()
-            payload = resp.json()
-            break
+            return resp.json()
         except Exception as exc:  # noqa: BLE001 - retry then raise
             last_exc = exc
             if attempt < 3:
                 time.sleep(2 ** (attempt - 1))
-    if payload is None:
-        raise RuntimeError(f"NLDC reports API unreachable after 3 attempts: {last_exc}")
+    raise RuntimeError(f"{label} unreachable after 3 attempts: {last_exc}")
+
+
+def _parse_nldc_index(payload, file_type):
+    """Turn a reports-API payload into {data_date_iso: cdn_path}."""
     try:
         rows = payload["retData"]
     except (KeyError, TypeError) as exc:
-        raise RuntimeError(f"NLDC reports API returned unexpected payload: {exc}")
+        flags = (payload.get("flagType") if isinstance(payload, dict) else None,
+                 payload.get("retMessage") if isinstance(payload, dict) else None)
+        raise RuntimeError(
+            f"NLDC reports API returned unexpected payload for type {file_type!r} "
+            f"({exc}); flagType/retMessage={flags!r}") from exc
+    if not isinstance(rows, list):
+        flags = (payload.get("flagType"), payload.get("retMessage"))
+        raise RuntimeError(
+            f"NLDC reports API returned {type(rows).__name__} for retData, expected list "
+            f"(type {file_type!r}; flagType/retMessage={flags!r})")
 
     index = {}
     for row in rows:
         try:
-            if row.get("MimeType") != "application/vnd.ms-excel":
+            mime = str(row.get("MimeType") or "")
+            path = str(row.get("FilePath") or "")
+            # Do not rely on the MIME type alone; the suffix selects the
+            # parser, and generic MIME types are common on file CDNs.
+            if mime != "application/vnd.ms-excel" and not path.lower().endswith(".xls"):
                 continue
             m = re.match(r"(\d{2})\.(\d{2})\.(\d{2})_NLDC_PSP", row.get("Title_", ""))
             if not m:
@@ -393,13 +426,92 @@ def fetch_nldc_index():
             dd, mm, yy = m.groups()
             iso = f"20{yy}-{mm}-{dd}"
             datetime.strptime(iso, "%Y-%m-%d")  # reject impossible dates
-            if iso not in index and row.get("FilePath"):
-                index[iso] = row["FilePath"]
+            if iso not in index and path:
+                index[iso] = path
         except (ValueError, AttributeError, TypeError):
             continue
     if not index:
-        raise RuntimeError("NLDC reports API returned no parseable .xls entries")
-    print(f"  NLDC index: {len(index)} daily .xls report(s)")
+        sample = [
+            (row.get("Title_"), row.get("MimeType"))
+            for row in rows[:5] if isinstance(row, dict)
+        ]
+        raise RuntimeError(
+            f"NLDC reports API returned no parseable .xls entries for type "
+            f"{file_type!r} ({len(rows)} row(s); sample Title_/MimeType={sample!r})")
+    return index
+
+
+def fetch_nldc_file_type():
+    """Read the daily-PSP FileType from the same page metadata the webapp uses.
+
+    The old hard-coded type name is not guaranteed to survive a site rewrite;
+    the page metadata is the source of truth for the reports API's `_type`.
+    """
+    payload = _post_nldc_json(
+        NLDC_PAGE_URL,
+        {"_source": NLDC_SOURCE, "_relPath": NLDC_PAGE_PATH},
+        "NLDC page metadata API",
+    )
+    try:
+        rows = payload["retData"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f"NLDC page metadata returned unexpected payload: {exc}") from exc
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        raise RuntimeError(
+            f"NLDC page metadata returned no page for {NLDC_PAGE_PATH!r}")
+    file_type = rows[0].get("FileType")
+    if not isinstance(file_type, str) or not file_type.strip():
+        raise RuntimeError(
+            f"NLDC page metadata for {NLDC_PAGE_PATH!r} has no FileType "
+            f"(sample keys={sorted(rows[0])!r})")
+    return file_type.strip()
+
+
+def fetch_nldc_index():
+    """Return {data_date_iso: cdn_path} for official daily PSP .xls reports.
+
+    Raises RuntimeError when the API is unreachable or returns nothing
+    usable. The caller records the reason in its diagnostics, then the
+    freshness gate decides whether the run can publish.
+    The report Title carries the data date (DD.MM.YY_NLDC_PSP); titles that
+    do not parse are dropped, never guessed. A failed index includes a sample
+    of the actual titles/MIME types: the common silent failures are a changed
+    title format or an upstream switch from .xls to .xlsx/PDF.
+
+    The webapp now takes `_type` from the page metadata rather than using a
+    symbolic report name. Try the known type first, then discover the current
+    FileType from the daily-PSP page and retry once.
+    """
+    first_exc = None
+    try:
+        payload = _post_nldc_json(
+            NLDC_API_URL,
+            {"_source": NLDC_SOURCE, "_type": NLDC_FILE_TYPE},
+            "NLDC reports API",
+        )
+        index = _parse_nldc_index(payload, NLDC_FILE_TYPE)
+    except RuntimeError as exc:
+        first_exc = exc
+    else:
+        print(f"  NLDC index: {len(index)} daily .xls report(s); newest {max(index)}")
+        return index
+
+    try:
+        file_type = fetch_nldc_file_type()
+    except RuntimeError:
+        raise first_exc from None
+    if file_type == NLDC_FILE_TYPE:
+        raise first_exc from None
+    print(f"  NLDC reports type {NLDC_FILE_TYPE!r} failed; retrying with "
+          f"page FileType {file_type!r}")
+    payload = _post_nldc_json(
+        NLDC_API_URL,
+        {"_source": NLDC_SOURCE, "_type": file_type},
+        "NLDC reports API",
+    )
+    index = _parse_nldc_index(payload, file_type)
+    print(f"  NLDC index: {len(index)} daily .xls report(s); newest {max(index)}")
     return index
 
 
@@ -477,32 +589,46 @@ def parse_nldc_workbook(content, date_str):
     return None
 
 
-def fetch_nldc_demand(date_strs):
+def fetch_nldc_demand(date_strs, diagnostics=None):
     """Official gap-fill for dates the CSV mirror lacks. Returns {date: (mw, mu)}.
 
     Never raises for data problems: an unreachable API, a missing report, or
-    a bad workbook all degrade to fewer/zero rows with a message, and the
-    caller falls back to mirror rows plus the manual-backfill guidance. Same
-    plausible_mw() gate and MU-degrades-to-NULL as the CSV path.
+    a bad workbook all degrade to fewer/zero rows with a message. The caller
+    records those reasons in `diagnostics` and the freshness gate decides
+    whether the stored series can be published. Same plausible_mw() gate and
+    MU-degrades-to-NULL as the CSV path.
     """
     result = {}
     todo = sorted(set(date_strs))
+    unfilled = []
+    download_failures = 0
+    parse_skips = 0
     if not todo:
         return result
     if len(todo) > NLDC_MAX_DAYS_PER_RUN:
         print(f"  NLDC gap-fill capped at {NLDC_MAX_DAYS_PER_RUN} of {len(todo)} "
               f"missing day(s) this run; the rest wait for the next cron.")
+        if diagnostics is not None:
+            diagnostics["nldc_capped"] = len(todo) - NLDC_MAX_DAYS_PER_RUN
         todo = todo[-NLDC_MAX_DAYS_PER_RUN:]
     try:
         index = fetch_nldc_index()
     except RuntimeError as exc:
         print(f"  [warn] NLDC gap-fill unavailable ({exc}); "
-              f"continuing with mirror rows only.")
+              f"the freshness gate will decide whether this run can publish.")
+        if diagnostics is not None:
+            diagnostics["nldc_index_error"] = str(exc)
+            diagnostics["nldc_unfilled"] = todo
         return result
+    if diagnostics is not None:
+        diagnostics["nldc_index_error"] = None
+        diagnostics["nldc_index_size"] = len(index)
+        diagnostics["nldc_newest_available"] = max(index) if index else None
     for iso in todo:
         path = index.get(iso)
         if not path:
             print(f"  [skip] {iso}: no NLDC .xls in index; leaving for backfill.")
+            unfilled.append(iso)
             continue
         content = None
         for attempt in range(1, 3):
@@ -522,18 +648,32 @@ def fetch_nldc_demand(date_strs):
                     print(f"  [skip] {iso}: NLDC download failed ({exc}); "
                           f"leaving for backfill.")
         if content is None:
+            unfilled.append(iso)
+            download_failures += 1
             continue
         try:
             parsed = parse_nldc_workbook(content, iso)
         except RuntimeError as exc:
             # xlrd missing: a deploy problem, not a data problem - loud, and
-            # this run falls back to mirror rows rather than dying on step 1/6.
+            # the freshness gate decides whether the run can publish.
             print(f"  [warn] NLDC parse unavailable ({exc}); "
-                  f"continuing with mirror rows only.")
+                  f"the freshness gate will decide whether this run can publish.")
+            if diagnostics is not None:
+                diagnostics["nldc_index_error"] = str(exc)
+                diagnostics["nldc_unfilled"] = [
+                    day for day in todo if day not in result]
             return result
         if parsed:
             result[iso] = parsed
             print(f"  [nldc] {iso}: {parsed[0]:,.0f} MW (official PSP gap-fill)")
+        else:
+            unfilled.append(iso)
+            parse_skips += 1
+    if diagnostics is not None:
+        diagnostics["nldc_filled"] = len(result)
+        diagnostics["nldc_unfilled"] = unfilled
+        diagnostics["nldc_download_failures"] = download_failures
+        diagnostics["nldc_parse_skips"] = parse_skips
     return result
 
 
@@ -700,38 +840,92 @@ def report_revisions(before, records):
           "vericast.elec.score, so the published error follows the observation.")
 
 
-def warn_if_stall_approaching():
-    """Best-effort heads-up when the mirror is nearing the predict.py refusal.
+def latest_observation_date():
+    """Newest stored observation for this state, or None.
 
-    Called from the no-new-rows path: 2-4 days of lag is normal, but at
-    EARLY_STALE_WARN_DAYS (5) the operator has ~2 days left to backfill from
-    the official NLDC PSP reports before ELEC_STALE_LIMIT_DAYS (7) refuses to
-    publish. Never raises: ingest must stay green on a routine lag day, and
-    unit tests call main() with fetch_demand mocked and no database.
+    The database is read after the batch is written, so a partial insert is
+    included. This is deliberately the same value predict.py's stale guard
+    reads, not the newest row this run happened to fetch.
+    """
+    require_database_url(DATABASE_URL)
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            return get_last_observed_date(cur)
+
+
+def format_source_status(diagnostics=None):
+    """One-line source summary for logs and the 1/6 failure message."""
+    if not diagnostics:
+        return "Source status unavailable (no fetch diagnostics recorded)."
+    parts = [f"mirror_head={diagnostics.get('mirror_head') or 'unknown'}"]
+    if diagnostics.get("mirror_url"):
+        parts.append(f"mirror_url={diagnostics['mirror_url']}")
+    if "nldc_index_size" in diagnostics:
+        parts.append(f"nldc_index_size={diagnostics['nldc_index_size']}")
+    if diagnostics.get("nldc_newest_available"):
+        parts.append(f"nldc_newest={diagnostics['nldc_newest_available']}")
+    if diagnostics.get("nldc_index_error"):
+        parts.append(f"nldc_error={diagnostics['nldc_index_error']}")
+    if diagnostics.get("nldc_unfilled"):
+        parts.append(f"nldc_unfilled={','.join(diagnostics['nldc_unfilled'])}")
+    if diagnostics.get("nldc_capped"):
+        parts.append(f"nldc_capped={diagnostics['nldc_capped']}")
+    return "Source status: " + "; ".join(parts) + "."
+
+
+def assert_fresh_enough(diagnostics=None):
+    """Fail at 1/6 if the stored series would make predict.py refuse at 5/6.
+
+    Uses the same `refuse_stale` predicate as predict.py, so the ingest gate
+    cannot drift looser than the publish gate. Previously a dead mirror plus a
+    failed NLDC gap-fill exited 0 here; predict then failed five steps later
+    with a message that pointed at the source but could not say what either
+    source had. The raised message now carries that source status.
+    """
+    latest = latest_observation_date()
+    today = local_time.today("Asia/Kolkata")
+    if latest is None:
+        raise RuntimeError(
+            f"No electricity observations for {STATE}; nothing can be forecast. "
+            f"{format_source_status(diagnostics)}")
+    try:
+        stale_days = refuse_stale(latest, today, ELEC_STALE_LIMIT_DAYS, "electricity")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"{exc} No forecast was published. "
+            f"{format_source_status(diagnostics)} "
+            f"Recovery: backfill every missing day from official NLDC PSP "
+            f"reports with `python -m vericast.elec.backfill DATE:MW [...]`, "
+            f"then rerun the pipeline."
+        ) from exc
+    print(f"  Freshness gate: newest observation {latest} is {stale_days} day(s) "
+          f"old (limit {ELEC_STALE_LIMIT_DAYS}).")
+    return stale_days
+
+
+def warn_if_stall_approaching(diagnostics=None):
+    """Best-effort heads-up when the source is nearing the publish refusal.
+
+    2-4 days of lag is normal, but at EARLY_STALE_WARN_DAYS (5) the operator
+    has ~2 days left to backfill from the official NLDC PSP reports before
+    ELEC_STALE_LIMIT_DAYS (7) refuses to publish. Never raises: ingest must
+    stay green on a routine lag day, and the hard failure belongs to
+    assert_fresh_enough().
     """
     try:
-        url = DATABASE_URL or os.getenv("DATABASE_URL")
-        if not url:
-            return
-        today = local_time.today("Asia/Kolkata")
-        with psycopg.connect(url) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT MAX(as_of) FROM electricity_observations WHERE state = %s",
-                    (STATE,),
-                )
-                row = cur.fetchone()
-        latest = row[0] if row else None
+        latest = latest_observation_date()
         if latest is None:
             return
+        today = local_time.today("Asia/Kolkata")
         stale_days = (today - latest).days
         if stale_days >= EARLY_STALE_WARN_DAYS:
             msg = (
                 f"Electricity source nearing stall: newest observation is "
                 f"{latest}, {stale_days} day(s) old "
                 f"(warn at {EARLY_STALE_WARN_DAYS}, refuse at "
-                f"{ELEC_STALE_LIMIT_DAYS}). If the mirror head not advanced, "
-                f"backfill missing days from NLDC PSP reports with "
+                f"{ELEC_STALE_LIMIT_DAYS}). {format_source_status(diagnostics)} "
+                f"If the mirror head has not advanced, backfill missing days "
+                f"from NLDC PSP reports with "
                 f"python -m vericast.elec.backfill DATE:MW [...] before "
                 f"predict.py refuses to publish."
             )
@@ -759,37 +953,40 @@ def main():
 
     print(f"Fetching data for {start_date} -> {end_date}")
 
-    demand = fetch_demand(start_date, end_date)
+    diagnostics = {}
+    demand = fetch_demand(start_date, end_date, diagnostics=diagnostics)
 
     # Official gap-fill before giving up: every date in range the mirror lacks
     # is retried against NLDC's own daily PSP reports, under the same guards.
-    # Whatever neither source has stays missing and follows the no-new-rows
-    # path (RESCAN re-reads it next runs; manual backfill covers the rest).
+    # Whatever neither source has stays missing; assert_fresh_enough() below
+    # fails this step with the source status if that leaves the stored series
+    # beyond the same limit predict.py uses.
     missing = [(start_date + timedelta(days=i)).isoformat()
                for i in range((end_date - start_date).days + 1)
                if (start_date + timedelta(days=i)).isoformat() not in demand]
     if missing:
         print(f"  Mirror lacks {len(missing)} day(s); trying official NLDC PSP gap-fill...")
         try:
-            filled = fetch_nldc_demand(missing)
-        except Exception as exc:  # noqa: BLE001 - gap-fill must never fail ingest
+            filled = fetch_nldc_demand(missing, diagnostics=diagnostics)
+        except Exception as exc:  # noqa: BLE001 - gate decides whether it is fatal
             print(f"  [warn] NLDC gap-fill crashed ({exc}); "
-                  f"continuing with mirror rows only.")
+                  f"the freshness gate will decide whether this run can publish.")
+            diagnostics["nldc_index_error"] = str(exc)
+            diagnostics["nldc_unfilled"] = missing
             filled = {}
         if filled:
             demand.update(filled)
             print(f"  NLDC gap-filled {len(filled)} day(s): {sorted(filled)}")
+    print(f"  {format_source_status(diagnostics)}")
 
     if not demand:
         # Expected on most days: the mirror runs 2-4 days behind, so there is
         # frequently no new demand row even though the date range is non-empty.
         print(f"No new {STATE} demand rows in range (mirror lags real time by "
               f"a few days); nothing to insert.")
-        # Name the range and the consequence: a "no new rows" day is routine,
-        # but a run of them means the mirror itself has stalled, and past
-        # ELEC_STALE_LIMIT_DAYS vericast/elec/predict.py refuses to publish
-        # rather than anchor a forecast to stale data. Surfacing that here -
-        # at the 1/6 step - beats discovering it at the 5/6 crash.
+        # A "no new rows" day is routine; a run of them means the mirror has
+        # stalled and the official gap-fill is not closing the hole. The hard
+        # failure belongs at 1/6, next to the source status, not at 5/6.
         print(f"  Queried {start_date} -> {end_date} at {DEMAND_CSV_URL}. If no "
               f"new rows persist for more than "
               f"ELEC_STALE_LIMIT_DAYS={ELEC_STALE_LIMIT_DAYS} days, the mirror "
@@ -797,7 +994,8 @@ def main():
               f"automatically once it resumes. "
               f"Past {EARLY_STALE_WARN_DAYS} days, backfill from NLDC PSP "
               f"reports with python -m vericast.elec.backfill DATE:MW [...].")
-        warn_if_stall_approaching()
+        warn_if_stall_approaching(diagnostics)
+        assert_fresh_enough(diagnostics)
         return
 
     temps = fetch_temperature(start_date, end_date)
@@ -809,6 +1007,12 @@ def main():
 
     print(f"Prepared {len(records)} daily records for insertion")
     insert_observations(records)
+
+    # Read the database back, not the batch: a partial insert must still fail
+    # here (with the source status) if the newest stored day is beyond the
+    # publish limit. Predict and diagnose then never see a stale series.
+    warn_if_stall_approaching(diagnostics)
+    assert_fresh_enough(diagnostics)
     print("Ingestion completed!")
 
 
