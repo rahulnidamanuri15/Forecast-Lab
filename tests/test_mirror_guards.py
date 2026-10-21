@@ -149,3 +149,18 @@ def test_one_bad_cell_does_not_abandon_the_rows_around_it():
 
     assert rows == {"2026-08-05": (25_000.0, 500.0),
                     "2026-08-07": (27_000.0, None)}
+
+
+def test_fetch_demand_reports_the_mirror_head_outside_the_requested_range():
+    """A frozen mirror must be distinguishable from a merely lagging one."""
+    response = MagicMock()
+    response.text = (CSV_HEADER
+                     + f"{elec_ingest.STATE},2026-08-02,25000.0,500.0\n"
+                     + f"{elec_ingest.STATE},2026-09-10,26000.0,510.0\n")
+    diagnostics = {}
+    with patch.object(elec_ingest.httpx, "get", return_value=response):
+        rows = elec_ingest.fetch_demand(date(2026, 8, 1), date(2026, 8, 31),
+                                        diagnostics=diagnostics)
+    assert rows == {"2026-08-02": (25_000.0, 500.0)}
+    assert diagnostics["mirror_head"] == "2026-09-10"
+    assert diagnostics["mirror_url"] == elec_ingest.DEMAND_CSV_URL

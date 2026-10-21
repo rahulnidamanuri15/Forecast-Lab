@@ -4,14 +4,16 @@ vericast/elec/ingest.py now retries dates the community mirror lacks against
 Grid-India's own daily PSP reports (API index + .xls on webcdn). These tests
 pin the safety properties with stubbed workbooks and mocked transports:
 a misdated, unit-slipped or reshaped report must skip its day, never poison
-the scored record - and a dead API must degrade to mirror-only, never fail
-ingest (step 1/6).
+the scored record. A dead API is recorded in the run diagnostics; the
+freshness gate at the end of ingest decides whether the stored series is
+publishable, so a stale source fails at 1/6 instead of 5/6.
 """
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vericast import ELEC_STALE_LIMIT_DAYS, local_time
 from vericast.elec import ingest as ei
 
 
@@ -117,11 +119,85 @@ def test_index_keeps_xls_only_with_parseable_titles():
             "2026-10-13": "files/grdw/2026/10/13.10.26_NLDC_PSP_216.xls"}
 
 
-def test_index_unreachable_raises_for_the_caller_to_downgrade():
+def test_index_accepts_an_xls_path_when_the_mime_type_is_generic():
+    payload = _index_payload()
+    payload["retData"][0]["MimeType"] = "application/octet-stream"
+    resp = MagicMock()
+    resp.json.return_value = payload
+    with patch.object(ei.httpx, "post", return_value=resp):
+        assert ei.fetch_nldc_index() == {
+            "2026-10-13": "files/grdw/2026/10/13.10.26_NLDC_PSP_216.xls"}
+
+
+def test_index_uses_the_webapps_uppercase_GRDW_source():
+    """The grid-india.in bundle posts _source:"GRDW"; pin that exact body so a
+    case-only regression cannot silently empty the gap-fill index."""
+    resp = MagicMock()
+    resp.json.return_value = _index_payload()
+    with patch.object(ei.httpx, "post", return_value=resp) as mock_post:
+        ei.fetch_nldc_index()
+    assert mock_post.call_args.kwargs["json"] == {
+        "_source": "GRDW", "_type": ei.NLDC_FILE_TYPE}
+
+
+def test_index_falls_back_to_the_page_filetype():
+    """The webapp reads `_type` from page metadata; a renamed FileType should
+    be discovered rather than leaving gap-fill permanently empty."""
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs["json"]))
+        resp = MagicMock()
+        if url == ei.NLDC_PAGE_URL:
+            resp.json.return_value = {"retData": [{"FileType": "F_PG00999"}]}
+        elif kwargs["json"]["_type"] == "F_PG00999":
+            resp.json.return_value = _index_payload()
+        else:
+            resp.json.return_value = {
+                "flagType": 1, "retMessage": "unknown type", "retData": None}
+        return resp
+
+    with patch.object(ei.httpx, "post", side_effect=fake_post):
+        index = ei.fetch_nldc_index()
+    assert index == {
+        "2026-10-13": "files/grdw/2026/10/13.10.26_NLDC_PSP_216.xls"}
+    assert [body for url, body in calls] == [
+        {"_source": "GRDW", "_type": "DAILY_PSP_REPORT"},
+        {"_source": "GRDW", "_relPath": ei.NLDC_PAGE_PATH},
+        {"_source": "GRDW", "_type": "F_PG00999"},
+    ]
+
+
+def test_index_surfaces_api_flagtype_and_message():
+    resp = MagicMock()
+    resp.json.return_value = {
+        "flagType": 1, "retMessage": "invalid source", "retData": None}
+    with patch.object(ei.httpx, "post", return_value=resp):
+        with pytest.raises(RuntimeError, match="invalid source") as excinfo:
+            ei.fetch_nldc_index()
+    assert "flagType" in str(excinfo.value)
+
+
+def test_index_unreachable_raises_for_the_caller_to_record():
     with patch.object(ei.httpx, "post", side_effect=RuntimeError("down")), \
          patch("vericast.elec.ingest.time.sleep"):
         with pytest.raises(RuntimeError, match="unreachable"):
             ei.fetch_nldc_index()
+
+
+def test_index_failure_names_the_titles_and_mime_types():
+    """A silent upstream switch to .xlsx/PDF must say so, not just 'empty'."""
+    resp = MagicMock()
+    resp.json.return_value = {"retData": [
+        {"Title_": "14.10.26_NLDC_PSP",
+         "MimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+         "FilePath": "files/grdw/2026/10/14.10.26_NLDC_PSP_216.xlsx"},
+    ]}
+    with patch.object(ei.httpx, "post", return_value=resp):
+        with pytest.raises(RuntimeError, match="no parseable .xls entries") as excinfo:
+            ei.fetch_nldc_index()
+    assert "14.10.26_NLDC_PSP" in str(excinfo.value)
+    assert "spreadsheetml" in str(excinfo.value)
 
 
 def test_gap_fill_merges_parsed_days_and_skips_unknown_ones(capsys):
@@ -146,10 +222,55 @@ def test_gap_fill_download_failure_skips_the_day():
         assert ei.fetch_nldc_demand(["2026-10-06"]) == {}
 
 
-def test_gap_fill_dead_api_returns_empty_instead_of_raising():
+def test_gap_fill_dead_api_records_reason_instead_of_raising():
+    diagnostics = {}
     with patch.object(ei, "fetch_nldc_index",
                       side_effect=RuntimeError("unreachable")):
-        assert ei.fetch_nldc_demand(["2026-10-06"]) == {}
+        assert ei.fetch_nldc_demand(["2026-10-06"], diagnostics=diagnostics) == {}
+    assert "unreachable" in diagnostics["nldc_index_error"]
+    assert diagnostics["nldc_unfilled"] == ["2026-10-06"]
+
+
+def test_gap_fill_records_unfilled_days_and_newest_index_date():
+    diagnostics = {}
+    with patch.object(ei, "fetch_nldc_index",
+                      return_value={"2026-10-13": "files/x.xls"}):
+        assert ei.fetch_nldc_demand(["2026-10-14"], diagnostics=diagnostics) == {}
+    assert diagnostics["nldc_index_size"] == 1
+    assert diagnostics["nldc_newest_available"] == "2026-10-13"
+    assert diagnostics["nldc_unfilled"] == ["2026-10-14"]
+    assert diagnostics["nldc_filled"] == 0
+
+
+def test_freshness_gate_fails_at_ingest_with_the_source_status():
+    stale = local_time.today("Asia/Kolkata") - timedelta(
+        days=ELEC_STALE_LIMIT_DAYS + 1)
+    diagnostics = {
+        "mirror_head": "2026-09-29",
+        "nldc_newest_available": "2026-10-13",
+        "nldc_index_error": "API unreachable",
+        "nldc_unfilled": ["2026-10-14"],
+    }
+    with patch.object(ei, "latest_observation_date", return_value=stale):
+        with pytest.raises(RuntimeError, match="has stalled") as excinfo:
+            ei.assert_fresh_enough(diagnostics)
+    message = str(excinfo.value)
+    assert "No forecast was published" in message
+    assert "mirror_head=2026-09-29" in message
+    assert "nldc_newest=2026-10-13" in message
+    assert "nldc_unfilled=2026-10-14" in message
+
+
+def test_freshness_gate_accepts_a_series_within_the_limit():
+    fresh = local_time.today("Asia/Kolkata") - timedelta(days=1)
+    with patch.object(ei, "latest_observation_date", return_value=fresh):
+        assert ei.assert_fresh_enough({}) == 1
+
+
+def test_freshness_gate_rejects_an_empty_observations_table():
+    with patch.object(ei, "latest_observation_date", return_value=None):
+        with pytest.raises(RuntimeError, match="No electricity observations"):
+            ei.assert_fresh_enough()
 
 
 def test_gap_fill_is_capped_to_protect_the_ingest_step_budget():
