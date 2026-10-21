@@ -95,6 +95,15 @@ NLDC_FILE_TYPE = "DAILY_PSP_REPORT"
 NLDC_CDN_BASE = "https://webcdn.grid-india.in/"
 NLDC_SHEET = "MOP_E"
 
+# Last-resort bridge when webapi.grid-india.in is unreachable from the runner
+# (the API resets datacenter connections). Grid-Sentinel commits the official
+# .xls reports it downloads; its CSV parser lags, but these raw files do not.
+# Same report, same date/plausibility guards - only the transport changes.
+NLDC_RAW_MIRROR_URL = (
+    "https://raw.githubusercontent.com/HalcyonVector/Grid-Sentinel/main/"
+    "Dataset/Raw/File3_Raw/{dd}.{mm}.{yy}_NLDC_PSP.xls"
+)
+
 # Per-file and per-run budgets: reports are ~300KB; 10MB refuses a compromised
 # CDN serving a giant body. At most NLDC_MAX_DAYS_PER_RUN reports per run so a
 # 30-day RESCAN hole cannot blow the 10-minute ingest step; the remainder wait
@@ -515,6 +524,37 @@ def fetch_nldc_index():
     return index
 
 
+def nldc_raw_mirror_url(date_str):
+    """Grid-Sentinel's normalized raw file for one data date."""
+    day = datetime.strptime(date_str, "%Y-%m-%d")
+    return NLDC_RAW_MIRROR_URL.format(
+        dd=f"{day.day:02d}", mm=f"{day.month:02d}", yy=f"{day.year % 100:02d}")
+
+
+def _download_nldc_report(url):
+    """Download one report with one retry; raises RuntimeError on failure."""
+    last_exc = None
+    for attempt in range(1, 3):
+        try:
+            resp = httpx.get(url, timeout=120, follow_redirects=True,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            content = resp.content
+            if not isinstance(content, (bytes, bytearray)) or not content:
+                raise RuntimeError("empty body")
+            if len(content) > NLDC_MAX_FILE_BYTES:
+                raise RuntimeError(
+                    f"body {len(content)} bytes exceeds {NLDC_MAX_FILE_BYTES} cap")
+            return bytes(content)
+        except Exception as exc:  # noqa: BLE001 - retry once, then report
+            last_exc = exc
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
+                break
+            if attempt < 2:
+                time.sleep(2)
+    raise RuntimeError(f"download failed: {last_exc}")
+
+
 def parse_nldc_workbook(content, date_str):
     """Parse one NLDC .xls report; return (peak_mw, energy_mu) or None to skip.
 
@@ -597,6 +637,11 @@ def fetch_nldc_demand(date_strs, diagnostics=None):
     records those reasons in `diagnostics` and the freshness gate decides
     whether the stored series can be published. Same plausible_mw() gate and
     MU-degrades-to-NULL as the CSV path.
+
+    If webapi.grid-india.in is blocked from the runner, fall back to the same
+    official .xls reports mirrored raw by Grid-Sentinel. That mirror is not a
+    new source of truth: it is the file the existing CSV mirror was built
+    from, parsed under these same guards.
     """
     result = {}
     todo = sorted(set(date_strs))
@@ -611,43 +656,38 @@ def fetch_nldc_demand(date_strs, diagnostics=None):
         if diagnostics is not None:
             diagnostics["nldc_capped"] = len(todo) - NLDC_MAX_DAYS_PER_RUN
         todo = todo[-NLDC_MAX_DAYS_PER_RUN:]
+    index = None
     try:
         index = fetch_nldc_index()
     except RuntimeError as exc:
-        print(f"  [warn] NLDC gap-fill unavailable ({exc}); "
-              f"the freshness gate will decide whether this run can publish.")
+        print(f"  [warn] official NLDC index unavailable ({exc}); "
+              f"trying Grid-Sentinel raw PSP mirror...")
         if diagnostics is not None:
             diagnostics["nldc_index_error"] = str(exc)
-            diagnostics["nldc_unfilled"] = todo
-        return result
-    if diagnostics is not None:
-        diagnostics["nldc_index_error"] = None
-        diagnostics["nldc_index_size"] = len(index)
-        diagnostics["nldc_newest_available"] = max(index) if index else None
+    else:
+        if diagnostics is not None:
+            diagnostics["nldc_index_error"] = None
+            diagnostics["nldc_index_size"] = len(index)
+            diagnostics["nldc_newest_available"] = max(index) if index else None
+
+    raw_filled = []
     for iso in todo:
-        path = index.get(iso)
-        if not path:
-            print(f"  [skip] {iso}: no NLDC .xls in index; leaving for backfill.")
-            unfilled.append(iso)
-            continue
-        content = None
-        for attempt in range(1, 3):
-            try:
-                resp = httpx.get(NLDC_CDN_BASE + path, timeout=120,
-                                 follow_redirects=True,
-                                 headers={"User-Agent": "Mozilla/5.0"})
-                resp.raise_for_status()
-                if not isinstance(resp.content, (bytes, bytearray)) or not resp.content:
-                    raise RuntimeError("empty body")
-                content = bytes(resp.content)
-                break
-            except Exception as exc:  # noqa: BLE001 - retry once, then skip day
-                if attempt < 2:
-                    time.sleep(2)
-                else:
-                    print(f"  [skip] {iso}: NLDC download failed ({exc}); "
-                          f"leaving for backfill.")
-        if content is None:
+        if index is None:
+            url = nldc_raw_mirror_url(iso)
+            source = "Grid-Sentinel raw PSP fallback"
+        else:
+            path = index.get(iso)
+            if not path:
+                print(f"  [skip] {iso}: no NLDC .xls in index; leaving for backfill.")
+                unfilled.append(iso)
+                continue
+            url = NLDC_CDN_BASE + path
+            source = "official PSP gap-fill"
+        try:
+            content = _download_nldc_report(url)
+        except RuntimeError as exc:
+            print(f"  [skip] {iso}: {source} download failed ({exc}); "
+                  f"leaving for backfill.")
             unfilled.append(iso)
             download_failures += 1
             continue
@@ -659,13 +699,15 @@ def fetch_nldc_demand(date_strs, diagnostics=None):
             print(f"  [warn] NLDC parse unavailable ({exc}); "
                   f"the freshness gate will decide whether this run can publish.")
             if diagnostics is not None:
-                diagnostics["nldc_index_error"] = str(exc)
+                diagnostics["nldc_parse_error"] = str(exc)
                 diagnostics["nldc_unfilled"] = [
                     day for day in todo if day not in result]
             return result
         if parsed:
             result[iso] = parsed
-            print(f"  [nldc] {iso}: {parsed[0]:,.0f} MW (official PSP gap-fill)")
+            if index is None:
+                raw_filled.append(iso)
+            print(f"  [nldc] {iso}: {parsed[0]:,.0f} MW ({source})")
         else:
             unfilled.append(iso)
             parse_skips += 1
@@ -674,6 +716,13 @@ def fetch_nldc_demand(date_strs, diagnostics=None):
         diagnostics["nldc_unfilled"] = unfilled
         diagnostics["nldc_download_failures"] = download_failures
         diagnostics["nldc_parse_skips"] = parse_skips
+        if index is None:
+            diagnostics["nldc_raw_filled"] = len(raw_filled)
+        if result:
+            newest = max(result)
+            prior = diagnostics.get("nldc_newest_available")
+            if prior is None or newest > prior:
+                diagnostics["nldc_newest_available"] = newest
     return result
 
 
@@ -866,6 +915,10 @@ def format_source_status(diagnostics=None):
         parts.append(f"nldc_newest={diagnostics['nldc_newest_available']}")
     if diagnostics.get("nldc_index_error"):
         parts.append(f"nldc_error={diagnostics['nldc_index_error']}")
+    if diagnostics.get("nldc_raw_filled") is not None:
+        parts.append(f"nldc_raw_filled={diagnostics['nldc_raw_filled']}")
+    if diagnostics.get("nldc_parse_error"):
+        parts.append(f"nldc_parse_error={diagnostics['nldc_parse_error']}")
     if diagnostics.get("nldc_unfilled"):
         parts.append(f"nldc_unfilled={','.join(diagnostics['nldc_unfilled'])}")
     if diagnostics.get("nldc_capped"):

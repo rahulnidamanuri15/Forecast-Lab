@@ -225,10 +225,40 @@ def test_gap_fill_download_failure_skips_the_day():
 def test_gap_fill_dead_api_records_reason_instead_of_raising():
     diagnostics = {}
     with patch.object(ei, "fetch_nldc_index",
-                      side_effect=RuntimeError("unreachable")):
+                      side_effect=RuntimeError("unreachable")), \
+         patch.object(ei, "_download_nldc_report",
+                      side_effect=RuntimeError("raw mirror down")):
         assert ei.fetch_nldc_demand(["2026-10-06"], diagnostics=diagnostics) == {}
     assert "unreachable" in diagnostics["nldc_index_error"]
+    assert diagnostics["nldc_raw_filled"] == 0
     assert diagnostics["nldc_unfilled"] == ["2026-10-06"]
+
+
+def test_gap_fill_uses_raw_mirror_when_the_api_is_blocked():
+    """The official API resets CI datacenter connections; the same official
+    .xls files are available raw in the mirror repo, so use them rather than
+    leaving the series to go stale."""
+    diagnostics = {}
+    with patch.object(ei, "fetch_nldc_index",
+                      side_effect=RuntimeError("connection reset")), \
+         patch.object(ei, "_download_nldc_report",
+                      return_value=b"xls-bytes") as mock_download, \
+         patch.object(ei, "parse_nldc_workbook",
+                      return_value=(32118.0, 677.9)):
+        rows = ei.fetch_nldc_demand(["2026-10-14", "2026-10-15"],
+                                    diagnostics=diagnostics)
+    assert rows == {"2026-10-14": (32118.0, 677.9),
+                    "2026-10-15": (32118.0, 677.9)}
+    assert [call.args[0] for call in mock_download.call_args_list] == [
+        ei.nldc_raw_mirror_url("2026-10-14"),
+        ei.nldc_raw_mirror_url("2026-10-15"),
+    ]
+    assert mock_download.call_args_list[0].args[0].endswith(
+        "/14.10.26_NLDC_PSP.xls")
+    assert diagnostics["nldc_index_error"] == "connection reset"
+    assert diagnostics["nldc_raw_filled"] == 2
+    assert diagnostics["nldc_newest_available"] == "2026-10-15"
+    assert diagnostics["nldc_unfilled"] == []
 
 
 def test_gap_fill_records_unfilled_days_and_newest_index_date():
