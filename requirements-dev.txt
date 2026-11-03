@@ -4,6 +4,6 @@
 #   pip install -r requirements.txt -r requirements-dev.txt
 -r requirements.txt
 
-pytest==9.1.1
+pytest==9.2.0
 # Coverage for the score/features branches CI otherwise never measures.
 pytest-cov==7.1.0
